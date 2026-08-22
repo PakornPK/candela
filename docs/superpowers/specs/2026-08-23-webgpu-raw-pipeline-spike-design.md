@@ -45,6 +45,8 @@ decode(fileBytes: ArrayBuffer) -> {
 
 No color matrix, no thumbnails, no metadata beyond what normalize/demosaic need — per brief, color science (DCP, camera profiles) is explicitly out of scope for this spike.
 
+`wrapper.cpp` is written in modern C++ (C++17): RAII/smart pointers for any owned buffer, no manual `new`/`delete`, `std::span` for viewing LibRaw's output instead of raw pointer+length pairs. This is also what makes the bounds-checking in section 6 straightforward to get right.
+
 ## 2. GPU pipeline
 
 `gpu/pipeline.ts` runs everything after upload on the GPU — no readback to the WASM heap except on export (not built in this spike).
@@ -62,6 +64,8 @@ Old GPU textures are `.destroy()`ed on every new file load — this is what the 
 ## 3. UI
 
 Vanilla DOM, no framework — the entire UI surface is one file input, two range sliders, and a canvas. State is 3 primitives (`exposureEV`, `wbShift`, current decoded file) plus a reference to the current GPU texture set. There's no list rendering, no routing, no shared state across components — the surface a framework would help with doesn't exist here. If the product moves past the spike into a real catalog/thumbnail-grid UI (see brief's "After the spike"), framework choice gets revisited then, not now.
+
+This is a cheap decision to reverse: `main.ts` is the only thing that talks to the DOM. `gpu/pipeline.ts` and the wasm wrapper expose a plain `load()`/`render()` API and know nothing about how state is managed. Swapping in a framework later means rewriting `main.ts` alone — the GPU pipeline is untouched.
 
 ```ts
 // main.ts — single file, plain event listeners
