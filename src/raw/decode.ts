@@ -59,6 +59,13 @@ export async function decode(fileBytes: ArrayBuffer): Promise<DecodedRaw> {
   const bytes = new Uint8Array(fileBytes);
 
   const inputPtr = module._malloc(bytes.length);
+  // _malloc returns 0 on failure rather than throwing (e.g. growth refused
+  // or MAXIMUM_MEMORY reached -- plausible with large raw files). Writing
+  // through a null pointer via HEAPU8.set would silently corrupt address 0
+  // instead of failing cleanly, so this must be checked before the write.
+  if (inputPtr === 0) {
+    throw new DecodeError(-1003);
+  }
   module.HEAPU8.set(bytes, inputPtr);
 
   const resultPtr = module.ccall('decode', 'number', ['number', 'number'], [inputPtr, bytes.length]);
