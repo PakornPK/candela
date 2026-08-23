@@ -121,3 +121,23 @@ Considered auth server + subscription + PostgreSQL backend — rejected: it dire
 ## Out of scope (per brief, unchanged)
 
 DCP/color profiles, op graph, UI framework, catalog/thumbnail cache, masking/healing/lens correction/export presets, AI features, plugin API.
+
+## Results (2026-08-23)
+
+Measured against the brief's three pass/fail targets, in a live browser session (Chrome/Electron on macOS, Apple Silicon Mac, 10 logical cores) via the actual running app — not synthetic benchmarks. Full methodology and every commit involved in fixing what these numbers exposed are in [`docs/superpowers/plans/2026-08-23-webgpu-raw-pipeline-spike.md`](../plans/2026-08-23-webgpu-raw-pipeline-spike.md)'s Task 10.
+
+| Metric | Target | Result | Pass/fail |
+|---|---|---|---|
+| Decode + demosaic | < 2s | **106–305ms** (10 runs) | ✅ Pass, with a scale caveat below |
+| Slider → frame update | < 50ms | **5.1ms** | ✅ Pass |
+| Memory stability, 10 file loads | No crash | **10/10 loads succeeded**, no console errors, no timing degradation (106–285ms range, no upward trend) | ✅ Pass |
+
+**Test file:** `src/raw/__fixtures__/sample.raf` — a real Fujifilm X100V raw file, 6384×4182 (≈26.7MP), X-Trans sensor, ~59MB. This is the only real raw file available during the spike; no CR3/ARW/true-60MP file was on hand.
+
+**Caveats on these results, read before treating them as the final verdict:**
+
+1. **Not tested at the brief's stated 60MP scale.** 26.7MP is the largest file actually run through the pipeline. The brief's target camera formats (CR3/ARW) commonly go up to ~60MP; decode time in particular is expected to scale with resolution (LibRaw's own work, not something this GPU-first architecture avoids), so the 2s budget is unverified at 2.2x the tested pixel count. The architecture itself imposes no obvious 60MP-specific bottleneck (GPU memory is decoupled from the WASM 4GB ceiling by design, per the brief's core architectural constraint), but this is inference, not measurement — treat the 2s pass as **provisional** until a real ~60MP file is run.
+2. **X-Trans, not Bayer.** The fixture's sensor is X-Trans (6×6 CFA), while every shader in this pipeline (`demosaic.wgsl` especially) assumes standard 2×2 Bayer — a known, deliberately-accepted limitation (see the design's CFA-pattern discussion). The rendered image has visible color artifacts as a result. This does **not** invalidate the timing numbers: the GPU does the same amount of compute work (same resolution, same shader dispatch count) regardless of whether the CFA lookup table produces a colorimetrically correct result, so decode+demosaic and slider→frame timings are still valid performance measurements of the pipeline architecture. It does mean no one has yet visually confirmed the pipeline produces a *correct-looking* image on real Bayer input.
+3. **Timing methodology fix mid-spike:** the perf harness (Task 9) initially measured only command *encode+submit* time, not actual GPU execution completion (`GPUQueue.submit()` returns before the GPU finishes). This was caught in code review and fixed by awaiting `GPUQueue.onSubmittedWorkDone()` before stopping each timer — the numbers in the table above are post-fix and reflect real GPU completion time. Pre-fix numbers (0.1–3.1ms slider→frame, 144–483ms decode+demosaic on the same file) were artificially low and are superseded.
+
+**Overall assessment:** the core technical assumption — that a WebGPU compute pipeline can decode, demosaic, and interactively adjust a raw photo fast enough for a usable editor — holds on every measurement taken. The architecture is not the risk. The two open items before calling this fully validated are getting a real ~60MP Bayer file through the pipeline (caveat 1) and a visual correctness check against one (caveat 2, which also resolves once a Bayer file is available, since the current fixture structurally cannot look right regardless of shader correctness).
