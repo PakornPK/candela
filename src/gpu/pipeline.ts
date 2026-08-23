@@ -1,0 +1,216 @@
+import unpackShader from '../shaders/unpack.wgsl?raw';
+import demosaicShader from '../shaders/demosaic.wgsl?raw';
+import adjustShader from '../shaders/adjust.wgsl?raw';
+import blitShader from '../shaders/blit.wgsl?raw';
+import { packAdjustUniforms, packCfaPattern, type AdjustState } from './uniforms';
+import type { DecodedRaw } from '../raw/decode';
+
+export class Pipeline {
+  private bayerTexture: GPUTexture | null = null;
+  private normalizedTexture: GPUTexture | null = null;
+  private demosaicedTexture: GPUTexture | null = null;
+  private adjustedTexture: GPUTexture | null = null;
+
+  private readonly unpackPipeline: GPUComputePipeline;
+  private readonly demosaicPipeline: GPUComputePipeline;
+  private readonly adjustPipeline: GPUComputePipeline;
+  private readonly blitPipeline: GPURenderPipeline;
+
+  private readonly levelsBuffer: GPUBuffer;
+  private readonly cfaBuffer: GPUBuffer;
+  private readonly adjustUniformBuffer: GPUBuffer;
+  private readonly blitSampler: GPUSampler;
+
+  private constructor(
+    private readonly device: GPUDevice,
+    private readonly context: GPUCanvasContext,
+    format: GPUTextureFormat,
+  ) {
+    this.unpackPipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: device.createShaderModule({ code: unpackShader }), entryPoint: 'main' },
+    });
+    this.demosaicPipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: device.createShaderModule({ code: demosaicShader }), entryPoint: 'main' },
+    });
+    this.adjustPipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: device.createShaderModule({ code: adjustShader }), entryPoint: 'main' },
+    });
+    this.blitPipeline = device.createRenderPipeline({
+      layout: 'auto',
+      vertex: { module: device.createShaderModule({ code: blitShader }), entryPoint: 'vs_main' },
+      fragment: {
+        module: device.createShaderModule({ code: blitShader }),
+        entryPoint: 'fs_main',
+        targets: [{ format }],
+      },
+      primitive: { topology: 'triangle-list' },
+    });
+
+    this.levelsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.cfaBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.adjustUniformBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.blitSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+  }
+
+  static async create(canvas: HTMLCanvasElement): Promise<Pipeline> {
+    if (!navigator.gpu) {
+      throw new Error('WebGPU is not supported in this browser.');
+    }
+    const adapter = await navigator.gpu.requestAdapter();
+    if (!adapter) {
+      throw new Error('No WebGPU adapter available.');
+    }
+    // Default device limits cap maxTextureDimension2D far below what a 60MP
+    // raw needs (e.g. ~9500x6300 for a 61MP sensor) — request the adapter's
+    // actual max so texture creation in load() doesn't throw on real files.
+    const device = await adapter.requestDevice({
+      requiredLimits: { maxTextureDimension2D: adapter.limits.maxTextureDimension2D },
+    });
+    const context = canvas.getContext('webgpu') as GPUCanvasContext;
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    context.configure({ device, format, alphaMode: 'opaque' });
+    return new Pipeline(device, context, format);
+  }
+
+  // Destroys prior textures before uploading the new file's data — this is
+  // what keeps GPU memory stable across repeated file loads.
+  load(raw: DecodedRaw): void {
+    this.bayerTexture?.destroy();
+    this.normalizedTexture?.destroy();
+    this.demosaicedTexture?.destroy();
+    this.adjustedTexture?.destroy();
+
+    const size = [raw.width, raw.height];
+
+    this.bayerTexture = this.device.createTexture({
+      size,
+      format: 'r16uint',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    this.device.queue.writeTexture(
+      { texture: this.bayerTexture },
+      raw.bayerData,
+      { bytesPerRow: raw.width * 2 },
+      { width: raw.width, height: raw.height },
+    );
+
+    this.normalizedTexture = this.device.createTexture({
+      size,
+      format: 'r32float',
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.demosaicedTexture = this.device.createTexture({
+      size,
+      format: 'rgba16float',
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.adjustedTexture = this.device.createTexture({
+      size,
+      format: 'rgba16float',
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+    });
+
+    this.device.queue.writeBuffer(this.levelsBuffer, 0, new Float32Array([raw.blackLevel, raw.whiteLevel, 0, 0]));
+    this.device.queue.writeBuffer(this.cfaBuffer, 0, packCfaPattern(raw.cfaPattern));
+
+    const encoder = this.device.createCommandEncoder();
+    this.dispatchUnpack(encoder, raw.width, raw.height);
+    this.dispatchDemosaic(encoder, raw.width, raw.height);
+    this.device.queue.submit([encoder.finish()]);
+  }
+
+  private workgroupCounts(width: number, height: number): [number, number] {
+    return [Math.ceil(width / 8), Math.ceil(height / 8)];
+  }
+
+  private dispatchUnpack(encoder: GPUCommandEncoder, width: number, height: number): void {
+    const bindGroup = this.device.createBindGroup({
+      layout: this.unpackPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: this.bayerTexture!.createView() },
+        { binding: 1, resource: this.normalizedTexture!.createView() },
+        { binding: 2, resource: { buffer: this.levelsBuffer } },
+      ],
+    });
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.unpackPipeline);
+    pass.setBindGroup(0, bindGroup);
+    const [wx, wy] = this.workgroupCounts(width, height);
+    pass.dispatchWorkgroups(wx, wy);
+    pass.end();
+  }
+
+  private dispatchDemosaic(encoder: GPUCommandEncoder, width: number, height: number): void {
+    const bindGroup = this.device.createBindGroup({
+      layout: this.demosaicPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: this.normalizedTexture!.createView() },
+        { binding: 1, resource: this.demosaicedTexture!.createView() },
+        { binding: 2, resource: { buffer: this.cfaBuffer } },
+      ],
+    });
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.demosaicPipeline);
+    pass.setBindGroup(0, bindGroup);
+    const [wx, wy] = this.workgroupCounts(width, height);
+    pass.dispatchWorkgroups(wx, wy);
+    pass.end();
+  }
+
+  // Re-runs only adjust + blit — this is the < 50ms slider path (no re-demosaic).
+  render(state: AdjustState): void {
+    if (!this.demosaicedTexture || !this.adjustedTexture) return;
+    this.device.queue.writeBuffer(this.adjustUniformBuffer, 0, packAdjustUniforms(state));
+
+    const encoder = this.device.createCommandEncoder();
+    const width = this.demosaicedTexture.width;
+    const height = this.demosaicedTexture.height;
+
+    const adjustBindGroup = this.device.createBindGroup({
+      layout: this.adjustPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: this.demosaicedTexture.createView() },
+        { binding: 1, resource: this.adjustedTexture.createView() },
+        { binding: 2, resource: { buffer: this.adjustUniformBuffer } },
+      ],
+    });
+    const adjustPass = encoder.beginComputePass();
+    adjustPass.setPipeline(this.adjustPipeline);
+    adjustPass.setBindGroup(0, adjustBindGroup);
+    const [wx, wy] = this.workgroupCounts(width, height);
+    adjustPass.dispatchWorkgroups(wx, wy);
+    adjustPass.end();
+
+    const blitBindGroup = this.device.createBindGroup({
+      layout: this.blitPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: this.adjustedTexture.createView() },
+        { binding: 1, resource: this.blitSampler },
+      ],
+    });
+    const renderPass = encoder.beginRenderPass({
+      colorAttachments: [{
+        view: this.context.getCurrentTexture().createView(),
+        loadOp: 'clear',
+        storeOp: 'store',
+        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+      }],
+    });
+    renderPass.setPipeline(this.blitPipeline);
+    renderPass.setBindGroup(0, blitBindGroup);
+    renderPass.draw(3);
+    renderPass.end();
+
+    this.device.queue.submit([encoder.finish()]);
+  }
+
+  destroy(): void {
+    this.bayerTexture?.destroy();
+    this.normalizedTexture?.destroy();
+    this.demosaicedTexture?.destroy();
+    this.adjustedTexture?.destroy();
+  }
+}
