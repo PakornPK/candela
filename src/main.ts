@@ -40,6 +40,12 @@ async function init(): Promise<void> {
 
     clearError();
     try {
+      // Tracks the brief's < 2s decode+demosaic budget. Stops right after
+      // load() (which does the actual decode + demosaic dispatch), not
+      // after the later render() call (adjust + blit, a separate stage) --
+      // and waits for the GPU to actually finish the work, not just for
+      // submit() to return, since submit() enqueues commands without
+      // blocking on their execution.
       const start = performance.now();
       const decoded = await decode(await file.arrayBuffer());
       // WebGPU derives the swap-chain size from the canvas's current
@@ -49,9 +55,10 @@ async function init(): Promise<void> {
       canvas.width = decoded.width;
       canvas.height = decoded.height;
       pipeline.load(decoded);
-      pipeline.render(state);
+      await pipeline.waitForGPU();
       const elapsed = performance.now() - start;
       console.log(`decode+demosaic: ${elapsed.toFixed(1)}ms (${decoded.width}x${decoded.height})`);
+      pipeline.render(state);
     } catch (err) {
       if (err instanceof DecodeError) {
         showError(`Couldn't read this file (LibRaw error ${err.code}).`);
@@ -61,9 +68,13 @@ async function init(): Promise<void> {
     }
   });
 
-  function onSliderInput(): void {
+  // Tracks the brief's < 50ms slider->frame budget. Waits for the GPU to
+  // actually finish (see waitForGPU()'s comment) rather than just timing
+  // how long it takes to encode and submit the adjust+blit commands.
+  async function onSliderInput(): Promise<void> {
     const start = performance.now();
     pipeline.render(state);
+    await pipeline.waitForGPU();
     const elapsed = performance.now() - start;
     console.log(`slider->frame: ${elapsed.toFixed(1)}ms`);
   }

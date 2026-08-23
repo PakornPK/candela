@@ -210,6 +210,15 @@ export class Pipeline {
     this.device.queue.submit([encoder.finish()]);
   }
 
+  // Resolves once GPU work submitted so far has actually finished executing,
+  // not just been encoded/submitted -- queue.submit() itself returns as soon
+  // as commands are enqueued. Needed for accurate perf timing (see main.ts):
+  // without this, performance.now() around load()/render() measures
+  // encode+submit time only, silently excluding real GPU execution time.
+  async waitForGPU(): Promise<void> {
+    await this.device.queue.onSubmittedWorkDone();
+  }
+
   destroy(): void {
     this.bayerTexture?.destroy();
     this.normalizedTexture?.destroy();
