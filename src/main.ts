@@ -5,6 +5,8 @@ import type { AdjustState } from './gpu/uniforms';
 const fileInput = document.querySelector<HTMLInputElement>('#file')!;
 const exposureSlider = document.querySelector<HTMLInputElement>('#exposure')!;
 const wbSlider = document.querySelector<HTMLInputElement>('#wb')!;
+const exposureValue = document.querySelector<HTMLOutputElement>('#exposure-value')!;
+const wbValue = document.querySelector<HTMLOutputElement>('#wb-value')!;
 const canvas = document.querySelector<HTMLCanvasElement>('#canvas')!;
 const errorEl = document.querySelector<HTMLParagraphElement>('#error')!;
 
@@ -30,8 +32,16 @@ function updateSliderFill(slider: HTMLInputElement): void {
   slider.style.setProperty('--to', `${Math.max(centerPct, valuePct)}%`);
 }
 
+// Shows the numeric value next to each slider, sign included so 0 reads
+// unambiguously as neutral (matches Lightroom's readout style).
+function updateReadout(output: HTMLOutputElement, value: number, decimals: number): void {
+  output.textContent = (value >= 0 ? '+' : '') + value.toFixed(decimals);
+}
+
 updateSliderFill(exposureSlider);
 updateSliderFill(wbSlider);
+updateReadout(exposureValue, Number(exposureSlider.value), 1);
+updateReadout(wbValue, Number(wbSlider.value), 2);
 
 // Interactive listeners are attached only after init() succeeds (see below)
 // so a file pick or slider move can never race Pipeline.create() -- with no
@@ -97,12 +107,14 @@ async function init(): Promise<void> {
   exposureSlider.addEventListener('input', () => {
     state.exposureEV = Number(exposureSlider.value);
     updateSliderFill(exposureSlider);
+    updateReadout(exposureValue, state.exposureEV, 1);
     onSliderInput();
   });
 
   wbSlider.addEventListener('input', () => {
     state.wbShift = Number(wbSlider.value);
     updateSliderFill(wbSlider);
+    updateReadout(wbValue, state.wbShift, 2);
     onSliderInput();
   });
 }
