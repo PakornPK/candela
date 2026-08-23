@@ -6,6 +6,22 @@
 #include <memory>
 #include "wrapper_core.h"
 
+// LibRaw::adjust_bl() is protected -- it's the method that consolidates a
+// per-tile black-level map (used by some cameras, Fuji RAF among them, see
+// its own "Fuji RAF dng" comment) into imgdata.color.cblack[0..3]. We need
+// it before reading black level, but calling processor.subtract_black()
+// (the public method that also calls adjust_bl()) is not an option: it
+// requires raw2image() to have already run, which builds a full
+// interpolated-position 4-channel CPU image -- exactly the CPU-side
+// demosaic work this project's GPU-first architecture exists to avoid
+// (CLAUDE.md: "No readback to the WASM heap except on export"). This
+// derived class does nothing but republish the one protected method we
+// need, without touching LibRaw's own vendored source.
+class LibRawWithPublicAdjustBl : public LibRaw {
+public:
+    using LibRaw::adjust_bl;
+};
+
 extern "C" {
 
 // Ownership crosses the JS/WASM boundary as a raw pointer by necessity —
@@ -53,7 +69,7 @@ DecodeResult* decode(const uint8_t* file_bytes, uint32_t length) {
     try {
         result = new DecodeResult{};
 
-        LibRaw processor;
+        LibRawWithPublicAdjustBl processor;
 
         int ret = processor.open_buffer(const_cast<uint8_t*>(file_bytes), length);
         if (ret != LIBRAW_SUCCESS) {
@@ -80,9 +96,35 @@ DecodeResult* decode(const uint8_t* file_bytes, uint32_t length) {
         auto bayer_owned = std::make_unique<uint16_t[]>(pixel_count);
         std::memcpy(bayer_owned.get(), raw.raw_image, pixel_count * sizeof(uint16_t));
 
+        // Some cameras (Fuji RAF among them, per LibRaw's own adjust_bl()
+        // comment "Fuji RAF dng") store black level as a per-tile map in
+        // cblack[6+] rather than directly in cblack[0..3] until adjust_bl()
+        // consolidates it. adjust_bl() only touches color-metadata fields,
+        // not the raw pixel buffer already copied above, so it's safe to
+        // call here regardless of camera type.
+        processor.adjust_bl();
+
+        // imgdata.color.black alone is 0 on many cameras (this Fuji X100V
+        // fixture included) -- the real per-pixel black offset lives in
+        // imgdata.color.cblack[0..3] (one value per Bayer/X-Trans channel
+        // slot, now consolidated by adjust_bl() above) and LibRaw's own
+        // subtract_black_internal() always adds both together. We use
+        // max(cblack[0..3]) rather than per-channel values since this
+        // wrapper reports a single scalar (matching unpack.wgsl's Levels
+        // struct, which normalizes uniformly) -- max errs toward slightly
+        // lifting blacks on some channels rather than crushing any channel,
+        // which is the safer failure mode per CLAUDE.md's warning that
+        // under-subtracting crushes/clips the image.
+        uint16_t max_cblack = 0;
+        for (int c = 0; c < 4; ++c) {
+            if (processor.imgdata.color.cblack[c] > max_cblack) {
+                max_cblack = static_cast<uint16_t>(processor.imgdata.color.cblack[c]);
+            }
+        }
+
         result->width = width;
         result->height = height;
-        result->black_level = processor.imgdata.color.black;
+        result->black_level = processor.imgdata.color.black + max_cblack;
         result->white_level = processor.imgdata.color.maximum;
         result->bayer_data = bayer_owned.release(); // ownership crosses to JS; freed via free_decoded()
         result->error_code = 0;
