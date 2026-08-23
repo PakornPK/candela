@@ -8,9 +8,19 @@ add_library(wrapper_core STATIC wrapper_core.cpp)
 target_include_directories(wrapper_core PUBLIC .)
 
 if(EMSCRIPTEN)
-  add_subdirectory(third_party/libraw)
+  # LibRaw ships no CMake support of its own (dropped in 2014, per
+  # third_party/libraw/README.cmake) -- it's built separately via its native
+  # autotools workflow (emconfigure/emmake) in build.sh, which must run
+  # before this configure step. We link the resulting static lib as a plain
+  # file path rather than a CMake target.
+  set(LIBRAW_STATIC_LIB ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libraw/lib/.libs/libraw_r.a)
+  if(NOT EXISTS ${LIBRAW_STATIC_LIB})
+    message(FATAL_ERROR "LibRaw static lib not found at ${LIBRAW_STATIC_LIB} -- run build.sh, which builds it via emconfigure/emmake before this CMake configure step.")
+  endif()
+
   add_executable(libraw wrapper.cpp)
-  target_link_libraries(libraw PRIVATE wrapper_core raw_r)
+  target_include_directories(libraw PRIVATE third_party/libraw)
+  target_link_libraries(libraw PRIVATE wrapper_core ${LIBRAW_STATIC_LIB})
   target_link_options(libraw PRIVATE
     "-sMODULARIZE=1"
     "-sEXPORT_NAME=createLibRawModule"
