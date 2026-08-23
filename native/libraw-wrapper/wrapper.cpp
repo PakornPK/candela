@@ -16,7 +16,10 @@ extern "C" {
 // success. bayer_data is safely nullptr on those error paths (delete[] on
 // nullptr is a no-op), but the DecodeResult struct itself is still
 // heap-allocated and must still be freed. JS must call free_decoded() exactly
-// once per decode() call, success or failure.
+// once per decode() call, success or failure -- EXCEPT for the one case where
+// decode() itself returns nullptr (the DecodeResult allocation failed): there
+// is nothing to free in that case. free_decoded() null-checks defensively, so
+// calling it on a null return is harmless, just unnecessary.
 struct DecodeResult {
     uint32_t width = 0;
     uint32_t height = 0;
@@ -45,9 +48,11 @@ struct DecodeResult {
 
 EMSCRIPTEN_KEEPALIVE
 DecodeResult* decode(const uint8_t* file_bytes, uint32_t length) {
-    auto* result = new DecodeResult{};
+    DecodeResult* result = nullptr;
 
     try {
+        result = new DecodeResult{};
+
         LibRaw processor;
 
         int ret = processor.open_buffer(const_cast<uint8_t*>(file_bytes), length);
@@ -93,9 +98,17 @@ DecodeResult* decode(const uint8_t* file_bytes, uint32_t length) {
         // Allocation failure (new/make_unique) or any other exception raised
         // by the wrapper's own code, as opposed to a LibRaw-internal error
         // (which open_buffer/unpack already convert to a return code -- see
-        // build.sh's -fexceptions comment). result is a valid, already
-        // heap-allocated DecodeResult*; only mark it as failed and hand it
-        // back so the caller's free_decoded() contract stays uniform.
+        // build.sh's -fexceptions comment).
+        if (result == nullptr) {
+            // The DecodeResult allocation itself is what threw -- there is no
+            // heap-allocated struct left to report the error through, and
+            // nothing for the caller to free. Return nullptr; JS must
+            // null-check decode()'s return value before touching it.
+            return nullptr;
+        }
+        // result is a valid, already heap-allocated DecodeResult*; only mark
+        // it as failed and hand it back so the caller's free_decoded()
+        // contract stays uniform.
         result->error_code = -1001;
     }
 
