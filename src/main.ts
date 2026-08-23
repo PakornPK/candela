@@ -18,9 +18,12 @@ function clearError(): void {
   errorEl.textContent = '';
 }
 
-let pipeline: Pipeline;
-
+// Interactive listeners are attached only after init() succeeds (see below)
+// so a file pick or slider move can never race Pipeline.create() -- with no
+// pipeline yet assigned, that race would surface as a misleading "failed to
+// decode" message instead of the real "WebGPU is not available" cause.
 async function init(): Promise<void> {
+  let pipeline: Pipeline;
   try {
     pipeline = await Pipeline.create(canvas);
   } catch (err) {
@@ -28,37 +31,42 @@ async function init(): Promise<void> {
     fileInput.disabled = true;
     exposureSlider.disabled = true;
     wbSlider.disabled = true;
+    return;
   }
-}
 
-fileInput.addEventListener('change', async () => {
-  const file = fileInput.files?.[0];
-  if (!file) return;
+  fileInput.addEventListener('change', async () => {
+    const file = fileInput.files?.[0];
+    if (!file) return;
 
-  clearError();
-  try {
-    const decoded = await decode(await file.arrayBuffer());
-    canvas.width = decoded.width;
-    canvas.height = decoded.height;
-    pipeline.load(decoded);
-    pipeline.render(state);
-  } catch (err) {
-    if (err instanceof DecodeError) {
-      showError(`Couldn't read this file (LibRaw error ${err.code}).`);
-    } else {
-      showError(err instanceof Error ? err.message : 'Failed to decode file.');
+    clearError();
+    try {
+      const decoded = await decode(await file.arrayBuffer());
+      // WebGPU derives the swap-chain size from the canvas's current
+      // dimensions at render time, not from whatever size was in effect
+      // when Pipeline.create() called configure() -- so this must happen
+      // before load()/render(), not before create().
+      canvas.width = decoded.width;
+      canvas.height = decoded.height;
+      pipeline.load(decoded);
+      pipeline.render(state);
+    } catch (err) {
+      if (err instanceof DecodeError) {
+        showError(`Couldn't read this file (LibRaw error ${err.code}).`);
+      } else {
+        showError(err instanceof Error ? err.message : 'Failed to decode file.');
+      }
     }
-  }
-});
+  });
 
-exposureSlider.addEventListener('input', () => {
-  state.exposureEV = Number(exposureSlider.value);
-  pipeline?.render(state);
-});
+  exposureSlider.addEventListener('input', () => {
+    state.exposureEV = Number(exposureSlider.value);
+    pipeline.render(state);
+  });
 
-wbSlider.addEventListener('input', () => {
-  state.wbShift = Number(wbSlider.value);
-  pipeline?.render(state);
-});
+  wbSlider.addEventListener('input', () => {
+    state.wbShift = Number(wbSlider.value);
+    pipeline.render(state);
+  });
+}
 
 init();
