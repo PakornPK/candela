@@ -20,16 +20,16 @@ function clearError(): void {
   errorEl.textContent = '';
 }
 
-// Colors the slider track from its center (value 0) toward the thumb,
+// Colors the slider track from its neutral point toward the thumb,
 // matching Lightroom's fill-from-zero style instead of the browser
 // default fill-from-left-edge.
-function updateSliderFill(slider: HTMLInputElement): void {
+function updateSliderFill(slider: HTMLInputElement, neutral = 0): void {
   const min = Number(slider.min);
   const max = Number(slider.max);
-  const centerPct = ((0 - min) / (max - min)) * 100;
+  const neutralPct = ((neutral - min) / (max - min)) * 100;
   const valuePct = ((Number(slider.value) - min) / (max - min)) * 100;
-  slider.style.setProperty('--from', `${Math.min(centerPct, valuePct)}%`);
-  slider.style.setProperty('--to', `${Math.max(centerPct, valuePct)}%`);
+  slider.style.setProperty('--from', `${Math.min(neutralPct, valuePct)}%`);
+  slider.style.setProperty('--to', `${Math.max(neutralPct, valuePct)}%`);
 }
 
 // Shows the numeric value next to each slider, sign included so 0 reads
@@ -38,10 +38,21 @@ function updateReadout(output: HTMLOutputElement, value: number, decimals: numbe
   output.textContent = (value >= 0 ? '+' : '') + value.toFixed(decimals);
 }
 
+// The WB slider is displayed in Kelvin (Lightroom-style Temp control),
+// but `AdjustState.wbShift` and the gain math in gpu/uniforms.ts stay in
+// their existing [-1, 1] shift space -- this is just the UI-facing
+// conversion, not a physically accurate color-temperature model.
+const WB_NEUTRAL_KELVIN = 5500;
+const WB_KELVIN_HALF_RANGE = 3500;
+
+function kelvinToShift(kelvin: number): number {
+  return (kelvin - WB_NEUTRAL_KELVIN) / WB_KELVIN_HALF_RANGE;
+}
+
 updateSliderFill(exposureSlider);
-updateSliderFill(wbSlider);
-updateReadout(exposureValue, Number(exposureSlider.value), 1);
-updateReadout(wbValue, Number(wbSlider.value), 2);
+updateSliderFill(wbSlider, WB_NEUTRAL_KELVIN);
+updateReadout(exposureValue, Number(exposureSlider.value), 2);
+wbValue.textContent = `${Number(wbSlider.value)}K`;
 
 // Interactive listeners are attached only after init() succeeds (see below)
 // so a file pick or slider move can never race Pipeline.create() -- with no
@@ -107,14 +118,15 @@ async function init(): Promise<void> {
   exposureSlider.addEventListener('input', () => {
     state.exposureEV = Number(exposureSlider.value);
     updateSliderFill(exposureSlider);
-    updateReadout(exposureValue, state.exposureEV, 1);
+    updateReadout(exposureValue, state.exposureEV, 2);
     onSliderInput();
   });
 
   wbSlider.addEventListener('input', () => {
-    state.wbShift = Number(wbSlider.value);
-    updateSliderFill(wbSlider);
-    updateReadout(wbValue, state.wbShift, 2);
+    const kelvin = Number(wbSlider.value);
+    state.wbShift = kelvinToShift(kelvin);
+    updateSliderFill(wbSlider, WB_NEUTRAL_KELVIN);
+    wbValue.textContent = `${kelvin}K`;
     onSliderInput();
   });
 }
