@@ -107,14 +107,18 @@ DecodeResult* decode(const uint8_t* file_bytes, uint32_t length) {
         // imgdata.color.black alone is 0 on many cameras (this Fuji X100V
         // fixture included) -- the real per-pixel black offset lives in
         // imgdata.color.cblack[0..3] (one value per Bayer/X-Trans channel
-        // slot, now consolidated by adjust_bl() above) and LibRaw's own
-        // subtract_black_internal() always adds both together. We use
-        // max(cblack[0..3]) rather than per-channel values since this
-        // wrapper reports a single scalar (matching unpack.wgsl's Levels
-        // struct, which normalizes uniformly) -- max errs toward slightly
-        // lifting blacks on some channels rather than crushing any channel,
-        // which is the safer failure mode per CLAUDE.md's warning that
-        // under-subtracting crushes/clips the image.
+        // slot). adjust_bl() above already folds color.black into every
+        // cblack[c] (see its final loop: "for c in 0..3: cblack[c] +=
+        // black"), so cblack[c] alone is the complete black level --
+        // adding color.black again would double-count it. This matches
+        // LibRaw's own subtract_black_internal(), which subtracts cblack[c]
+        // alone, never color.black + cblack[c]. We use max(cblack[0..3])
+        // rather than per-channel values since this wrapper reports a
+        // single scalar (matching unpack.wgsl's Levels struct, which
+        // normalizes uniformly) -- max errs toward slightly lifting blacks
+        // on some channels rather than crushing any channel, which is the
+        // safer failure mode per CLAUDE.md's warning that under-subtracting
+        // crushes/clips the image.
         uint16_t max_cblack = 0;
         for (int c = 0; c < 4; ++c) {
             if (processor.imgdata.color.cblack[c] > max_cblack) {
@@ -124,7 +128,7 @@ DecodeResult* decode(const uint8_t* file_bytes, uint32_t length) {
 
         result->width = width;
         result->height = height;
-        result->black_level = processor.imgdata.color.black + max_cblack;
+        result->black_level = max_cblack;
         result->white_level = processor.imgdata.color.maximum;
         result->bayer_data = bayer_owned.release(); // ownership crosses to JS; freed via free_decoded()
         result->error_code = 0;
