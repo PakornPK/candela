@@ -26,7 +26,14 @@ if(EMSCRIPTEN)
   target_link_options(libraw PRIVATE
     "-sMODULARIZE=1"
     "-sEXPORT_NAME=createLibRawModule"
-    "-sEXPORTED_RUNTIME_METHODS=[\"ccall\",\"cwrap\"]"
+    # HEAPU8/HEAPU16: decode.ts (Task 5) writes the input file's bytes
+    # directly into wasm linear memory via a malloc'd pointer and reads the
+    # decoded Bayer buffer back out the same way -- both require direct
+    # access to the memory-view typed arrays. ccall/cwrap alone only cover
+    # calling exported functions, not touching memory, so both views must be
+    # requested explicitly here (Emscripten does not attach them to the
+    # Module object by default).
+    "-sEXPORTED_RUNTIME_METHODS=[\"ccall\",\"cwrap\",\"HEAPU8\",\"HEAPU16\"]"
     "-sEXPORTED_FUNCTIONS=[\"_malloc\",\"_free\"]"
     "-sALLOW_MEMORY_GROWTH=1"
     "-sENVIRONMENT=web,node"
