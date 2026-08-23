@@ -40,6 +40,7 @@ async function init(): Promise<void> {
 
     clearError();
     try {
+      const start = performance.now();
       const decoded = await decode(await file.arrayBuffer());
       // WebGPU derives the swap-chain size from the canvas's current
       // dimensions at render time, not from whatever size was in effect
@@ -49,6 +50,8 @@ async function init(): Promise<void> {
       canvas.height = decoded.height;
       pipeline.load(decoded);
       pipeline.render(state);
+      const elapsed = performance.now() - start;
+      console.log(`decode+demosaic: ${elapsed.toFixed(1)}ms (${decoded.width}x${decoded.height})`);
     } catch (err) {
       if (err instanceof DecodeError) {
         showError(`Couldn't read this file (LibRaw error ${err.code}).`);
@@ -58,14 +61,21 @@ async function init(): Promise<void> {
     }
   });
 
+  function onSliderInput(): void {
+    const start = performance.now();
+    pipeline.render(state);
+    const elapsed = performance.now() - start;
+    console.log(`slider->frame: ${elapsed.toFixed(1)}ms`);
+  }
+
   exposureSlider.addEventListener('input', () => {
     state.exposureEV = Number(exposureSlider.value);
-    pipeline.render(state);
+    onSliderInput();
   });
 
   wbSlider.addEventListener('input', () => {
     state.wbShift = Number(wbSlider.value);
-    pipeline.render(state);
+    onSliderInput();
   });
 }
 
