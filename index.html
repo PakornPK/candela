@@ -10,6 +10,41 @@
         max-width: 100%;
         height: auto;
       }
+
+      /* Lightroom-style slider: filled bar grows from center (0) toward
+         the thumb, instead of the browser default fill-from-left-edge. */
+      input[type='range'] {
+        -webkit-appearance: none;
+        appearance: none;
+        width: 100%;
+        height: 4px;
+        border-radius: 2px;
+        background: linear-gradient(
+          to right,
+          #ccc 0%,
+          #ccc var(--from, 50%),
+          #4a90d9 var(--from, 50%),
+          #4a90d9 var(--to, 50%),
+          #ccc var(--to, 50%),
+          #ccc 100%
+        );
+      }
+      input[type='range']::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: #4a90d9;
+        cursor: pointer;
+      }
+      input[type='range']::-moz-range-thumb {
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        border: none;
+        background: #4a90d9;
+        cursor: pointer;
+      }
     </style>
   </head>
   <body>

@@ -18,6 +18,21 @@ function clearError(): void {
   errorEl.textContent = '';
 }
 
+// Colors the slider track from its center (value 0) toward the thumb,
+// matching Lightroom's fill-from-zero style instead of the browser
+// default fill-from-left-edge.
+function updateSliderFill(slider: HTMLInputElement): void {
+  const min = Number(slider.min);
+  const max = Number(slider.max);
+  const centerPct = ((0 - min) / (max - min)) * 100;
+  const valuePct = ((Number(slider.value) - min) / (max - min)) * 100;
+  slider.style.setProperty('--from', `${Math.min(centerPct, valuePct)}%`);
+  slider.style.setProperty('--to', `${Math.max(centerPct, valuePct)}%`);
+}
+
+updateSliderFill(exposureSlider);
+updateSliderFill(wbSlider);
+
 // Interactive listeners are attached only after init() succeeds (see below)
 // so a file pick or slider move can never race Pipeline.create() -- with no
 // pipeline yet assigned, that race would surface as a misleading "failed to
@@ -81,11 +96,13 @@ async function init(): Promise<void> {
 
   exposureSlider.addEventListener('input', () => {
     state.exposureEV = Number(exposureSlider.value);
+    updateSliderFill(exposureSlider);
     onSliderInput();
   });
 
   wbSlider.addEventListener('input', () => {
     state.wbShift = Number(wbSlider.value);
+    updateSliderFill(wbSlider);
     onSliderInput();
   });
 }
