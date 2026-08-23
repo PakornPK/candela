@@ -1,0 +1,6 @@
+node_modules/
+dist/
+src/wasm/
+native/libraw-wrapper/build-wasm/
+native/libraw-wrapper/build-native/
+*.local
