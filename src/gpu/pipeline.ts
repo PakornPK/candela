@@ -69,7 +69,10 @@ export class Pipeline {
     const device = await adapter.requestDevice({
       requiredLimits: { maxTextureDimension2D: adapter.limits.maxTextureDimension2D },
     });
-    const context = canvas.getContext('webgpu') as GPUCanvasContext;
+    const context = canvas.getContext('webgpu');
+    if (!context) {
+      throw new Error('Failed to get a WebGPU canvas context.');
+    }
     const format = navigator.gpu.getPreferredCanvasFormat();
     context.configure({ device, format, alphaMode: 'opaque' });
     return new Pipeline(device, context, format);
