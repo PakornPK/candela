@@ -25,6 +25,13 @@ if(EMSCRIPTEN)
   # -sSTACK_SIZE) via CMake cache variables -- see build.sh for why.
   target_link_options(libraw PRIVATE
     "-sMODULARIZE=1"
+    # EXPORT_ES6: without this, Emscripten emits a UMD-style module whose
+    # CJS/AMD export branches never execute in the browser (native ES
+    # `import` sees no exports at all -- "does not provide an export named
+    # 'default'"). This project's package.json has "type": "module", so the
+    # browser and Vite both load this file as a real ES module; EXPORT_ES6
+    # makes Emscripten emit a genuine `export default` to match.
+    "-sEXPORT_ES6=1"
     "-sEXPORT_NAME=createLibRawModule"
     # HEAPU8/HEAPU16: decode.ts (Task 5) writes the input file's bytes
     # directly into wasm linear memory via a malloc'd pointer and reads the
