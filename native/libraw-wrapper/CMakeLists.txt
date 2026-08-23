@@ -21,6 +21,8 @@ if(EMSCRIPTEN)
   add_executable(libraw wrapper.cpp)
   target_include_directories(libraw PRIVATE third_party/libraw)
   target_link_libraries(libraw PRIVATE wrapper_core ${LIBRAW_STATIC_LIB})
+  # NOTE: build.sh passes additional required flags (-fexceptions,
+  # -sSTACK_SIZE) via CMake cache variables -- see build.sh for why.
   target_link_options(libraw PRIVATE
     "-sMODULARIZE=1"
     "-sEXPORT_NAME=createLibRawModule"
