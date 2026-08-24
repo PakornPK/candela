@@ -15,4 +15,12 @@ describe('pathPrefixRange', () => {
     const { lower, upper } = pathPrefixRange('');
     expect('anything.cr3' >= lower && 'anything.cr3' < upper).toBe(true);
   });
+
+  it('does NOT exclude a sibling folder when the prefix lacks a trailing slash', () => {
+    // Documents the caller contract: without a trailing "/" (or ""),
+    // pathPrefixRange cannot distinguish "day1" as a folder boundary from
+    // "day1" as a plain string prefix, so "day10/..." is not excluded.
+    const { upper } = pathPrefixRange('day1');
+    expect('day10/photo.cr3' > upper).toBe(false);
+  });
 });
