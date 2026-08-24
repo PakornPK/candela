@@ -93,6 +93,7 @@ async function init(): Promise<void> {
 
   let currentFileId: number | null = null;
   let currentEditState: EditState | null = null;
+  let openRequestId = 0;
 
   function renderOps(ops: Op[]): void {
     pipeline.render(opsToAdjustState(ops));
@@ -126,6 +127,7 @@ async function init(): Promise<void> {
   // failure is, instead of becoming an unhandled rejection.
   async function openFile(record: FileRecord): Promise<void> {
     clearError();
+    const requestId = ++openRequestId;
     try {
       if (!(await ensureReadPermission(record.handle))) {
         showError(`Permission needed to read "${record.name}" -- click it again to retry.`);
@@ -135,6 +137,8 @@ async function init(): Promise<void> {
       const start = performance.now();
       const file = await record.handle.getFile();
       const decoded = await decode(await file.arrayBuffer());
+      if (requestId !== openRequestId) return; // a newer click superseded this one -- drop our result
+
       canvas.width = decoded.width;
       canvas.height = decoded.height;
       pipeline.load(decoded);
@@ -144,6 +148,7 @@ async function init(): Promise<void> {
 
       currentFileId = record.id;
       currentEditState = await loadEditState(db, record.id);
+      if (requestId !== openRequestId) return; // superseded again while loading edit state
       const ops = currentOps(currentEditState);
       applyOpsToSliders(ops);
       renderOps(ops);
