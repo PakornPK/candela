@@ -146,9 +146,10 @@ async function init(): Promise<void> {
       const elapsed = performance.now() - start;
       console.log(`decode+demosaic: ${elapsed.toFixed(1)}ms (${decoded.width}x${decoded.height})`);
 
+      const editState = await loadEditState(db, record.id);
+      if (requestId !== openRequestId) return; // superseded while loading edit state
       currentFileId = record.id;
-      currentEditState = await loadEditState(db, record.id);
-      if (requestId !== openRequestId) return; // superseded again while loading edit state
+      currentEditState = editState;
       const ops = currentOps(currentEditState);
       applyOpsToSliders(ops);
       renderOps(ops);
