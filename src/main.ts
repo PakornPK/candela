@@ -170,7 +170,11 @@ async function init(): Promise<void> {
   async function commitCurrentEdit(): Promise<void> {
     if (currentFileId === null || !currentEditState) return;
     currentEditState = commitEdit(currentEditState, currentOpsFromSliders());
-    await saveEditState(db, currentFileId, currentEditState);
+    try {
+      await saveEditState(db, currentFileId, currentEditState);
+    } catch (err) {
+      showError(err instanceof Error ? err.message : 'Failed to save edit.');
+    }
   }
 
   exposureSlider.addEventListener('input', () => {
@@ -196,10 +200,14 @@ async function init(): Promise<void> {
     if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z') return;
     e.preventDefault();
     currentEditState = e.shiftKey ? redo(currentEditState) : undo(currentEditState);
-    await saveEditState(db, currentFileId, currentEditState);
     const ops = currentOps(currentEditState);
     applyOpsToSliders(ops);
     renderOps(ops);
+    try {
+      await saveEditState(db, currentFileId, currentEditState);
+    } catch (err) {
+      showError(err instanceof Error ? err.message : 'Failed to save undo/redo.');
+    }
   });
 
   // AbortError means the user opened the folder picker and dismissed it --
