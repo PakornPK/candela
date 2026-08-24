@@ -230,12 +230,15 @@ async function init(): Promise<void> {
   // permission request during the walk) goes through showError like every
   // other failure path in this file.
   addFolderButton.addEventListener('click', async () => {
+    addFolderButton.disabled = true;
     try {
       await importFolder(db);
       await renderCatalog();
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
       showError(err instanceof Error ? err.message : 'Failed to import folder.');
+    } finally {
+      addFolderButton.disabled = false;
     }
   });
 
