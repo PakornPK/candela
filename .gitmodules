@@ -1,3 +1,4 @@
 [submodule "native/libraw-wrapper/third_party/libraw"]
 	path = native/libraw-wrapper/third_party/libraw
 	url = https://github.com/LibRaw/LibRaw.git
+	ignore = dirty
