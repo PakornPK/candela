@@ -252,21 +252,28 @@ async function init(): Promise<void> {
     clearError();
     const requestId = ++openRequestId;
     try {
+      // Checked separately from ensureReadPermission() below so we know
+      // whether THIS call is what granted access, vs. access already having
+      // been granted (the common case for every click after the first).
+      // Clearing/re-rendering the thumbnail grid is not free (it re-fetches
+      // every visible cell) -- doing that on every single file click, not
+      // just the one that actually changed permission state, was visibly
+      // janky (competing with this very decode() call for the shared WASM
+      // module) and added nothing once permission was already settled.
+      const alreadyGranted = (await record.handle.queryPermission({ mode: 'read' })) === 'granted';
+
       if (!(await ensureReadPermission(record.handle))) {
         showError(`Permission needed to read "${record.name}" -- click it again to retry.`);
         return;
       }
 
-      // Permission may have just been granted for the first time this
-      // session (e.g. right after a reload, before which every cell's
-      // getThumbnail call above would have resolved undefined and stayed
-      // cached that way). This is the one place permission actually
-      // changes via a real user gesture, so it's the right place to give
-      // the grid one fresh retry pass -- not on every scroll tick, which
-      // would repeatedly hit requestPermission() without a gesture and
-      // never succeed until the user clicks something.
-      thumbnailRequests.clear();
-      renderVisibleRows();
+      // Only the transition from not-granted to granted needs a thumbnail
+      // retry pass -- see the comment above. Once permission is already
+      // settled, every later click skips straight to decoding.
+      if (!alreadyGranted) {
+        thumbnailRequests.clear();
+        renderVisibleRows();
+      }
 
       const start = performance.now();
       const file = await record.handle.getFile();
