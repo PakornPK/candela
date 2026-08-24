@@ -10,15 +10,19 @@ import { loadEditState, saveEditState } from './catalog/editsStore';
 import { commitEdit, undo, redo, currentOps } from './catalog/editHistory';
 import { opsToAdjustState } from './catalog/adjust';
 import { getOrExtractThumbnail } from './catalog/thumbnails';
-import { isExposureOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord } from './catalog/types';
+import { isExposureOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord } from './catalog/types';
+import { getState, selectFile, subscribe, type ModuleId } from './app/state';
+import { registerModule, switchModule } from './app/modules';
+import { createFilmstrip } from './app/filmstrip';
+import { keyToAction } from './app/shortcuts';
 
 const COLUMNS_PER_ROW = 6; // fixed for this pass -- see plan header
 const CELL_SIZE = 160; // px, matches index.html's .catalog-cell
 const HEADING_HEIGHT = 24; // px, matches index.html's .catalog-heading
 
 const addFolderButton = document.querySelector<HTMLButtonElement>('#add-folder')!;
-const catalogScroll = document.querySelector<HTMLDivElement>('#catalog-scroll')!;
-const catalogGrid = document.querySelector<HTMLDivElement>('#catalog-grid')!;
+const libraryScroll = document.querySelector<HTMLDivElement>('#library-scroll')!;
+const libraryGrid = document.querySelector<HTMLDivElement>('#library-grid')!;
 const exposureSlider = document.querySelector<HTMLInputElement>('#exposure')!;
 const wbSlider = document.querySelector<HTMLInputElement>('#wb')!;
 const exposureValue = document.querySelector<HTMLOutputElement>('#exposure-value')!;
@@ -27,6 +31,13 @@ const canvas = document.querySelector<HTMLCanvasElement>('#canvas')!;
 const errorEl = document.querySelector<HTMLDivElement>('#error')!;
 const errorMessageEl = document.querySelector<HTMLParagraphElement>('#error-message')!;
 const errorDetailEl = document.querySelector<HTMLPreElement>('#error-detail')!;
+const folderListEl = document.querySelector<HTMLDivElement>('#folder-list')!;
+const metadataEl = document.querySelector<HTMLDivElement>('#metadata-panel')!;
+const historyListEl = document.querySelector<HTMLDivElement>('#history-list')!;
+const undoButton = document.querySelector<HTMLButtonElement>('#undo-btn')!;
+const redoButton = document.querySelector<HTMLButtonElement>('#redo-btn')!;
+const filmstripScroll = document.querySelector<HTMLElement>('#filmstrip')!;
+const filmstripTrack = document.querySelector<HTMLDivElement>('#filmstrip-track')!;
 
 function showError(message: string, detail?: string): void {
   errorMessageEl.textContent = message;
@@ -99,22 +110,16 @@ function chunkIntoRows(files: FileRecord[]): FileRecord[][] {
   return rows;
 }
 
-async function buildGridEntries(db: IDBDatabase): Promise<GridEntry[]> {
-  const entries: GridEntry[] = [];
-  for (const folder of await listFolders(db)) {
-    entries.push({ kind: 'heading', folderName: folder.name });
-    const files = await listFiles(db, folder.id);
-    for (const row of chunkIntoRows(files)) {
-      entries.push({ kind: 'row', files: row });
-    }
-  }
-  return entries;
+function opsToLabel(ops: Op[]): string {
+  if (ops.length === 0) return 'Import';
+  return ops
+    .map((op) => {
+      if (isExposureOp(op)) return `Exposure ${op.ev >= 0 ? '+' : ''}${op.ev.toFixed(2)}`;
+      return `WB ${op.kelvin}K`;
+    })
+    .join(' · ');
 }
 
-// Interactive listeners are attached only after init() succeeds -- same
-// boundary the spike used for Pipeline.create(), extended to also cover
-// opening the catalog database, so neither failure mode can leave a
-// half-wired UI behind.
 async function init(): Promise<void> {
   let db: IDBDatabase;
   try {
@@ -138,7 +143,11 @@ async function init(): Promise<void> {
 
   let currentFileId: number | null = null;
   let currentEditState: EditState | null = null;
+  let lastDecoded: { width: number; height: number } | null = null;
   let openRequestId = 0;
+  let folders: FolderRecord[] = [];
+  let allFiles: FileRecord[] = [];
+  let folderFilter: number | null = null;
   let gridEntries: GridEntry[] = [];
 
   // Caches the in-flight or resolved thumbnail request per file id, so
@@ -154,7 +163,7 @@ async function init(): Promise<void> {
   // exactly the per-frame cost a virtualized grid exists to avoid. The one
   // place permission actually changes is a real user gesture, so openFile
   // (below) is what busts this cache and asks for one fresh retry pass,
-  // not scroll.
+  // not scroll. The filmstrip shares this same cache (via getThumbnail).
   const thumbnailRequests = new Map<number, Promise<Blob | undefined>>();
 
   function getThumbnail(file: FileRecord): Promise<Blob | undefined> {
@@ -172,7 +181,7 @@ async function init(): Promise<void> {
 
   const virtualizer = new Virtualizer<HTMLDivElement, HTMLDivElement>({
     count: 0,
-    getScrollElement: () => catalogScroll,
+    getScrollElement: () => libraryScroll,
     estimateSize: (index) => (gridEntries[index]?.kind === 'heading' ? HEADING_HEIGHT : CELL_SIZE),
     overscan: 3,
     scrollToFn: elementScroll,
@@ -188,7 +197,7 @@ async function init(): Promise<void> {
   // once here for the initial render, and again at the top of
   // `renderVisibleRows()` since that's also what `onChange` re-invokes on
   // every scroll/resize.
-  const cleanup = virtualizer._didMount();
+  const cleanupGrid = virtualizer._didMount();
   virtualizer._willUpdate();
 
   // Renders only the grid rows the virtualizer currently reports as
@@ -196,8 +205,9 @@ async function init(): Promise<void> {
   // creating 10,000 DOM nodes or requesting 10,000 thumbnails up front.
   function renderVisibleRows(): void {
     virtualizer._willUpdate();
-    catalogGrid.style.height = `${virtualizer.getTotalSize()}px`;
-    catalogGrid.textContent = '';
+    libraryGrid.style.height = `${virtualizer.getTotalSize()}px`;
+    libraryGrid.textContent = '';
+    const selectedId = getState().selectedId;
     for (const virtualItem of virtualizer.getVirtualItems()) {
       const entry = gridEntries[virtualItem.index];
       if (!entry) continue;
@@ -207,7 +217,7 @@ async function init(): Promise<void> {
         heading.className = 'catalog-heading';
         heading.style.top = `${virtualItem.start}px`;
         heading.textContent = entry.folderName;
-        catalogGrid.appendChild(heading);
+        libraryGrid.appendChild(heading);
         continue;
       }
 
@@ -216,9 +226,10 @@ async function init(): Promise<void> {
       row.style.top = `${virtualItem.start}px`;
       for (const file of entry.files) {
         const cell = document.createElement('div');
-        cell.className = 'catalog-cell';
+        cell.className = 'catalog-cell' + (file.id === selectedId ? ' selected' : '');
         cell.title = file.path;
         cell.addEventListener('click', () => openFile(file));
+        cell.addEventListener('dblclick', () => switchModule('develop'));
         row.appendChild(cell);
 
         getThumbnail(file).then((blob) => {
@@ -233,15 +244,96 @@ async function init(): Promise<void> {
           cell.appendChild(img);
         });
       }
-      catalogGrid.appendChild(row);
+      libraryGrid.appendChild(row);
     }
   }
 
+  // Rebuilds the flattened catalog (folders, allFiles, gridEntries) from
+  // the database, honoring folderFilter, then refreshes grid, folder
+  // list, and filmstrip. Called on import and on folder-filter clicks.
   async function renderCatalog(): Promise<void> {
-    gridEntries = await buildGridEntries(db);
+    folders = await listFolders(db);
+    allFiles = [];
+    gridEntries = [];
+    for (const folder of folders) {
+      if (folderFilter !== null && folder.id !== folderFilter) continue;
+      const files = await listFiles(db, folder.id);
+      allFiles.push(...files);
+      gridEntries.push({ kind: 'heading', folderName: folder.name });
+      for (const row of chunkIntoRows(files)) {
+        gridEntries.push({ kind: 'row', files: row });
+      }
+    }
     virtualizer.setOptions({ ...virtualizer.options, count: gridEntries.length });
     virtualizer.measure();
     renderVisibleRows();
+    renderFolderList();
+    filmstrip.setFiles(allFiles.length);
+  }
+
+  function renderFolderList(): void {
+    folderListEl.textContent = '';
+    appendFolderRow(null, 'All folders');
+    for (const folder of folders) {
+      appendFolderRow(folder.id, folder.name);
+    }
+  }
+
+  function appendFolderRow(id: number | null, name: string): void {
+    const row = document.createElement('button');
+    row.className = 'folder-row' + (folderFilter === id ? ' active' : '');
+    row.textContent = name;
+    row.addEventListener('click', () => {
+      folderFilter = id;
+      renderCatalog(); // also re-renders the folder list active state
+    });
+    folderListEl.appendChild(row);
+  }
+
+  function renderMetadata(): void {
+    metadataEl.textContent = '';
+    const file = allFiles.find((f) => f.id === currentFileId);
+    if (!file) return;
+    appendMeta('Name', file.name);
+    appendMeta('Dimensions', lastDecoded ? `${lastDecoded.width} × ${lastDecoded.height}` : '—');
+    appendMeta('Size', `${(file.size / 1024 / 1024).toFixed(1)} MB`);
+    appendMeta('Modified', new Date(file.lastModified).toLocaleString());
+  }
+
+  function appendMeta(label: string, value: string): void {
+    const row = document.createElement('div');
+    row.className = 'meta-row';
+    const l = document.createElement('span');
+    l.className = 'meta-label';
+    l.textContent = label;
+    const v = document.createElement('span');
+    v.className = 'meta-value';
+    v.textContent = value;
+    row.append(l, v);
+    metadataEl.appendChild(row);
+  }
+
+  function renderHistory(): void {
+    historyListEl.textContent = '';
+    if (!currentEditState) return;
+    const { history, cursor } = currentEditState;
+    history.forEach((ops, index) => {
+      const row = document.createElement('button');
+      row.className = 'history-row' + (index === cursor ? ' active' : '');
+      row.textContent = opsToLabel(ops);
+      row.addEventListener('click', () => {
+        if (!currentEditState) return;
+        currentEditState = { ...currentEditState, cursor: index };
+        const opsAtCursor = currentOps(currentEditState);
+        applyOpsToSliders(opsAtCursor);
+        renderOps(opsAtCursor);
+        renderHistory();
+        saveEditState(db, currentFileId!, currentEditState).catch((err) =>
+          showError("Couldn't save your edit.", errorDetail(err)),
+        );
+      });
+      historyListEl.appendChild(row);
+    });
   }
 
   // Permission-checking lives inside this try block (not before it) so a
@@ -250,6 +342,7 @@ async function init(): Promise<void> {
   // failure is, instead of becoming an unhandled rejection.
   async function openFile(record: FileRecord): Promise<void> {
     clearError();
+    selectFile(record.id);
     const requestId = ++openRequestId;
     try {
       // Checked separately from ensureReadPermission() below so we know
@@ -293,9 +386,12 @@ async function init(): Promise<void> {
       pipeline.load(decoded);
       currentFileId = record.id;
       currentEditState = editState;
+      lastDecoded = { width: decoded.width, height: decoded.height };
       const ops = currentOps(currentEditState);
       applyOpsToSliders(ops);
       renderOps(ops);
+      renderMetadata();
+      renderHistory();
 
       // waitForGPU() is awaited only for the perf log below -- it doesn't
       // gate anything, since nothing after it touches shared state.
@@ -330,6 +426,21 @@ async function init(): Promise<void> {
     } catch (err) {
       showError("Couldn't save your edit.", errorDetail(err));
     }
+    renderHistory();
+  }
+
+  async function applyUndoRedo(isRedo: boolean): Promise<void> {
+    if (currentFileId === null || !currentEditState) return;
+    currentEditState = isRedo ? redo(currentEditState) : undo(currentEditState);
+    const ops = currentOps(currentEditState);
+    applyOpsToSliders(ops);
+    renderOps(ops);
+    renderHistory();
+    try {
+      await saveEditState(db, currentFileId, currentEditState);
+    } catch (err) {
+      showError("Couldn't save your undo/redo.", errorDetail(err));
+    }
   }
 
   exposureSlider.addEventListener('input', () => {
@@ -350,19 +461,78 @@ async function init(): Promise<void> {
     commitCurrentEdit();
   });
 
-  window.addEventListener('keydown', async (e) => {
-    if (currentFileId === null || !currentEditState) return;
-    if (!(e.ctrlKey || e.metaKey) || e.key.toLowerCase() !== 'z') return;
-    e.preventDefault();
-    currentEditState = e.shiftKey ? redo(currentEditState) : undo(currentEditState);
-    const ops = currentOps(currentEditState);
-    applyOpsToSliders(ops);
-    renderOps(ops);
-    try {
-      await saveEditState(db, currentFileId, currentEditState);
-    } catch (err) {
-      showError("Couldn't save your undo/redo.", errorDetail(err));
+  undoButton.addEventListener('click', () => applyUndoRedo(false));
+  redoButton.addEventListener('click', () => applyUndoRedo(true));
+
+  // ---- module wiring ----
+  registerModule({
+    id: 'library',
+    root: document.querySelector('#module-library')!,
+    onShow: () => {},
+    onHide: () => {},
+  });
+  registerModule({
+    id: 'develop',
+    root: document.querySelector('#module-develop')!,
+    onShow: () => {
+      // The canvas sits inside a display:none section while Library is
+      // active; the WebGPU drawing buffer's contents are undefined after
+      // the surface is hidden/re-shown, so re-render from the existing
+      // textures (cheap -- no decode; the pipeline already holds them).
+      if (currentFileId !== null && currentEditState) {
+        renderOps(currentOps(currentEditState));
+      }
+    },
+    onHide: () => {},
+  });
+
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-module]')) {
+    button.addEventListener('click', () => switchModule(button.dataset.module as ModuleId));
+  }
+
+  // Keeps the topbar tab highlight in sync with the active module,
+  // whichever path changed it (click or G/E shortcut).
+  subscribe(() => {
+    const module = getState().module;
+    for (const button of document.querySelectorAll<HTMLButtonElement>('[data-module]')) {
+      button.classList.toggle('active', button.dataset.module === module);
     }
+  });
+
+  // ---- shortcuts ----
+  window.addEventListener('keydown', async (e) => {
+    const action = keyToAction(e);
+    if (!action) return;
+
+    if (action === 'grid' || action === 'loupe') {
+      e.preventDefault();
+      // Shortcut actions are named for the target workspace; module ids
+      // are 'library'/'develop'.
+      switchModule(action === 'grid' ? 'library' : 'develop');
+      return;
+    }
+    if (action === 'undo' || action === 'redo') {
+      e.preventDefault();
+      await applyUndoRedo(action === 'redo');
+      return;
+    }
+
+    // prev/next walk the flat, folder-ordered file list; with no selection
+    // yet, the first arrow selects the first file (Lightroom-ish).
+    e.preventDefault();
+    const index = allFiles.findIndex((f) => f.id === getState().selectedId);
+    const nextIndex = index === -1 ? 0 : action === 'next' ? index + 1 : index - 1;
+    const file = allFiles[nextIndex];
+    if (file) await openFile(file);
+  });
+
+  // ---- filmstrip ----
+  const filmstrip = createFilmstrip({
+    scrollEl: filmstripScroll,
+    trackEl: filmstripTrack,
+    getFiles: () => allFiles,
+    getThumbnail,
+    onSelect: (file) => openFile(file),
   });
 
   // AbortError means the user opened the folder picker and dismissed it --
@@ -385,7 +555,14 @@ async function init(): Promise<void> {
 
   await renderCatalog();
 
-  window.addEventListener('beforeunload', () => cleanup(), { once: true });
+  window.addEventListener(
+    'beforeunload',
+    () => {
+      cleanupGrid();
+      filmstrip.destroy();
+    },
+    { once: true },
+  );
 }
 
 init();
