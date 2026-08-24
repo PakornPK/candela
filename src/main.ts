@@ -145,16 +145,29 @@ async function init(): Promise<void> {
   // re-rendering the same visible cell across multiple virtualizer
   // range-changes (a normal scroll produces many) doesn't re-issue a fresh
   // getOrExtractThumbnail call each time -- callers just await the same
-  // promise. Session-lifetime, unbounded -- fine at this catalog's scale;
-  // revisit if it ever needs eviction.
+  // promise. Only a successfully-resolved Blob stays cached (see
+  // getThumbnail below) -- a "not available" outcome (permission denied,
+  // or a genuine negative-cache result) is evicted immediately so a later
+  // render (e.g. after the user grants permission via openFile) retries
+  // instead of being stuck on a stale resolved-to-undefined promise for
+  // the rest of the session.
   const thumbnailRequests = new Map<number, Promise<Blob | undefined>>();
 
   function getThumbnail(file: FileRecord): Promise<Blob | undefined> {
-    let promise = thumbnailRequests.get(file.id);
-    if (!promise) {
-      promise = getOrExtractThumbnail(db, file);
-      thumbnailRequests.set(file.id, promise);
-    }
+    const cached = thumbnailRequests.get(file.id);
+    if (cached) return cached;
+    const promise = getOrExtractThumbnail(db, file)
+      .catch(() => undefined) // treat a rejection the same as "not available yet" for caching purposes
+      .then((blob) => {
+        // Evict on any "not available" result -- covers both permission-denied
+        // (retryable once the user grants access elsewhere) and a genuine
+        // negative-cache-in-IndexedDB result (retrying just does a cheap
+        // loadThumbnail read that returns the cached null immediately, no
+        // wasted WASM re-extraction). Only a real Blob stays cached here.
+        if (blob === undefined) thumbnailRequests.delete(file.id);
+        return blob;
+      });
+    thumbnailRequests.set(file.id, promise);
     return promise;
   }
 
@@ -218,7 +231,10 @@ async function init(): Promise<void> {
           const img = document.createElement('img');
           img.src = URL.createObjectURL(blob);
           img.addEventListener('load', () => URL.revokeObjectURL(img.src), { once: true });
-          img.addEventListener('error', () => URL.revokeObjectURL(img.src), { once: true });
+          img.addEventListener('error', () => {
+            URL.revokeObjectURL(img.src);
+            img.remove();
+          }, { once: true });
           cell.appendChild(img);
         });
       }
