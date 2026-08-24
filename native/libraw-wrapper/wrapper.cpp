@@ -189,4 +189,78 @@ void free_decoded(DecodeResult* r) {
     delete r;
 }
 
+// Ownership/lifecycle mirrors DecodeResult/decode() above -- see that
+// struct's comment for the full contract. JS must call free_thumbnail()
+// exactly once per extract_thumbnail() call, except when
+// extract_thumbnail() itself returns nullptr (nothing to free).
+struct ThumbnailResult {
+    uint8_t* data = nullptr;
+    uint32_t length = 0;
+    // 0 = success, LibRaw error codes otherwise (open_buffer/unpack_thumb
+    // failures), -1000 = embedded thumbnail exists but isn't JPEG format
+    // (LIBRAW_THUMBNAIL_JPEG required -- wrapper-detected, not a LibRaw
+    // code, kept clear of LibRaw's own range same as DecodeResult's -1000),
+    // -1001 = allocation/exception raised by the wrapper's own code.
+    int error_code = 0;
+};
+
+EMSCRIPTEN_KEEPALIVE
+ThumbnailResult* extract_thumbnail(const uint8_t* file_bytes, uint32_t length) {
+    ThumbnailResult* result = nullptr;
+
+    try {
+        result = new ThumbnailResult{};
+
+        LibRaw processor;
+
+        int ret = processor.open_buffer(const_cast<uint8_t*>(file_bytes), length);
+        if (ret != LIBRAW_SUCCESS) {
+            result->error_code = ret;
+            return result;
+        }
+
+        ret = processor.unpack_thumb();
+        if (ret != LIBRAW_SUCCESS) {
+            result->error_code = ret;
+            return result;
+        }
+
+        const auto& thumb = processor.imgdata.thumbnail;
+        if (thumb.tformat != LIBRAW_THUMBNAIL_JPEG || thumb.thumb == nullptr || thumb.tlength == 0) {
+            result->error_code = -1000;
+            return result;
+        }
+
+        auto data_owned = std::make_unique<uint8_t[]>(thumb.tlength);
+        std::memcpy(data_owned.get(), thumb.thumb, thumb.tlength);
+
+        result->data = data_owned.release(); // ownership crosses to JS; freed via free_thumbnail()
+        result->length = static_cast<uint32_t>(thumb.tlength);
+        result->error_code = 0;
+    } catch (const std::exception&) {
+        if (result == nullptr) {
+            return nullptr;
+        }
+        result->error_code = -1001;
+    }
+
+    return result;
+}
+
+EMSCRIPTEN_KEEPALIVE
+uint8_t* thumbnail_result_data_ptr(ThumbnailResult* r) { return r->data; }
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t thumbnail_result_length(ThumbnailResult* r) { return r->length; }
+
+EMSCRIPTEN_KEEPALIVE
+int thumbnail_result_error_code(ThumbnailResult* r) { return r->error_code; }
+
+EMSCRIPTEN_KEEPALIVE
+void free_thumbnail(ThumbnailResult* r) {
+    if (!r) return;
+    delete[] r->data;
+    delete r;
+}
+
 } // extern "C"
