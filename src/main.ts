@@ -137,22 +137,30 @@ async function init(): Promise<void> {
       const start = performance.now();
       const file = await record.handle.getFile();
       const decoded = await decode(await file.arrayBuffer());
-      if (requestId !== openRequestId) return; // a newer click superseded this one -- drop our result
-
-      canvas.width = decoded.width;
-      canvas.height = decoded.height;
-      pipeline.load(decoded);
-      await pipeline.waitForGPU();
-      const elapsed = performance.now() - start;
-      console.log(`decode+demosaic: ${elapsed.toFixed(1)}ms (${decoded.width}x${decoded.height})`);
+      if (requestId !== openRequestId) return; // superseded during decode -- skip the wasted edit-state load
 
       const editState = await loadEditState(db, record.id);
       if (requestId !== openRequestId) return; // superseded while loading edit state
+
+      // Everything above only touched local variables (decoded, editState) --
+      // no shared state has been written yet. From here everything is
+      // synchronous with no `await` in between, so this whole block commits
+      // atomically: canvas, GPU pipeline, and catalog state all move together,
+      // and nothing else can interleave a stale write partway through.
+      canvas.width = decoded.width;
+      canvas.height = decoded.height;
+      pipeline.load(decoded);
       currentFileId = record.id;
       currentEditState = editState;
       const ops = currentOps(currentEditState);
       applyOpsToSliders(ops);
       renderOps(ops);
+
+      // waitForGPU() is awaited only for the perf log below -- it doesn't
+      // gate anything, since nothing after it touches shared state.
+      await pipeline.waitForGPU();
+      const elapsed = performance.now() - start;
+      console.log(`decode+demosaic: ${elapsed.toFixed(1)}ms (${decoded.width}x${decoded.height})`);
     } catch (err) {
       if (err instanceof DecodeError) {
         showError(`Couldn't read this file (LibRaw error ${err.code}).`);
