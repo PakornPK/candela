@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Candela shell mockup</title>
+<style>
+  body { background:#1a1a1c; color:#cfcfcf; font:13px/1.5 system-ui, sans-serif; margin:28px; }
+  h1 { font-size:17px; }
+  h3 { font-size:13px; margin:14px 0 8px; }
+  .note { color:#8a8a8e; margin:6px 0 20px; max-width:900px; }
+  .label { color:#7db2ff; font-weight:600; }
+  .row { display:flex; gap:28px; flex-wrap:wrap; }
+  .app { width:620px; height:400px; display:grid;
+    grid-template-columns:140px 1fr 150px; grid-template-rows:30px 1fr 66px;
+    background:#2a2a2d; border:1px solid #454548; border-radius:6px; overflow:hidden; }
+  .topbar { grid-column:1/-1; background:#333336; display:flex; align-items:center; gap:6px; padding:0 10px; font-weight:600; }
+  .tab { padding:2px 10px; border-radius:3px; color:#b0b0b3; }
+  .tab.active { background:#56565b; color:#fff; }
+  .brand { margin-left:auto; color:#7db2ff; }
+  .panel { padding:8px; background:#242426; font-size:11px; color:#a0a0a0; }
+  .panel h4 { margin:0 0 6px; font-size:10px; color:#d0d0d0; text-transform:uppercase; letter-spacing:.06em; }
+  .left { border-right:1px solid #3a3a3d; }
+  .right { border-left:1px solid #3a3a3d; }
+  .content { background:#1e1e20; position:relative; }
+  .item { background:#2e2e31; border-radius:2px; padding:3px 6px; margin-bottom:4px; font-size:10px; }
+  .item.sel { background:#3a4a5c; color:#fff; }
+  .filmstrip { grid-column:1/-1; background:#2a2a2d; border-top:1px solid #3a3a3d;
+    display:flex; gap:5px; padding:7px; align-items:center; }
+  .thumb { width:56px; height:38px; background:#3a3a3e; border-radius:2px; flex:none; }
+  .thumb.sel { outline:2px solid #7db2ff; }
+  .gridview { display:grid; grid-template-columns:repeat(4,1fr); gap:8px; padding:10px; }
+  .cell { aspect-ratio:3/2; background:#333338; border-radius:2px; }
+  .loupe { position:absolute; inset:12px; background:#0d0d0f; border:1px solid #454548;
+    display:flex; align-items:center; justify-content:center; color:#666; font-size:11px; }
+  .slider { height:3px; background:#444; border-radius:2px; position:relative; margin:10px 0 14px; }
+  .slider::after { content:""; position:absolute; left:42%; width:10px; height:10px; border-radius:50%; background:#bbb; top:-3.5px; }
+  .small { font-size:9px; color:#8a8a8e; margin-top:-10px; margin-bottom:8px; }
+  .kbd { background:#3a3a3e; border-radius:2px; padding:0 4px; font-size:10px; }
+</style>
+</head>
+<body>
+<h1>Candela app shell — LrC-style wireframe</h1>
+<p class="note">
+  Layout clone ของ Lightroom Classic: topbar เลือก module · ซ้าย/ขวา = panel สลับเนื้อหาตาม module ·
+  กลาง = grid (Library) / loupe (Develop) · ล่าง = <b>filmstrip แชร์ร่วมทั้งสอง module</b> ·
+  selection ซิงก์กันระหว่าง grid / filmstrip / loupe · shortcut <span class="kbd">G</span> grid,
+  <span class="kbd">E</span> loupe, <span class="kbd">←→</span> เลื่อนภาพ, <span class="kbd">Ctrl+Z</span> undo
+</p>
+<div class="row">
+
+  <div>
+    <h3><span class="label">Library module</span> — Grid view <span class="kbd">G</span></h3>
+    <div class="app">
+      <div class="topbar"><span class="tab active">Library</span><span class="tab">Develop</span><span class="brand">Candela</span></div>
+      <div class="panel left">
+        <h4>Folders</h4>
+        <div class="item">📁 2024-01 Italy</div>
+        <div class="item sel">📁 2024-03 Japan</div>
+        <div class="item">📁 2024-07 Beach</div>
+        <div class="item">➕ Add Folder…</div>
+      </div>
+      <div class="content">
+        <div class="gridview">
+          <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+          <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+          <div class="cell"></div><div class="cell"></div><div class="cell"></div><div class="cell"></div>
+        </div>
+      </div>
+      <div class="panel right">
+        <h4>Metadata</h4>
+        <div class="item">DSC_0041.ARW<br>9504 × 6336<br>2024-03-12 14:02</div>
+        <h4 style="margin-top:10px">Quick Develop (later)</h4>
+      </div>
+      <div class="filmstrip">
+        <div class="thumb"></div><div class="thumb"></div><div class="thumb sel"></div>
+        <div class="thumb"></div><div class="thumb"></div><div class="thumb"></div><div class="thumb"></div>
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <h3><span class="label">Develop module</span> — Loupe view <span class="kbd">E</span></h3>
+    <div class="app">
+      <div class="topbar"><span class="tab">Library</span><span class="tab active">Develop</span><span class="brand">Candela</span></div>
+      <div class="panel left">
+        <h4>History</h4>
+        <div class="item">Exposure +0.50</div>
+        <div class="item">WB 5600K</div>
+        <div class="item sel">Import</div>
+        <h4 style="margin-top:10px">Presets (later)</h4>
+      </div>
+      <div class="content">
+        <div class="loupe">📷 loupe — WebGPU canvas (fit-to-window)</div>
+      </div>
+      <div class="panel right">
+        <h4>Histogram (later)</h4>
+        <h4 style="margin-top:10px">Basic</h4>
+        <div class="item">Exposure</div>
+        <div class="slider"></div>
+        <div class="small">+0.50</div>
+        <div class="item">White Balance</div>
+        <div class="slider"></div>
+        <div class="small">5600K</div>
+        <h4 style="margin-top:10px">Tone Curve (later)</h4>
+      </div>
+      <div class="filmstrip">
+        <div class="thumb"></div><div class="thumb"></div><div class="thumb sel"></div>
+        <div class="thumb"></div><div class="thumb"></div><div class="thumb"></div><div class="thumb"></div>
+      </div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
