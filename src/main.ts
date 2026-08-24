@@ -141,6 +141,23 @@ async function init(): Promise<void> {
   let openRequestId = 0;
   let gridEntries: GridEntry[] = [];
 
+  // Caches the in-flight or resolved thumbnail request per file id, so
+  // re-rendering the same visible cell across multiple virtualizer
+  // range-changes (a normal scroll produces many) doesn't re-issue a fresh
+  // getOrExtractThumbnail call each time -- callers just await the same
+  // promise. Session-lifetime, unbounded -- fine at this catalog's scale;
+  // revisit if it ever needs eviction.
+  const thumbnailRequests = new Map<number, Promise<Blob | undefined>>();
+
+  function getThumbnail(file: FileRecord): Promise<Blob | undefined> {
+    let promise = thumbnailRequests.get(file.id);
+    if (!promise) {
+      promise = getOrExtractThumbnail(db, file);
+      thumbnailRequests.set(file.id, promise);
+    }
+    return promise;
+  }
+
   function renderOps(ops: Op[]): void {
     pipeline.render(opsToAdjustState(ops));
   }
@@ -196,11 +213,12 @@ async function init(): Promise<void> {
         cell.addEventListener('click', () => openFile(file));
         row.appendChild(cell);
 
-        getOrExtractThumbnail(db, file).then((blob) => {
+        getThumbnail(file).then((blob) => {
           if (!blob) return; // extraction failed or not yet permitted -- placeholder stays
           const img = document.createElement('img');
           img.src = URL.createObjectURL(blob);
           img.addEventListener('load', () => URL.revokeObjectURL(img.src), { once: true });
+          img.addEventListener('error', () => URL.revokeObjectURL(img.src), { once: true });
           cell.appendChild(img);
         });
       }
