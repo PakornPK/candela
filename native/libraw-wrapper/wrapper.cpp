@@ -1,6 +1,7 @@
 #include <emscripten.h>
 #include <libraw/libraw.h>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <exception>
 #include <memory>
@@ -53,6 +54,13 @@ struct DecodeResult {
     // into that shape by whatever TS code bridges them (Task 5), not fed
     // to packCfaPattern() directly.
     uint32_t cfa_pattern = 0;
+    // Full 6x6 CFA, 36 bytes, one byte per position in row-major order,
+    // values 0=R 1=G 2=B (LibRaw's COLOR() output). Computed via COLOR(r,c)
+    // unconditionally -- for Bayer cameras that yields their 2x2 tiled 3x3,
+    // so demosaic.wgsl can always use a 6x6 lookup regardless of sensor type
+    // (X-Trans files would otherwise report an all-G 2x2 and render with
+    // wrong colors, since their CFA is 6x6, not 2x2).
+    uint8_t* cfa6 = nullptr;
     uint16_t* bayer_data = nullptr;
     // 0 = success, LibRaw error codes otherwise (all LibRaw codes are <= 0),
     // -1000 = implausible dimensions or missing raw_image (wrapper-detected,
@@ -94,7 +102,27 @@ DecodeResult* decode(const uint8_t* file_bytes, uint32_t length) {
 
         size_t pixel_count = static_cast<size_t>(width) * height;
         auto bayer_owned = std::make_unique<uint16_t[]>(pixel_count);
-        std::memcpy(bayer_owned.get(), raw.raw_image, pixel_count * sizeof(uint16_t));
+
+        // Copy row-by-row using raw_pitch (LibRaw's actual bytes-per-row) so
+        // cameras whose raw buffer carries row padding don't misalign every
+        // row after the first. The flat memcpy this replaced assumed
+        // raw_pitch == width*2, which holds for the fixtures on hand (the
+        // Fuji RAF reports raw_pitch == width*2 exactly) but is not
+        // guaranteed for all cameras. The output buffer is always tight
+        // (width samples per row), so JS-side layout stays pitch-free.
+        uint32_t pitch_samples = processor.imgdata.sizes.raw_pitch / sizeof(uint16_t);
+        if (pitch_samples >= width) {
+            for (uint32_t y = 0; y < height; ++y) {
+                std::memcpy(bayer_owned.get() + static_cast<size_t>(y) * width,
+                            raw.raw_image + static_cast<size_t>(y) * pitch_samples,
+                            width * sizeof(uint16_t));
+            }
+        } else {
+            // Defensive fallback for a corrupt/misreported pitch: a flat copy
+            // is at least what the old code did, and this case has never been
+            // observed with a real file.
+            std::memcpy(bayer_owned.get(), raw.raw_image, pixel_count * sizeof(uint16_t));
+        }
 
         // Some cameras (Fuji RAF among them, per LibRaw's own adjust_bl()
         // comment "Fuji RAF dng") store black level as a per-tile map in
@@ -140,6 +168,14 @@ DecodeResult* decode(const uint8_t* file_bytes, uint32_t length) {
             }
         }
         result->cfa_pattern = packed;
+
+        auto cfa6_owned = std::make_unique<uint8_t[]>(36);
+        for (int row = 0; row < 6; ++row) {
+            for (int col = 0; col < 6; ++col) {
+                cfa6_owned[row * 6 + col] = static_cast<uint8_t>(processor.COLOR(row, col));
+            }
+        }
+        result->cfa6 = cfa6_owned.release(); // ownership crosses to JS; freed via free_decoded()
     } catch (const std::exception&) {
         // Allocation failure (new/make_unique) or any other exception raised
         // by the wrapper's own code, as opposed to a LibRaw-internal error
@@ -180,11 +216,15 @@ EMSCRIPTEN_KEEPALIVE
 uint32_t decode_result_cfa_pattern(DecodeResult* r) { return r->cfa_pattern; }
 
 EMSCRIPTEN_KEEPALIVE
+uint8_t* decode_result_cfa6(DecodeResult* r) { return r->cfa6; }
+
+EMSCRIPTEN_KEEPALIVE
 int decode_result_error_code(DecodeResult* r) { return r->error_code; }
 
 EMSCRIPTEN_KEEPALIVE
 void free_decoded(DecodeResult* r) {
     if (!r) return;
+    delete[] r->cfa6;
     delete[] r->bayer_data;
     delete r;
 }

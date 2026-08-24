@@ -33,6 +33,10 @@ export interface DecodedRaw {
   blackLevel: number;
   whiteLevel: number;
   cfaPattern: string;
+  // Full 6x6 CFA from the wrapper (one byte per position, row-major, 0=R
+  // 1=G 2=B). Bayer cameras tile their 2x2 to fill it, so demosaic.wgsl can
+  // always use a 6x6 lookup.
+  cfa6: Uint8Array;
   bayerData: Uint16Array;
 }
 
@@ -73,11 +77,14 @@ export async function decode(fileBytes: ArrayBuffer): Promise<DecodedRaw> {
   const whiteLevel = module.ccall('decode_result_white_level', 'number', ['number'], [resultPtr]);
   const cfaPacked = module.ccall('decode_result_cfa_pattern', 'number', ['number'], [resultPtr]);
   const bayerPtr = module.ccall('decode_result_bayer_ptr', 'number', ['number'], [resultPtr]);
+  const cfa6Ptr = module.ccall('decode_result_cfa6', 'number', ['number'], [resultPtr]);
 
   const pixelCount = width * height;
   const bayerData = module.HEAPU16.slice(bayerPtr / 2, bayerPtr / 2 + pixelCount);
+  // HEAPU8.slice copies -- safe to read after free_decoded() below.
+  const cfa6 = module.HEAPU8.slice(cfa6Ptr, cfa6Ptr + 36);
 
   module.ccall('free_decoded', null, ['number'], [resultPtr]);
 
-  return { width, height, blackLevel, whiteLevel, cfaPattern: unpackCfaPattern(cfaPacked), bayerData };
+  return { width, height, blackLevel, whiteLevel, cfaPattern: unpackCfaPattern(cfaPacked), cfa6, bayerData };
 }

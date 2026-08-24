@@ -29,21 +29,18 @@ export function packAdjustUniforms(state: AdjustState): Float32Array {
   return new Float32Array([exposureGain, rGain, bGain, 0]);
 }
 
-const CFA_COLOR_CODE: Record<string, number> = { R: 0, G: 1, B: 2 };
-
 // Layout must match the `Cfa` uniform struct in demosaic.wgsl:
-// struct Cfa { pattern: vec4<u32> }
-export function packCfaPattern(cfaPattern: string): Uint32Array {
-  if (cfaPattern.length !== 4) {
-    throw new Error(`Expected a 4-character CFA pattern, got "${cfaPattern}"`);
+// struct Cfa { pattern: array<vec4<u32>, 9> } -- 4 colors packed per u32,
+// component 0 = low byte = the first color of the group of 4.
+export function packCfa6(cfa6: Uint8Array): Uint32Array {
+  if (cfa6.length !== 36) {
+    throw new Error(`Expected 36 CFA entries, got ${cfa6.length}`);
   }
-  return Uint32Array.from(cfaPattern, (ch) => {
-    const code = CFA_COLOR_CODE[ch];
-    if (code === undefined) {
-      throw new Error(`Unknown CFA color "${ch}"`);
-    }
-    return code;
-  });
+  const packed = new Uint32Array(9);
+  for (let i = 0; i < 36; i++) {
+    packed[i >> 2] |= cfa6[i] << ((i & 3) * 8);
+  }
+  return packed;
 }
 
 export const WB_NEUTRAL_KELVIN = 5500;

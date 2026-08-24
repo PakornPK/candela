@@ -2,7 +2,7 @@ import unpackShader from '../shaders/unpack.wgsl?raw';
 import demosaicShader from '../shaders/demosaic.wgsl?raw';
 import adjustShader from '../shaders/adjust.wgsl?raw';
 import blitShader from '../shaders/blit.wgsl?raw';
-import { packAdjustUniforms, packCfaPattern, type AdjustState } from './uniforms';
+import { packAdjustUniforms, packCfa6, type AdjustState } from './uniforms';
 import type { DecodedRaw } from '../raw/decode';
 
 export class Pipeline {
@@ -50,7 +50,8 @@ export class Pipeline {
     });
 
     this.levelsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.cfaBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    // 9 x vec4<u32> = 144 bytes -- the 6x6 CFA (4 colors packed per u32).
+    this.cfaBuffer = device.createBuffer({ size: 144, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.adjustUniformBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.blitSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
   }
@@ -117,7 +118,7 @@ export class Pipeline {
     });
 
     this.device.queue.writeBuffer(this.levelsBuffer, 0, new Float32Array([raw.blackLevel, raw.whiteLevel, 0, 0]));
-    this.device.queue.writeBuffer(this.cfaBuffer, 0, packCfaPattern(raw.cfaPattern));
+    this.device.queue.writeBuffer(this.cfaBuffer, 0, packCfa6(raw.cfa6));
 
     const encoder = this.device.createCommandEncoder();
     this.dispatchUnpack(encoder, raw.width, raw.height);
