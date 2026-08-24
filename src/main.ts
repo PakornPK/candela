@@ -145,29 +145,24 @@ async function init(): Promise<void> {
   // re-rendering the same visible cell across multiple virtualizer
   // range-changes (a normal scroll produces many) doesn't re-issue a fresh
   // getOrExtractThumbnail call each time -- callers just await the same
-  // promise. Only a successfully-resolved Blob stays cached (see
-  // getThumbnail below) -- a "not available" outcome (permission denied,
-  // or a genuine negative-cache result) is evicted immediately so a later
-  // render (e.g. after the user grants permission via openFile) retries
-  // instead of being stuck on a stale resolved-to-undefined promise for
-  // the rest of the session.
+  // promise. This is a permanent per-session cache, including a
+  // resolved-to-undefined ("not available") result -- retrying on every
+  // scroll-driven miss would mean every visible cell re-running
+  // loadThumbnail + queryPermission + requestPermission on every scroll
+  // frame while permission is missing (the normal state right after a
+  // reload, since File System Access grants don't persist), which is
+  // exactly the per-frame cost a virtualized grid exists to avoid. The one
+  // place permission actually changes is a real user gesture, so openFile
+  // (below) is what busts this cache and asks for one fresh retry pass,
+  // not scroll.
   const thumbnailRequests = new Map<number, Promise<Blob | undefined>>();
 
   function getThumbnail(file: FileRecord): Promise<Blob | undefined> {
-    const cached = thumbnailRequests.get(file.id);
-    if (cached) return cached;
-    const promise = getOrExtractThumbnail(db, file)
-      .catch(() => undefined) // treat a rejection the same as "not available yet" for caching purposes
-      .then((blob) => {
-        // Evict on any "not available" result -- covers both permission-denied
-        // (retryable once the user grants access elsewhere) and a genuine
-        // negative-cache-in-IndexedDB result (retrying just does a cheap
-        // loadThumbnail read that returns the cached null immediately, no
-        // wasted WASM re-extraction). Only a real Blob stays cached here.
-        if (blob === undefined) thumbnailRequests.delete(file.id);
-        return blob;
-      });
-    thumbnailRequests.set(file.id, promise);
+    let promise = thumbnailRequests.get(file.id);
+    if (!promise) {
+      promise = getOrExtractThumbnail(db, file).catch(() => undefined);
+      thumbnailRequests.set(file.id, promise);
+    }
     return promise;
   }
 
@@ -261,6 +256,17 @@ async function init(): Promise<void> {
         showError(`Permission needed to read "${record.name}" -- click it again to retry.`);
         return;
       }
+
+      // Permission may have just been granted for the first time this
+      // session (e.g. right after a reload, before which every cell's
+      // getThumbnail call above would have resolved undefined and stayed
+      // cached that way). This is the one place permission actually
+      // changes via a real user gesture, so it's the right place to give
+      // the grid one fresh retry pass -- not on every scroll tick, which
+      // would repeatedly hit requestPermission() without a gesture and
+      // never succeed until the user clicks something.
+      thumbnailRequests.clear();
+      renderVisibleRows();
 
       const start = performance.now();
       const file = await record.handle.getFile();
