@@ -880,33 +880,43 @@ Not automatable -- needs a real folder of raw files and a real browser. Use `npm
 
 **Files:** none (verification only)
 
-- [ ] **Step 1: Grid renders with thumbnails**
+- [ ] **Step 1: Upgrade a real v1 database (the migration path, not just a fresh install)**
+
+Every other step in this task runs against a database created fresh by the new (v2) code, which never exercises the `event.oldVersion === 1` branch added in Task 3 -- that branch only runs when an existing v1 database (created by the code that shipped *before* this plan) is opened by the new build. Test that specific path once, deliberately:
+
+1. `git stash` any uncommitted work, then `git checkout c969a70` (the last commit before Task 3's migration) in this worktree.
+2. `npm run dev`, import a folder with a few files, open one and adjust a slider (so `folders`/`files`/`edits` all have real data, not just an empty schema).
+3. Stop the dev server. `git checkout thumbnail-grid` (back to the tip of this branch) -- do **not** clear IndexedDB / site data in the browser between steps 3 and 4.
+4. `npm run dev` again, reload the page pointed at the same origin (same `localhost` port, so it's the same IndexedDB).
+5. Confirm: the folder/files/edit you set up in step 2 still appear correctly (nothing lost or corrupted), no console error about `ConstraintError` or a failed upgrade, and thumbnails now load for that folder's files -- confirming `thumbnails` was added on top of the existing v1 data rather than the upgrade failing or wiping the database.
+
+- [ ] **Step 2: Grid renders with thumbnails**
 
 Import the same folder used in the catalog foundation's verification (or any folder with several raw files). Confirm the grid appears (not the old text list), grouped by folder with headings, and that thumbnails appear on cells as you scroll -- not all at once on import.
 
-- [ ] **Step 2: Scrolling behavior**
+- [ ] **Step 3: Scrolling behavior**
 
 Scroll down through a folder with more files than fit on screen. Confirm: the scrollbar reflects the true total size (not just what's rendered), cells render smoothly as you scroll (no visible gap/flash where a row should be), and thumbnails for newly-visible cells load in shortly after scrolling to them.
 
-- [ ] **Step 3: Cache hit on re-scroll**
+- [ ] **Step 4: Cache hit on re-scroll**
 
 Scroll down past a section, then back up to it. Confirm thumbnails that were already loaded appear immediately (no re-fetch delay) -- this is `loadThumbnail`'s IndexedDB hit path, not `extractThumbnail` running again. (Optional: open the browser's Network/Performance tooling or just watch the console -- a re-scroll should feel instant compared to the first pass.)
 
-- [ ] **Step 4: Reload persistence**
+- [ ] **Step 5: Reload persistence**
 
 Reload the page, re-open the same folder from the catalog (already imported, from IndexedDB). Confirm thumbnails appear immediately on scroll without needing to re-extract -- this confirms the `thumbnails` IndexedDB store survived the reload, same as `folders`/`files`/`edits` already do.
 
-- [ ] **Step 5: Click-to-open still works**
+- [ ] **Step 6: Click-to-open still works**
 
 Click a grid cell. Confirm it still opens the file into the editor (canvas + sliders), same as the pre-grid list did. Confirm the atomic-commit fix from the catalog foundation plan still holds -- click several different cells in quick succession and confirm the editor ends up showing the last one clicked, not a stale earlier one.
 
-- [ ] **Step 6: A file with a non-JPEG or missing embedded thumbnail**
+- [ ] **Step 7: A file with a non-JPEG or missing embedded thumbnail**
 
 If you have (or can find) a raw file with no embedded JPEG preview or an unusual thumbnail format, confirm its cell shows the placeholder background (not a broken-image icon, not a crash, not an error banner) and that browsing the rest of the grid is unaffected.
 
-- [ ] **Step 7: Record results**
+- [ ] **Step 8: Record results**
 
-Note the outcome of Steps 1-6 (pass/fail, Chrome version tested) as a short addition to this plan file's bottom or back in conversation, matching the catalog foundation plan's Task 14 convention.
+Note the outcome of Steps 1-7 (pass/fail, Chrome version tested) as a short addition to this plan file's bottom or back in conversation, matching the catalog foundation plan's Task 14 convention.
 
 ---
 
