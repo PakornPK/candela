@@ -979,6 +979,24 @@ Note the outcome of Steps 1-7 (pass/fail, Chrome version tested) as a short addi
 
 ---
 
+## Results (2026-08-24)
+
+Manually verified in Chrome against the real folder of Fujifilm raw files used throughout this project's development.
+
+| Step | Result |
+|---|---|
+| 1. Upgrade a real v1 database | Not manually re-run this pass -- covered by two independent code reviews that hand-traced both the `oldVersion === 0` and `oldVersion === 1` migration paths against the real shipped v1 schema (Task 3) |
+| 2. Grid renders with thumbnails | ✅ Pass -- confirmed real thumbnails, not the old text list |
+| 3. Scrolling behavior | Implied working (thumbnails visible while scrolling); not separately stress-tested |
+| 4. Cache hit on re-scroll | Not manually re-verified this pass -- covered by the `getThumbnail` request-cache logic and its code review |
+| 5. Reload persistence | Not manually re-verified this pass |
+| 6. Click-to-open still works | ✅ Pass -- caught a real regression here: every click was clearing and re-fetching the whole visible thumbnail grid (from the permission-retry fix), causing visible jank on every file open. Fixed (commit `6e693c5`) to only do that on the click that actually transitions permission from not-granted to granted. Re-confirmed smooth after the fix. |
+| 7. Non-JPEG/missing embedded thumbnail | Not manually re-verified this pass -- covered by the `error`-listener fix (`img.remove()`) and its code review |
+
+**Unrelated finding, recorded separately (not a thumbnail-grid regression):** Fuji X-Trans raw files render with visible Bayer-pattern color speckling in the main editor view (not the thumbnail, which is the camera's own embedded JPEG and renders correctly) -- `demosaic.wgsl` only handles a 2x2 Bayer CFA, and X-Trans is a 6x6 pattern. This is the exact, already-documented caveat from the original spike's Results (`2026-08-23-webgpu-raw-pipeline-spike-design.md`, caveat #2), not something this plan's work touched or introduced. No fix planned yet -- recorded as a project memory (`xtrans_demosaic_gap`) since it isn't on `CLAUDE.md`'s current roadmap and needs its own scoping decision if tackled.
+
+---
+
 ## Self-Review Notes
 
 - **Spec coverage:** §1 extraction -> Tasks 1-2. §2 persistence -> Tasks 3-4. §3 lazy loading -> Task 7 (`getOrExtractThumbnail` called per-cell inside `renderVisibleRows`). §4 grid UI -> Tasks 6-7. §5 error handling -> Task 7 (`showError` calls carry the friendly-message/detail shape; cell-local extraction failures never reach `showError` at all, per spec). §6 testing -> Task 2 unit/integration-tests the one WASM-adjacent piece worth testing (real JPEG magic-byte assertion); everything IndexedDB/DOM/virtualizer-dependent is manually verified in Task 8, consistent with the established boundary.
