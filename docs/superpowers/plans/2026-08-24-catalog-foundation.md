@@ -1113,6 +1113,23 @@ Note the outcome of Steps 1-6 (pass/fail, and Chrome version tested) as a short 
 
 ---
 
+## Results (2026-08-24)
+
+Manually verified in Chrome against a real folder of raw files (`/Users/pakorn/Pictures/candela/fuji/`, 6 Fujifilm `.RAF` files).
+
+| Step | Result |
+|---|---|
+| 1. Import a folder | ✅ Pass -- all files appeared in the list |
+| 2. Open a file and edit it | ✅ Pass -- decodes, renders, sliders update live |
+| 3. Undo/redo | ✅ Pass -- Ctrl+Z/Ctrl+Shift+Z step through slider commits correctly |
+| 4. Persistence across reload | ✅ Pass -- folder/files, slider values, and undo history all survived a reload |
+| 5. Permission reauthorization | ✅ Pass -- reauth flow worked without incident |
+| 6. Re-import the same folder | Not manually re-tested -- covered by code review of `import.ts`'s `isSameEntry()`-based dedup (Task 10, both spec and code-quality review passed) rather than a fresh manual pass |
+
+No regressions found in the spike's original pass/fail metrics during this testing (decode/render/slider responsiveness all felt consistent with the recorded spike numbers, though not re-measured with the perf harness here).
+
+---
+
 ## Self-Review Notes
 
 - **Spec coverage:** §1 schema → Task 7. §2 op graph/undo model → Tasks 3, 4, 6 (with the `EditState` simplification noted in the header). §3 import/permissions → Tasks 9, 10. §4 catalog UI → Tasks 12, 13. §5 error handling → Task 13 (db-open failure, permission-denied, `DecodeError`, generic catch). §6 testing → Tasks 4, 5, 6 unit-test the pure logic; Tasks 7-11 are manually verified in Task 14, matching the spec's stated testing boundary.
