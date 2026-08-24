@@ -30,17 +30,19 @@ export function packAdjustUniforms(state: AdjustState): Float32Array {
 }
 
 // Layout must match the `Cfa` uniform struct in demosaic.wgsl:
-// struct Cfa { pattern: array<vec4<u32>, 9> } -- 4 colors packed per u32,
-// component 0 = low byte = the first color of the group of 4.
+// struct Cfa { pattern: array<vec4<u32>, 9> } -- 9 vec4s x 4 components =
+// 36 colors, ONE color per component (color at CFA position i is
+// pattern[i/4][i%4]). Each component must be a single color code (0=R 1=G
+// 2=B), not a bit-packed group -- a previous 4-colors-per-u32 packing made
+// the shader read packed groups, misclassified every pixel, and rendered
+// every image dark red/black.
 export function packCfa6(cfa6: Uint8Array): Uint32Array {
   if (cfa6.length !== 36) {
     throw new Error(`Expected 36 CFA entries, got ${cfa6.length}`);
   }
-  const packed = new Uint32Array(9);
-  for (let i = 0; i < 36; i++) {
-    packed[i >> 2] |= cfa6[i] << ((i & 3) * 8);
-  }
-  return packed;
+  // One u32 per CFA position fills all 144 bytes of the 9xvec4 uniform
+  // buffer (36 u32s), so no component ever relies on zero padding.
+  return Uint32Array.from(cfa6, (c) => c);
 }
 
 export const WB_NEUTRAL_KELVIN = 5500;

@@ -50,7 +50,8 @@ export class Pipeline {
     });
 
     this.levelsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    // 9 x vec4<u32> = 144 bytes -- the 6x6 CFA (4 colors packed per u32).
+    // 9 x vec4<u32> = 144 bytes -- the 6x6 CFA, one color per component
+    // (packCfa6 emits 36 u32s filling all 144 bytes).
     this.cfaBuffer = device.createBuffer({ size: 144, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.adjustUniformBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.blitSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });

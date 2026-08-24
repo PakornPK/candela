@@ -389,7 +389,13 @@ async function init(): Promise<void> {
       lastDecoded = { width: decoded.width, height: decoded.height };
       const ops = currentOps(currentEditState);
       applyOpsToSliders(ops);
-      renderOps(ops);
+      // Only render immediately if the loupe is actually on screen. Files are
+      // normally opened from the grid while Library is active, and the
+      // develop module (which contains the canvas) is display:none then --
+      // rendering into a hidden WebGPU surface can throw or leave the canvas
+      // black. The develop module's onShow handler re-renders on switch, so
+      // skipping here costs nothing: the image appears when the loupe shows.
+      if (getState().module === 'develop') renderOps(ops);
       renderMetadata();
       renderHistory();
 

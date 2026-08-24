@@ -41,26 +41,17 @@ describe('packAdjustUniforms', () => {
 });
 
 describe('packCfa6', () => {
-  it('packs 36 colors into 9 u32s, 4 per word, low byte first', () => {
-    // 36 entries: codes 0..2 repeating (RGGB tile would be 0,1,1,2).
+  it('emits one u32 per CFA position (matches array<vec4<u32>, 9> layout)', () => {
     const cfa6 = new Uint8Array(36);
     for (let i = 0; i < 36; i++) cfa6[i] = i % 3;
     const packed = packCfa6(cfa6);
     expect(packed).toBeInstanceOf(Uint32Array);
-    expect(packed.length).toBe(9);
-    // Word 0 = entries 0..3 = codes 0,1,2,0 -> byte 0=0, byte 1=1, byte 2=2,
-    // byte 3=0, little-endian byte order in the word: 0x00020100.
-    expect(packed[0]).toBe(0x00020100);
-    // Last word = entries 32..35 = codes 2,0,1,2 -> 0x02010002.
-    expect(packed[8]).toBe(0x02010002);
-  });
-
-  it('round-trips the packing order (entry i lands in word i/4, byte i%4)', () => {
-    const cfa6 = new Uint8Array(36);
-    for (let i = 0; i < 36; i++) cfa6[i] = (i * 7) % 3;
-    const packed = packCfa6(cfa6);
+    // 36 u32s = 144 bytes, the full size of the 9xvec4 uniform buffer.
+    expect(packed.length).toBe(36);
+    // Each component of each vec4 holds exactly one color code, so
+    // demosaic.wgsl's colorAt (pattern[i/4][i%4]) reads a single color.
     for (let i = 0; i < 36; i++) {
-      expect((packed[i >> 2] >> ((i & 3) * 8)) & 0xff).toBe(cfa6[i]);
+      expect(packed[i]).toBe(i % 3);
     }
   });
 
