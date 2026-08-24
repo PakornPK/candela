@@ -1,3 +1,4 @@
+import { Virtualizer, elementScroll, observeElementRect, observeElementOffset } from '@tanstack/virtual-core';
 import { Pipeline } from './gpu/pipeline';
 import { decode, DecodeError } from './raw/decode';
 import { WB_NEUTRAL_KELVIN } from './gpu/uniforms';
@@ -8,10 +9,16 @@ import { ensureReadPermission } from './catalog/permissions';
 import { loadEditState, saveEditState } from './catalog/editsStore';
 import { commitEdit, undo, redo, currentOps } from './catalog/editHistory';
 import { opsToAdjustState } from './catalog/adjust';
+import { getOrExtractThumbnail } from './catalog/thumbnails';
 import { isExposureOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord } from './catalog/types';
 
+const COLUMNS_PER_ROW = 6; // fixed for this pass -- see plan header
+const CELL_SIZE = 160; // px, matches index.html's .catalog-cell
+const HEADING_HEIGHT = 24; // px, matches index.html's .catalog-heading
+
 const addFolderButton = document.querySelector<HTMLButtonElement>('#add-folder')!;
-const catalogList = document.querySelector<HTMLUListElement>('#catalog-list')!;
+const catalogScroll = document.querySelector<HTMLDivElement>('#catalog-scroll')!;
+const catalogGrid = document.querySelector<HTMLDivElement>('#catalog-grid')!;
 const exposureSlider = document.querySelector<HTMLInputElement>('#exposure')!;
 const wbSlider = document.querySelector<HTMLInputElement>('#wb')!;
 const exposureValue = document.querySelector<HTMLOutputElement>('#exposure-value')!;
@@ -21,10 +28,6 @@ const errorEl = document.querySelector<HTMLDivElement>('#error')!;
 const errorMessageEl = document.querySelector<HTMLParagraphElement>('#error-message')!;
 const errorDetailEl = document.querySelector<HTMLPreElement>('#error-detail')!;
 
-// `message` is plain language for the person using the app; `detail` (shown
-// behind a native <details> toggle) is the raw technical error, for anyone
-// who wants it -- not shown by default so a real user isn't handed a stack
-// trace for "the app couldn't save your edit."
 function showError(message: string, detail?: string): void {
   errorMessageEl.textContent = message;
   errorDetailEl.textContent = detail ?? '';
@@ -80,6 +83,34 @@ updateSliderFill(wbSlider, WB_NEUTRAL_KELVIN);
 updateReadout(exposureValue, Number(exposureSlider.value), 2);
 wbValue.textContent = `${Number(wbSlider.value)}K`;
 
+// The flattened, virtualizer-facing shape of the catalog: one entry per
+// folder heading, one entry per row of up to COLUMNS_PER_ROW files. This
+// is what lets a single Virtualizer (which only understands "N items,
+// each with a size") represent a grid grouped by folder.
+type GridEntry =
+  | { kind: 'heading'; folderName: string }
+  | { kind: 'row'; files: FileRecord[] };
+
+function chunkIntoRows(files: FileRecord[]): FileRecord[][] {
+  const rows: FileRecord[][] = [];
+  for (let i = 0; i < files.length; i += COLUMNS_PER_ROW) {
+    rows.push(files.slice(i, i + COLUMNS_PER_ROW));
+  }
+  return rows;
+}
+
+async function buildGridEntries(db: IDBDatabase): Promise<GridEntry[]> {
+  const entries: GridEntry[] = [];
+  for (const folder of await listFolders(db)) {
+    entries.push({ kind: 'heading', folderName: folder.name });
+    const files = await listFiles(db, folder.id);
+    for (const row of chunkIntoRows(files)) {
+      entries.push({ kind: 'row', files: row });
+    }
+  }
+  return entries;
+}
+
 // Interactive listeners are attached only after init() succeeds -- same
 // boundary the spike used for Pipeline.create(), extended to also cover
 // opening the catalog database, so neither failure mode can leave a
@@ -108,31 +139,80 @@ async function init(): Promise<void> {
   let currentFileId: number | null = null;
   let currentEditState: EditState | null = null;
   let openRequestId = 0;
+  let gridEntries: GridEntry[] = [];
 
   function renderOps(ops: Op[]): void {
     pipeline.render(opsToAdjustState(ops));
   }
 
-  async function renderCatalog(): Promise<void> {
-    catalogList.textContent = '';
-    const folders = await listFolders(db);
-    for (const folder of folders) {
-      const folderItem = document.createElement('li');
-      const heading = document.createElement('strong');
-      heading.textContent = folder.name;
-      folderItem.appendChild(heading);
+  const virtualizer = new Virtualizer<HTMLDivElement, HTMLDivElement>({
+    count: 0,
+    getScrollElement: () => catalogScroll,
+    estimateSize: (index) => (gridEntries[index]?.kind === 'heading' ? HEADING_HEIGHT : CELL_SIZE),
+    overscan: 3,
+    scrollToFn: elementScroll,
+    observeElementRect,
+    observeElementOffset,
+    onChange: () => renderVisibleRows(),
+  });
+  // @tanstack/virtual-core's headless package (not a framework adapter --
+  // confirmed against the installed v3.17.8 types) has no `.observe()`.
+  // `_didMount()` wires up the resize/scroll observers and returns the
+  // cleanup function; `_willUpdate()` must be called before reading
+  // `getTotalSize()`/`getVirtualItems()` to refresh measurements -- done
+  // once here for the initial render, and again at the top of
+  // `renderVisibleRows()` since that's also what `onChange` re-invokes on
+  // every scroll/resize.
+  const cleanup = virtualizer._didMount();
+  virtualizer._willUpdate();
 
-      const fileList = document.createElement('ul');
-      const files = await listFiles(db, folder.id);
-      for (const file of files) {
-        const fileItem = document.createElement('li');
-        fileItem.textContent = `${file.path} (${file.size} bytes)`;
-        fileItem.addEventListener('click', () => openFile(file));
-        fileList.appendChild(fileItem);
+  // Renders only the grid rows the virtualizer currently reports as
+  // in-range -- this is the function that keeps a 10,000-file catalog from
+  // creating 10,000 DOM nodes or requesting 10,000 thumbnails up front.
+  function renderVisibleRows(): void {
+    virtualizer._willUpdate();
+    catalogGrid.style.height = `${virtualizer.getTotalSize()}px`;
+    catalogGrid.textContent = '';
+    for (const virtualItem of virtualizer.getVirtualItems()) {
+      const entry = gridEntries[virtualItem.index];
+      if (!entry) continue;
+
+      if (entry.kind === 'heading') {
+        const heading = document.createElement('strong');
+        heading.className = 'catalog-heading';
+        heading.style.top = `${virtualItem.start}px`;
+        heading.textContent = entry.folderName;
+        catalogGrid.appendChild(heading);
+        continue;
       }
-      folderItem.appendChild(fileList);
-      catalogList.appendChild(folderItem);
+
+      const row = document.createElement('div');
+      row.className = 'catalog-row';
+      row.style.top = `${virtualItem.start}px`;
+      for (const file of entry.files) {
+        const cell = document.createElement('div');
+        cell.className = 'catalog-cell';
+        cell.title = file.path;
+        cell.addEventListener('click', () => openFile(file));
+        row.appendChild(cell);
+
+        getOrExtractThumbnail(db, file).then((blob) => {
+          if (!blob) return; // extraction failed or not yet permitted -- placeholder stays
+          const img = document.createElement('img');
+          img.src = URL.createObjectURL(blob);
+          img.addEventListener('load', () => URL.revokeObjectURL(img.src), { once: true });
+          cell.appendChild(img);
+        });
+      }
+      catalogGrid.appendChild(row);
     }
+  }
+
+  async function renderCatalog(): Promise<void> {
+    gridEntries = await buildGridEntries(db);
+    virtualizer.setOptions({ ...virtualizer.options, count: gridEntries.length });
+    virtualizer.measure();
+    renderVisibleRows();
   }
 
   // Permission-checking lives inside this try block (not before it) so a
@@ -257,6 +337,8 @@ async function init(): Promise<void> {
   });
 
   await renderCatalog();
+
+  window.addEventListener('beforeunload', () => cleanup(), { once: true });
 }
 
 init();
