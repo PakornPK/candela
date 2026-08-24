@@ -500,13 +500,60 @@ git commit -m "feat: add thumbnail grid markup and styles"
 **Files:**
 - Modify: `src/main.ts`
 
-This is the largest task in this plan -- it replaces `renderCatalog()`'s list rendering with a virtualized grid, and is the one place `@tanstack/virtual-core`'s exact API is exercised. The shape below (`Virtualizer` constructor options, `observe()`, `getVirtualItems()`, `getTotalSize()`) matches `@tanstack/virtual-core`'s documented vanilla-JS usage as of the version installed in Task 5. **Before writing this file, read the type definitions actually installed** (`node_modules/@tanstack/virtual-core/dist/**/*.d.ts`, or your editor's hover/go-to-definition on `Virtualizer`) and confirm the constructor option names and instance methods below match -- if the installed version differs in a specific method/option name, use the real one and note the discrepancy in your self-review; don't guess further than that one adjustment.
+This is the largest task in this plan -- it replaces `renderCatalog()`'s list rendering with a virtualized grid, and is the one place `@tanstack/virtual-core`'s exact API is exercised. **Task 5's review already confirmed the exact API surface against the installed v3.17.8 type definitions** (`node_modules/@tanstack/virtual-core/dist/esm/index.d.ts`), so the code below is not speculative: `count`/`getScrollElement`/`estimateSize`/`overscan`/`onChange` on `VirtualizerOptions`, and `getVirtualItems()`/`getTotalSize()`/`setOptions()`/`measure()` on the instance, all match as named. The one correction from an earlier draft of this plan: **there is no `.observe()` method** on this headless package's `Virtualizer` (that's specific to framework adapters like `@tanstack/react-virtual`, not this package) -- lifecycle wiring here is `_didMount()` (wires up resize/scroll observers, returns a cleanup function) and `_willUpdate()` (must be called before reading `getTotalSize()`/`getVirtualItems()` to refresh measurements). Both are underscore-prefixed but are the package's actual intended vanilla-JS/adapter-author surface, not a private implementation detail being reached into. `scrollToFn`/`observeElementRect`/`observeElementOffset` are required (non-optional) constructor options in this headless package -- there's no framework-adapter default filling them in, which is why the code below passes the exported `elementScroll`/`observeElementRect`/`observeElementOffset` helpers explicitly.
 
 - [ ] **Step 1: Read the current `src/main.ts`, `src/catalog/query.ts`, and `src/catalog/types.ts`**
 
 The `FolderRecord`/`FileRecord` types and `listFolders`/`listFiles` functions this task builds on already exist -- read them first so the grid-building code below lines up with their actual current shape (it should, based on the catalog foundation plan, but confirm rather than assume).
 
-- [ ] **Step 2: Replace `src/main.ts` in full**
+- [ ] **Step 2: Extract a shared WASM module loader (`src/raw/librawModule.ts`)**
+
+Task 2's code quality review flagged that `src/raw/decode.ts` and `src/raw/thumbnail.ts` each instantiate their own independent `createLibRawModule()` singleton -- harmless while nothing imported both, but this task is exactly where that changes: `main.ts` is about to import `decode` (directly) and `getOrExtractThumbnail` (which pulls in `extractThumbnail`) together for the first time. Two independent WASM module instances means two independent `WebAssembly.Memory` arenas that each ratchet up in size and never shrink -- real cost against the 4GB WASM32 ceiling `CLAUDE.md` calls out as the central architectural constraint, once `extractThumbnail` becomes a per-grid-cell hot path. Fix it now, before wiring both together in `main.ts`.
+
+Create `src/raw/librawModule.ts`:
+
+```ts
+// @ts-expect-error -- Emscripten glue has no bundled types
+import createLibRawModule from '../wasm/libraw.js';
+
+// Shared by decode.ts and thumbnail.ts so both use the same WASM module
+// instance (one WebAssembly.Memory arena) instead of two independent ones
+// -- see Task 2's code review in this plan for why that matters once both
+// are imported together, as main.ts (this task) does.
+export interface LibRawModule {
+  ccall: (name: string, ret: string | null, argTypes: string[], args: unknown[]) => number;
+  HEAPU8: Uint8Array;
+  HEAPU16: Uint16Array;
+  _malloc: (size: number) => number;
+  _free: (ptr: number) => void;
+}
+
+let modulePromise: Promise<LibRawModule> | null = null;
+
+export function getLibRawModule(): Promise<LibRawModule> {
+  if (!modulePromise) {
+    modulePromise = createLibRawModule() as Promise<LibRawModule>;
+  }
+  return modulePromise;
+}
+```
+
+Edit `src/raw/decode.ts`: delete its own `createLibRawModule` import, the local `LibRawModule` interface, `modulePromise`, and `getModule()` function; add `import { getLibRawModule } from './librawModule';` and replace its one `getModule()` call site with `getLibRawModule()`.
+
+Edit `src/raw/thumbnail.ts`: same change -- delete its own copy of all four of those (its `LibRawModule` interface only had `HEAPU8`, not `HEAPU16`; that's fine, the shared interface has both, `thumbnail.ts` just doesn't use the `HEAPU16` field), add the same import, replace its `getModule()` call site with `getLibRawModule()`.
+
+**Read the fresh-quoted-above `librawModule.ts` against the actual current `decode.ts`/`thumbnail.ts` content first** (both already exist and are committed) -- the interfaces/functions you're deleting should match what's described here; if either file has drifted from this description, extract based on what's actually there, not this description.
+
+Run: `npx tsc --noEmit && npm test`
+Expected: no errors, `48 passed` (pure refactor -- no behavior change, same two integration tests in `decode.test.ts`/`thumbnail.test.ts` still exercise the real WASM module, now via the shared loader)
+
+Commit:
+```bash
+git add src/raw/librawModule.ts src/raw/decode.ts src/raw/thumbnail.ts
+git commit -m "refactor: share one WASM module instance between decode.ts and thumbnail.ts"
+```
+
+- [ ] **Step 3: Replace `src/main.ts` in full**
 
 ```ts
 import { Virtualizer, elementScroll, observeElementRect, observeElementOffset } from '@tanstack/virtual-core';
@@ -666,12 +713,22 @@ async function init(): Promise<void> {
     observeElementOffset,
     onChange: () => renderVisibleRows(),
   });
-  const unobserve = virtualizer.observe();
+  // @tanstack/virtual-core's headless package (not a framework adapter --
+  // confirmed against the installed v3.17.8 types) has no `.observe()`.
+  // `_didMount()` wires up the resize/scroll observers and returns the
+  // cleanup function; `_willUpdate()` must be called before reading
+  // `getTotalSize()`/`getVirtualItems()` to refresh measurements -- done
+  // once here for the initial render, and again at the top of
+  // `renderVisibleRows()` since that's also what `onChange` re-invokes on
+  // every scroll/resize.
+  const cleanup = virtualizer._didMount();
+  virtualizer._willUpdate();
 
   // Renders only the grid rows the virtualizer currently reports as
   // in-range -- this is the function that keeps a 10,000-file catalog from
   // creating 10,000 DOM nodes or requesting 10,000 thumbnails up front.
   function renderVisibleRows(): void {
+    virtualizer._willUpdate();
     catalogGrid.style.height = `${virtualizer.getTotalSize()}px`;
     catalogGrid.textContent = '';
     for (const virtualItem of virtualizer.getVirtualItems()) {
@@ -839,7 +896,7 @@ async function init(): Promise<void> {
 
   await renderCatalog();
 
-  window.addEventListener('beforeunload', () => unobserve(), { once: true });
+  window.addEventListener('beforeunload', () => cleanup(), { once: true });
 }
 
 init();
@@ -853,19 +910,21 @@ Compared to the catalog foundation's `renderCatalog()` (a plain nested-`<ul>` wa
 3. `renderVisibleRows()` is the only place that touches `catalogGrid`'s DOM -- it clears and rebuilds just the in-range rows/headings on every virtualizer change, positioning each via `virtualItem.start` (absolute `top`, per the CSS in Task 6).
 4. Each cell kicks off `getOrExtractThumbnail` independently and attaches the `<img>` when (if) it resolves -- cells that scroll out of range before their thumbnail resolves simply never get the image appended (the cell itself may already be gone from the DOM by then, in which case the orphaned `.then()` callback's `cell.appendChild` is a harmless no-op on a detached node).
 
-`unobserve()` (the cleanup function `Virtualizer.observe()` returns) is called on `beforeunload` -- mirrors this file's existing pattern of not leaving handles open past their needed lifetime (e.g. why `Pipeline.load()` destroys old textures), even though in practice a page unload would tear this down regardless.
+`cleanup()` (the function `_didMount()` returns) is called on `beforeunload` -- mirrors this file's existing pattern of not leaving handles open past their needed lifetime (e.g. why `Pipeline.load()` destroys old textures), even though in practice a page unload would tear this down regardless.
 
-- [ ] **Step 3: Type-check**
+**Note on `_didMount()`/`_willUpdate()`:** these are underscore-prefixed but are `@tanstack/virtual-core`'s actual public vanilla-JS/adapter-author API in this headless package (confirmed against the installed v3.17.8 type definitions during Task 5's review) -- there is no `.observe()` method here, unlike framework-specific adapters (`@tanstack/react-virtual` etc.) that wrap this package and may expose a different surface. `count`/`getScrollElement`/`estimateSize`/`overscan`/`onChange`/`getVirtualItems()`/`getTotalSize()`/`setOptions()`/`measure()` were all confirmed to match as named.
+
+- [ ] **Step 4: Type-check**
 
 Run: `npx tsc --noEmit`
-Expected: no errors. If `Virtualizer`'s constructor options or instance methods don't match what's used above (see this task's opening note), fix the specific mismatched name(s) against the actual installed types before treating this as a real type error to chase further.
+Expected: no errors.
 
-- [ ] **Step 4: Run the full test suite**
+- [ ] **Step 5: Run the full test suite**
 
 Run: `npm test`
-Expected: `48 passed` (nothing in this task touches test files)
+Expected: `48 passed` (nothing in this task touches test files; Step 2's refactor already re-verified this separately)
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add src/main.ts
