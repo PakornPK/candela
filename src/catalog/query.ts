@@ -10,7 +10,9 @@ export function listFolders(db: IDBDatabase): Promise<FolderRecord[]> {
 }
 
 // Lists files under `folderId`, optionally restricted to paths starting
-// with `pathPrefix` (empty string = every file in the folder).
+// with `pathPrefix` (empty string = every file in the folder). Per
+// pathPrefixRange's contract, a non-empty `pathPrefix` must end in "/"
+// to correctly exclude sibling folders (e.g. "day10/").
 export function listFiles(db: IDBDatabase, folderId: number, pathPrefix = ''): Promise<FileRecord[]> {
   const { lower, upper } = pathPrefixRange(pathPrefix);
   const range = IDBKeyRange.bound([folderId, lower], [folderId, upper]);
