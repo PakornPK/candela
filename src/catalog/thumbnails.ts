@@ -49,7 +49,8 @@ export async function getOrExtractThumbnail(db: IDBDatabase, record: FileRecord)
     const blob = await extractThumbnail(await file.arrayBuffer());
     await saveThumbnail(db, record.id, blob);
     return blob;
-  } catch {
+  } catch (err) {
+    console.warn(`Thumbnail extraction failed for "${record.path}":`, err);
     await saveThumbnail(db, record.id, null);
     return undefined;
   }
