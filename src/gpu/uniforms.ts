@@ -45,3 +45,14 @@ export function packCfaPattern(cfaPattern: string): Uint32Array {
     return code;
   });
 }
+
+export const WB_NEUTRAL_KELVIN = 5500;
+const WB_KELVIN_HALF_RANGE = 3500;
+
+// UI-facing conversion only: the WB slider is displayed in Kelvin, but the
+// gain math above (wbShiftToGains) and the GPU uniform layout stay in their
+// existing [-1, 1] shift space. Not a physically accurate color-temperature
+// model.
+export function kelvinToShift(kelvin: number): number {
+  return (kelvin - WB_NEUTRAL_KELVIN) / WB_KELVIN_HALF_RANGE;
+}

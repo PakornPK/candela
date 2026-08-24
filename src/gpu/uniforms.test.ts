@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { evToGain, wbShiftToGains, packAdjustUniforms, packCfaPattern } from './uniforms';
+import { evToGain, wbShiftToGains, packAdjustUniforms, packCfaPattern, kelvinToShift, WB_NEUTRAL_KELVIN } from './uniforms';
 
 describe('evToGain', () => {
   it('returns 1 at EV 0', () => {
@@ -51,5 +51,16 @@ describe('packCfaPattern', () => {
 
   it('throws on the wrong length', () => {
     expect(() => packCfaPattern('RGB')).toThrow('4-character');
+  });
+});
+
+describe('kelvinToShift', () => {
+  it('returns 0 at the neutral point', () => {
+    expect(kelvinToShift(WB_NEUTRAL_KELVIN)).toBe(0);
+  });
+
+  it('scales to +1/-1 at the ends of the Kelvin range', () => {
+    expect(kelvinToShift(9000)).toBeCloseTo(1);
+    expect(kelvinToShift(2000)).toBeCloseTo(-1);
   });
 });

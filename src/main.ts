@@ -1,6 +1,6 @@
 import { Pipeline } from './gpu/pipeline';
 import { decode, DecodeError } from './raw/decode';
-import type { AdjustState } from './gpu/uniforms';
+import { kelvinToShift, WB_NEUTRAL_KELVIN, type AdjustState } from './gpu/uniforms';
 
 const fileInput = document.querySelector<HTMLInputElement>('#file')!;
 const exposureSlider = document.querySelector<HTMLInputElement>('#exposure')!;
@@ -36,17 +36,6 @@ function updateSliderFill(slider: HTMLInputElement, neutral = 0): void {
 // unambiguously as neutral (matches Lightroom's readout style).
 function updateReadout(output: HTMLOutputElement, value: number, decimals: number): void {
   output.textContent = (value >= 0 ? '+' : '') + value.toFixed(decimals);
-}
-
-// The WB slider is displayed in Kelvin (Lightroom-style Temp control),
-// but `AdjustState.wbShift` and the gain math in gpu/uniforms.ts stay in
-// their existing [-1, 1] shift space -- this is just the UI-facing
-// conversion, not a physically accurate color-temperature model.
-const WB_NEUTRAL_KELVIN = 5500;
-const WB_KELVIN_HALF_RANGE = 3500;
-
-function kelvinToShift(kelvin: number): number {
-  return (kelvin - WB_NEUTRAL_KELVIN) / WB_KELVIN_HALF_RANGE;
 }
 
 updateSliderFill(exposureSlider);
