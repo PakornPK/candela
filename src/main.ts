@@ -17,14 +17,28 @@ const wbSlider = document.querySelector<HTMLInputElement>('#wb')!;
 const exposureValue = document.querySelector<HTMLOutputElement>('#exposure-value')!;
 const wbValue = document.querySelector<HTMLOutputElement>('#wb-value')!;
 const canvas = document.querySelector<HTMLCanvasElement>('#canvas')!;
-const errorEl = document.querySelector<HTMLParagraphElement>('#error')!;
+const errorEl = document.querySelector<HTMLDivElement>('#error')!;
+const errorMessageEl = document.querySelector<HTMLParagraphElement>('#error-message')!;
+const errorDetailEl = document.querySelector<HTMLPreElement>('#error-detail')!;
 
-function showError(message: string): void {
-  errorEl.textContent = message;
+// `message` is plain language for the person using the app; `detail` (shown
+// behind a native <details> toggle) is the raw technical error, for anyone
+// who wants it -- not shown by default so a real user isn't handed a stack
+// trace for "the app couldn't save your edit."
+function showError(message: string, detail?: string): void {
+  errorMessageEl.textContent = message;
+  errorDetailEl.textContent = detail ?? '';
+  errorEl.hidden = false;
 }
 
 function clearError(): void {
-  errorEl.textContent = '';
+  errorEl.hidden = true;
+  errorMessageEl.textContent = '';
+  errorDetailEl.textContent = '';
+}
+
+function errorDetail(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 // Colors the slider track from its neutral point toward the thumb,
@@ -75,7 +89,7 @@ async function init(): Promise<void> {
   try {
     db = await openCatalogDb();
   } catch (err) {
-    showError(err instanceof Error ? err.message : 'Failed to open the catalog database.');
+    showError("Couldn't open your photo catalog.", errorDetail(err));
     addFolderButton.disabled = true;
     return;
   }
@@ -84,7 +98,7 @@ async function init(): Promise<void> {
   try {
     pipeline = await Pipeline.create(canvas);
   } catch (err) {
-    showError(err instanceof Error ? err.message : 'WebGPU is not available.');
+    showError("This browser can't run the editor (WebGPU is required).", errorDetail(err));
     addFolderButton.disabled = true;
     exposureSlider.disabled = true;
     wbSlider.disabled = true;
@@ -163,9 +177,9 @@ async function init(): Promise<void> {
       console.log(`decode+demosaic: ${elapsed.toFixed(1)}ms (${decoded.width}x${decoded.height})`);
     } catch (err) {
       if (err instanceof DecodeError) {
-        showError(`Couldn't read this file (LibRaw error ${err.code}).`);
+        showError("Couldn't read this photo -- it may be corrupted or in an unsupported format.", `LibRaw error ${err.code}`);
       } else {
-        showError(err instanceof Error ? err.message : 'Failed to open file.');
+        showError('Something went wrong opening this file.', errorDetail(err));
       }
     }
   }
@@ -187,7 +201,7 @@ async function init(): Promise<void> {
     try {
       await saveEditState(db, currentFileId, currentEditState);
     } catch (err) {
-      showError(err instanceof Error ? err.message : 'Failed to save edit.');
+      showError("Couldn't save your edit.", errorDetail(err));
     }
   }
 
@@ -220,7 +234,7 @@ async function init(): Promise<void> {
     try {
       await saveEditState(db, currentFileId, currentEditState);
     } catch (err) {
-      showError(err instanceof Error ? err.message : 'Failed to save undo/redo.');
+      showError("Couldn't save your undo/redo.", errorDetail(err));
     }
   });
 
@@ -236,7 +250,7 @@ async function init(): Promise<void> {
       await renderCatalog();
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
-      showError(err instanceof Error ? err.message : 'Failed to import folder.');
+      showError("Couldn't import that folder.", errorDetail(err));
     } finally {
       addFolderButton.disabled = false;
     }

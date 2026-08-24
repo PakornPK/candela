@@ -45,6 +45,11 @@
         background: #4a90d9;
         cursor: pointer;
       }
+
+      #error-detail {
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
     </style>
   </head>
   <body>
@@ -54,7 +59,13 @@
       <canvas id="canvas"></canvas>
       <label>Exposure <input type="range" id="exposure" min="-3" max="3" step="0.01" value="0" /> <output id="exposure-value" for="exposure">0.00</output></label>
       <label>White balance <input type="range" id="wb" min="2000" max="10000" step="50" value="5500" /> <output id="wb-value" for="wb">5500K</output></label>
-      <p id="error" role="alert"></p>
+      <div id="error" role="alert" hidden>
+        <p id="error-message"></p>
+        <details>
+          <summary>See detail</summary>
+          <pre id="error-detail"></pre>
+        </details>
+      </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
   </body>
