@@ -1,22 +1,4 @@
-// @ts-expect-error -- Emscripten glue has no bundled types
-import createLibRawModule from '../wasm/libraw.js';
-
-interface LibRawModule {
-  ccall: (name: string, ret: string | null, argTypes: string[], args: unknown[]) => number;
-  HEAPU8: Uint8Array;
-  HEAPU16: Uint16Array;
-  _malloc: (size: number) => number;
-  _free: (ptr: number) => void;
-}
-
-let modulePromise: Promise<LibRawModule> | null = null;
-
-function getModule(): Promise<LibRawModule> {
-  if (!modulePromise) {
-    modulePromise = createLibRawModule() as Promise<LibRawModule>;
-  }
-  return modulePromise;
-}
+import { getLibRawModule } from './librawModule';
 
 // LibRaw's LibRaw::COLOR() return values, matched to wrapper.cpp's packing:
 // 0=R, 1=G, 2=B, 3=G (second green in a Bayer quad).
@@ -55,7 +37,7 @@ export interface DecodedRaw {
 }
 
 export async function decode(fileBytes: ArrayBuffer): Promise<DecodedRaw> {
-  const module = await getModule();
+  const module = await getLibRawModule();
   const bytes = new Uint8Array(fileBytes);
 
   const inputPtr = module._malloc(bytes.length);
