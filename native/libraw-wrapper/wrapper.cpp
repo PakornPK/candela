@@ -197,10 +197,10 @@ struct ThumbnailResult {
     uint8_t* data = nullptr;
     uint32_t length = 0;
     // 0 = success, LibRaw error codes otherwise (open_buffer/unpack_thumb
-    // failures), -1000 = embedded thumbnail exists but isn't JPEG format
-    // (LIBRAW_THUMBNAIL_JPEG required -- wrapper-detected, not a LibRaw
-    // code, kept clear of LibRaw's own range same as DecodeResult's -1000),
-    // -1001 = allocation/exception raised by the wrapper's own code.
+    // failures), -1000 = embedded thumbnail is missing, empty, or not JPEG
+    // format (LIBRAW_THUMBNAIL_JPEG required -- wrapper-detected, not a
+    // LibRaw code, kept clear of LibRaw's own range same as DecodeResult's
+    // -1000), -1001 = allocation/exception raised by the wrapper's own code.
     int error_code = 0;
 };
 
