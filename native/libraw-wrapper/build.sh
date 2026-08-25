@@ -20,7 +20,18 @@ if [ ! -f "$LIBRAW_LIB" ]; then
   # instead of returning cleanly. Confirmed empirically: decode() on
   # unrecognized/garbage input crashed with "memory access out of bounds"
   # until both LibRaw and the wrapper were rebuilt with -fexceptions.
-  (cd "$LIBRAW_DIR" && CXXFLAGS="-fexceptions" CFLAGS="-fexceptions" emconfigure ./configure --host=wasm32-unknown-emscripten --disable-shared --enable-static --disable-examples --disable-openmp)
+  #
+  # -DLIBRAW_OWN_SWAB: required. Emscripten's libc swab() is broken -- it
+  # zeroes the output buffer instead of swapping adjacent bytes. LibRaw's
+  # byte-swap path (libraw_swab, src/utils/utils_libraw.cpp) falls back to
+  # libc swab() when this macro is undefined, which corrupts read_shorts()
+  # for big-endian raw files (Nikon NEF: order=0x4D4D) and produces garbage
+  # predictor state in nikon_load_raw. LIBRAW_OWN_SWAB makes libraw_swab use
+  # its own byte-swap loop, which is correct in both native and WASM.
+  # Verified: all NEF variants decode with data_error=0 and bayer means
+  # exactly matching a native LibRaw build; Fuji RAF (little-endian, never
+  # hits swab) is unchanged.
+  (cd "$LIBRAW_DIR" && CXXFLAGS="-fexceptions -DLIBRAW_OWN_SWAB" CFLAGS="-fexceptions -DLIBRAW_OWN_SWAB" emconfigure ./configure --host=wasm32-unknown-emscripten --disable-shared --enable-static --disable-examples --disable-openmp)
   (cd "$LIBRAW_DIR" && emmake make lib/libraw_r.la)
 fi
 

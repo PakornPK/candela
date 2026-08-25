@@ -62,11 +62,17 @@ struct DecodeResult {
     // wrong colors, since their CFA is 6x6, not 2x2).
     uint8_t* cfa6 = nullptr;
     uint16_t* bayer_data = nullptr;
+    // LibRaw's error_count() (libraw_internal_data.unpacker_data.data_error)
+    // at the moment decode() returned -- the number of short reads / corrupt
+    // samples the unpacker hit while decoding. 0 for clean decodes.
+    uint32_t data_error = 0;
     // 0 = success, LibRaw error codes otherwise (all LibRaw codes are <= 0),
     // -1000 = implausible dimensions or missing raw_image (wrapper-detected,
     // not from LibRaw -- kept clear of LibRaw's own range, which includes
     // -1 as LIBRAW_UNSPECIFIED_ERROR), -1001 = allocation/exception raised by
-    // the wrapper's own code (new/make_unique) rather than by LibRaw.
+    // the wrapper's own code (new/make_unique) rather than by LibRaw,
+    // -1004 = unpack() "succeeded" but error_count() exceeds ~1% of the frame
+    // (garbage decode; wrapper-detected, not a LibRaw code).
     int error_code = 0;
 };
 
@@ -100,7 +106,26 @@ DecodeResult* decode(const uint8_t* file_bytes, uint32_t length) {
             return result;
         }
 
+        // Garbage-decode detection. Some cameras -- Nikon "High Efficiency*"
+        // (HE*) compression being the one that surfaced this, see the HE*
+        // diagnosis -- unpack() with LIBRAW_SUCCESS but produce unusable
+        // data: the unpacker hits short reads for a large fraction of the
+        // frame, incrementing error_count() on each one. The embedded-JPEG
+        // fallback depends on distinguishing "clean decode" from "garbage
+        // that happens to return success", so surface a large error count as
+        // a failure instead of handing ~24M corrupted samples up to the GPU.
+        // Threshold: >1% of the frame corrupted. Clean files (verified
+        // fixtures: D800 NEF all variants, Fuji RAF) report 0; the Z f HE*
+        // files report ~54%. Checked here, BEFORE the bayer copy, so an
+        // unsupported file never wastes the 48MB+ WASM-heap copy below.
+        result->data_error = static_cast<uint32_t>(processor.error_count());
+        result->width = width; // set even on the garbage path so diagnostics carry dims
+        result->height = height;
         size_t pixel_count = static_cast<size_t>(width) * height;
+        if (result->data_error > pixel_count / 100) {
+            result->error_code = -1004;
+            return result;
+        }
         auto bayer_owned = std::make_unique<uint16_t[]>(pixel_count);
 
         // Copy row-by-row using raw_pitch (LibRaw's actual bytes-per-row) so
@@ -220,6 +245,9 @@ uint8_t* decode_result_cfa6(DecodeResult* r) { return r->cfa6; }
 
 EMSCRIPTEN_KEEPALIVE
 int decode_result_error_code(DecodeResult* r) { return r->error_code; }
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t decode_result_data_error(DecodeResult* r) { return r->data_error; }
 
 EMSCRIPTEN_KEEPALIVE
 void free_decoded(DecodeResult* r) {

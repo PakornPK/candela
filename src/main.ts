@@ -1,6 +1,7 @@
 import { Virtualizer, elementScroll, observeElementRect, observeElementOffset } from '@tanstack/virtual-core';
 import { Pipeline } from './gpu/pipeline';
-import { decode, DecodeError } from './raw/decode';
+import { decode, DecodeError, type DecodedRaw } from './raw/decode';
+import { extractThumbnail } from './raw/thumbnail';
 import { WB_NEUTRAL_KELVIN } from './gpu/uniforms';
 import { openCatalogDb } from './catalog/db';
 import { listFolders, listFiles } from './catalog/query';
@@ -144,12 +145,31 @@ async function init(): Promise<void> {
   let currentFileId: number | null = null;
   let currentEditState: EditState | null = null;
   let lastDecoded: { width: number; height: number } | null = null;
+  // Embedded-JPEG preview fallback (Develop loupe): WebGPU and 2D can't
+  // share one canvas, so when a raw can't be decoded the camera's embedded
+  // JPEG renders through an absolutely-positioned <img> layered over #canvas
+  // (the develop .content region is position:relative). Pipeline paths hide
+  // it; the fallback shows it.
+  const previewImg = document.createElement('img');
+  previewImg.className = 'preview-overlay';
+  previewImg.hidden = true;
+  const previewNote = document.createElement('div');
+  previewNote.className = 'preview-note';
+  previewNote.textContent =
+    'Preview only — this file’s raw format isn’t supported yet. Exposure/WB can’t be adjusted on a preview.';
+  previewNote.hidden = true;
+  document.querySelector<HTMLElement>('#module-develop .content')!.append(previewImg, previewNote);
   // Which file's Bayer data currently lives in the GPU pipeline. Selecting a
   // file in Library no longer decodes it (decode is deferred to Develop
   // entry), so this is how Develop knows whether it needs to decode first or
   // can just re-render from the existing textures.
   let loadedFileId: number | null = null;
   let openRequestId = 0;
+  // Coalesces concurrent loadIntoPipeline() calls for the same selection into
+  // one LibRaw decode. The develop onShow path (ensureDevelopImage) and the
+  // click path (openFile) can both fire for a single selection; without this,
+  // both see loadedFileId !== record.id and both run the ~3s decode.
+  let inflightDecode: { id: number; requestId: number; promise: Promise<boolean> } | null = null;
   let folders: FolderRecord[] = [];
   let allFiles: FileRecord[] = [];
   let folderFilter: number | null = null;
@@ -410,29 +430,131 @@ async function init(): Promise<void> {
     }
   }
 
+  // Re-enables the adjust sliders when real (decoded) Bayer data takes over.
+  // While a preview is showing they're disabled, so the UI doesn't offer an
+  // adjustment that can't do anything.
+  function setAdjustEnabled(enabled: boolean): void {
+    exposureSlider.disabled = !enabled;
+    wbSlider.disabled = !enabled;
+  }
+
+  function hidePreview(): void {
+    previewImg.hidden = true;
+    previewNote.hidden = true;
+    previewImg.removeAttribute('src');
+    setAdjustEnabled(true);
+  }
+
+  // Shows a file's embedded JPEG in the preview overlay. Resolves with the
+  // preview's pixel dimensions on success, or false if the file has no
+  // usable embedded JPEG (caller falls through to the error toast). The
+  // requestId check in the load handler keeps a stale (superseded) preview
+  // from clobbering a newer selection's image on a slow JPEG decode.
+  function showPreview(record: FileRecord, fileBytes: ArrayBuffer, requestId: number): Promise<false | { width: number; height: number }> {
+    return extractThumbnail(fileBytes)
+      .then(
+        (blob) =>
+          new Promise<false | { width: number; height: number }>((resolve, reject) => {
+            const url = URL.createObjectURL(blob);
+            previewImg.addEventListener(
+              'load',
+              () => {
+                if (requestId !== openRequestId) {
+                  URL.revokeObjectURL(url);
+                  previewImg.removeAttribute('src');
+                  resolve(false); // superseded mid-load
+                  return;
+                }
+                previewImg.hidden = false;
+                previewNote.hidden = false;
+                setAdjustEnabled(false); // sliders can't touch a preview -- don't offer what won't work
+                const dims = { width: previewImg.naturalWidth, height: previewImg.naturalHeight };
+                URL.revokeObjectURL(url);
+                resolve(dims);
+              },
+              { once: true },
+            );
+            previewImg.addEventListener(
+              'error',
+              () => {
+                URL.revokeObjectURL(url);
+                reject(new Error(`embedded preview decode failed for ${record.name}`));
+              },
+              { once: true },
+            );
+            previewImg.src = url;
+          }),
+      )
+      .catch(() => false); // extraction failed (no embedded JPEG) or preview decode failed
+  }
+
   // Decodes `record` (LibRaw -- the slow synchronous step), sizes the canvas,
   // and uploads the Bayer data to the GPU. Callers own the render. Returns
   // false if a newer selection superseded this one mid-decode.
   async function loadIntoPipeline(record: FileRecord, requestId: number): Promise<boolean> {
+    // Already showing this file (re-clicking the current photo, or clicking
+    // back to one that's loaded) -- nothing to decode; the pipeline holds the
+    // Bayer data. This is what keeps filmstrip clicking in Develop fast
+    // instead of re-running the ~3s LibRaw decode on every click.
+    if (loadedFileId === record.id) return true;
+    // Same selection already decoding (e.g. onShow's ensureDevelopImage raced
+    // with the click's openFile, both with this requestId) -- share it.
+    if (inflightDecode && inflightDecode.id === record.id && inflightDecode.requestId === requestId) {
+      return inflightDecode.promise;
+    }
     const start = performance.now();
-    const file = await record.handle.getFile();
-    const decoded = await decode(await file.arrayBuffer());
-    if (requestId !== openRequestId) return false; // superseded during decode
-    canvas.width = decoded.width;
-    canvas.height = decoded.height;
-    // Re-create the WebGPU surface at the just-set size. Chrome 151 ties the
-    // drawing buffer to the canvas size at configure() time -- a configure
-    // left over from a different-size file would leave the blit target
-    // mismatched with the loaded image.
-    pipeline.show();
-    pipeline.load(decoded);
-    loadedFileId = record.id;
-    lastDecoded = { width: decoded.width, height: decoded.height };
-    // waitForGPU() is awaited only for the perf log below -- it doesn't gate
-    // anything, since nothing after it touches shared state.
-    await pipeline.waitForGPU();
-    console.log(`decode+demosaic: ${(performance.now() - start).toFixed(1)}ms (${decoded.width}x${decoded.height})`);
-    return true;
+    const promise = (async () => {
+      const file = await record.handle.getFile();
+      const fileBytes = await file.arrayBuffer();
+      if (requestId !== openRequestId) return false; // superseded during file read
+      let decoded: DecodedRaw;
+      try {
+        decoded = await decode(fileBytes);
+      } catch (err) {
+        // Raw decode failed OR returned garbage (wrapper reports -1004 when
+        // LibRaw's error_count() exceeds ~1% of the frame -- see wrapper.cpp;
+        // Nikon HE* is the case that surfaced this). Show the camera's
+        // embedded JPEG instead of an error toast or streaks; the exposure/WB
+        // sliders correctly do nothing for a preview (the pipeline has no
+        // textures loaded).
+        if (err instanceof DecodeError) {
+          const dims = await showPreview(record, fileBytes, requestId);
+          if (requestId !== openRequestId) return false; // superseded during preview extract
+          if (dims) {
+            loadedFileId = record.id;
+            lastDecoded = dims;
+            canvas.width = dims.width;
+            canvas.height = dims.height;
+            console.log(`decode failed (LibRaw ${err.code}), showing embedded preview (${dims.width}x${dims.height})`);
+            return true;
+          }
+        }
+        throw err; // not a DecodeError, or no embedded JPEG -- let caller show the error
+      }
+      if (requestId !== openRequestId) return false; // superseded during decode
+      hidePreview();
+      canvas.width = decoded.width;
+      canvas.height = decoded.height;
+      // Re-create the WebGPU surface at the just-set size. Chrome 151 ties the
+      // drawing buffer to the canvas size at configure() time -- a configure
+      // left over from a different-size file would leave the blit target
+      // mismatched with the loaded image.
+      pipeline.show();
+      pipeline.load(decoded);
+      loadedFileId = record.id;
+      lastDecoded = { width: decoded.width, height: decoded.height };
+      // waitForGPU() is awaited only for the perf log below -- it doesn't gate
+      // anything, since nothing after it touches shared state.
+      await pipeline.waitForGPU();
+      console.log(`decode+demosaic: ${(performance.now() - start).toFixed(1)}ms (${decoded.width}x${decoded.height})`);
+      return true;
+    })();
+    inflightDecode = { id: record.id, requestId, promise };
+    try {
+      return await promise;
+    } finally {
+      if (inflightDecode?.id === record.id && inflightDecode.requestId === requestId) inflightDecode = null;
+    }
   }
 
   // Decodes + loads the current selection if its Bayer data isn't already in
@@ -567,7 +689,9 @@ async function init(): Promise<void> {
           // already did, if it ran).
           pipeline.show();
           renderOps(currentOps(currentEditState!));
-          runDevelopDiagnostics();
+          // A preview file renders through the overlay img, not the canvas --
+          // the diagnostic would read a black canvas under it, so skip.
+          if (previewImg.hidden) runDevelopDiagnostics();
         });
       });
     },
