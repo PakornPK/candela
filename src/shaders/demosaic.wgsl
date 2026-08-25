@@ -1,10 +1,10 @@
 struct Cfa {
-  // 36 CFA colors (6x6, row-major), 4 packed per u32: color at (row, col)
-  // is word (row*6+col)/4, component (row*6+col)%4. Values 0=R 1=G 2=B.
-  // Bayer cameras tile their 2x2 to fill the 36, so one lookup handles
-  // both Bayer and X-Trans (whose CFA is genuinely 6x6 -- treating it as
-  // 2x2 renders every pixel as the same color, which is the color
-  // speckling this unified layout replaces).
+  // 36 CFA colors (6x6, row-major), one u32 per color, filling all 144
+  // bytes of the 9xvec4 buffer: color at (row, col) is word (row*6+col)/4,
+  // component (row*6+col)%4. Values 0=R 1=G 2=B. Bayer cameras tile their
+  // 2x2 to fill the 36, so one lookup handles both Bayer and X-Trans (whose
+  // CFA is genuinely 6x6 -- treating it as 2x2 renders every pixel as the
+  // same color, which is the color speckling this unified layout replaces).
   pattern: array<vec4<u32>, 9>,
 };
 
@@ -45,7 +45,8 @@ fn averageColor(center: vec2<i32>, dims: vec2<u32>, color: u32) -> f32 {
       }
     }
   }
-  return count > 0.0 ? sum / count : 0.0;
+  // WGSL has no `?:` ternary -- select(if-false, if-true, cond).
+  return select(0.0, sum / count, count > 0.0);
 }
 
 @compute @workgroup_size(8, 8)
