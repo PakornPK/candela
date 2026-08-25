@@ -144,6 +144,11 @@ async function init(): Promise<void> {
   let currentFileId: number | null = null;
   let currentEditState: EditState | null = null;
   let lastDecoded: { width: number; height: number } | null = null;
+  // Which file's Bayer data currently lives in the GPU pipeline. Selecting a
+  // file in Library no longer decodes it (decode is deferred to Develop
+  // entry), so this is how Develop knows whether it needs to decode first or
+  // can just re-render from the existing textures.
+  let loadedFileId: number | null = null;
   let openRequestId = 0;
   let folders: FolderRecord[] = [];
   let allFiles: FileRecord[] = [];
@@ -374,42 +379,66 @@ async function init(): Promise<void> {
         renderVisibleRows();
       }
 
-      const start = performance.now();
-      const file = await record.handle.getFile();
-      const decoded = await decode(await file.arrayBuffer());
-      if (requestId !== openRequestId) return; // superseded during decode -- skip the wasted edit-state load
-
       const editState = await loadEditState(db, record.id);
       if (requestId !== openRequestId) return; // superseded while loading edit state
 
-      // Everything above only touched local variables (decoded, editState) --
-      // no shared state has been written yet. From here everything is
-      // synchronous with no `await` in between, so this whole block commits
-      // atomically: canvas, GPU pipeline, and catalog state all move together,
-      // and nothing else can interleave a stale write partway through.
-      canvas.width = decoded.width;
-      canvas.height = decoded.height;
-      pipeline.load(decoded);
       currentFileId = record.id;
       currentEditState = editState;
-      lastDecoded = { width: decoded.width, height: decoded.height };
-      const ops = currentOps(currentEditState);
+      const ops = currentOps(editState);
       applyOpsToSliders(ops);
-      // Only render immediately if the loupe is actually on screen. Files are
-      // normally opened from the grid while Library is active, and the
-      // develop module (which contains the canvas) is display:none then --
-      // rendering into a hidden WebGPU surface can throw or leave the canvas
-      // black. The develop module's onShow handler re-renders on switch, so
-      // skipping here costs nothing: the image appears when the loupe shows.
-      if (getState().module === 'develop') renderOps(ops);
+
+      // The full raw decode is the slow synchronous LibRaw step (~1.6s), so
+      // it runs only when the image is about to be shown -- i.e. the loupe is
+      // already on screen. A Library grid click just selects: culling stays
+      // responsive, and Develop entry (onShow) decodes on demand. When we
+      // skip the decode, lastDecoded is cleared so metadata can't show a
+      // previous file's dimensions.
+      if (getState().module === 'develop') {
+        const ok = await loadIntoPipeline(record, requestId);
+        if (ok) renderOps(currentOps(currentEditState));
+      } else {
+        lastDecoded = null;
+      }
       renderMetadata();
       renderHistory();
+    } catch (err) {
+      if (err instanceof DecodeError) {
+        showError("Couldn't read this photo -- it may be corrupted or in an unsupported format.", `LibRaw error ${err.code}`);
+      } else {
+        showError('Something went wrong opening this file.', errorDetail(err));
+      }
+    }
+  }
 
-      // waitForGPU() is awaited only for the perf log below -- it doesn't
-      // gate anything, since nothing after it touches shared state.
-      await pipeline.waitForGPU();
-      const elapsed = performance.now() - start;
-      console.log(`decode+demosaic: ${elapsed.toFixed(1)}ms (${decoded.width}x${decoded.height})`);
+  // Decodes `record` (LibRaw -- the slow synchronous step), sizes the canvas,
+  // and uploads the Bayer data to the GPU. Callers own the render. Returns
+  // false if a newer selection superseded this one mid-decode.
+  async function loadIntoPipeline(record: FileRecord, requestId: number): Promise<boolean> {
+    const start = performance.now();
+    const file = await record.handle.getFile();
+    const decoded = await decode(await file.arrayBuffer());
+    if (requestId !== openRequestId) return false; // superseded during decode
+    canvas.width = decoded.width;
+    canvas.height = decoded.height;
+    pipeline.load(decoded);
+    loadedFileId = record.id;
+    lastDecoded = { width: decoded.width, height: decoded.height };
+    // waitForGPU() is awaited only for the perf log below -- it doesn't gate
+    // anything, since nothing after it touches shared state.
+    await pipeline.waitForGPU();
+    console.log(`decode+demosaic: ${(performance.now() - start).toFixed(1)}ms (${decoded.width}x${decoded.height})`);
+    return true;
+  }
+
+  // Decodes + loads the current selection if its Bayer data isn't already in
+  // the pipeline. Called on Develop entry for a file that was selected from
+  // Library (which no longer decodes eagerly).
+  async function ensureDevelopImage(): Promise<void> {
+    if (loadedFileId === currentFileId) return;
+    const record = allFiles.find((f) => f.id === currentFileId);
+    if (!record) return;
+    try {
+      await loadIntoPipeline(record, openRequestId);
     } catch (err) {
       if (err instanceof DecodeError) {
         showError("Couldn't read this photo -- it may be corrupted or in an unsupported format.", `LibRaw error ${err.code}`);
@@ -515,21 +544,25 @@ async function init(): Promise<void> {
       // active; the WebGPU drawing buffer's contents are undefined after
       // the surface is hidden/re-shown, so re-render from the existing
       // textures (cheap -- no decode; the pipeline already holds them).
-      if (currentFileId !== null && currentEditState) {
-        const ops = currentOps(currentEditState);
-        // Two-part fix for the black canvas when entering Develop:
-        //  1. show() re-creates the WebGPU surface -- a surface configured
-        //     while the canvas was display:none can stay stale/1x1 when it
-        //     becomes visible again.
-        //  2. the render is deferred to the next animation frame so layout
-        //     has run on the now-visible canvas first (switchModule calls
-        //     onShow() synchronously right after unhiding).
-        pipeline.show();
-        requestAnimationFrame(() => {
-          renderOps(ops);
+      if (currentFileId === null || !currentEditState) return;
+      // Two-part fix for the black canvas when entering Develop:
+      //  1. show() re-creates the WebGPU surface -- a surface configured
+      //     while the canvas was display:none can stay stale/1x1 when it
+      //     becomes visible again.
+      //  2. the render is deferred to the next animation frame so layout has
+      //     run on the now-visible canvas first (switchModule calls onShow()
+      //     synchronously right after unhiding).
+      pipeline.show();
+      requestAnimationFrame(() => {
+        // Files selected from Library are decoded lazily (see openFile), so
+        // on first Develop entry the Bayer data may not be in the pipeline
+        // yet -- decode + load it, then render from the existing textures
+        // (cheap: no re-decode when the data is already loaded).
+        ensureDevelopImage().then(() => {
+          renderOps(currentOps(currentEditState!));
           runDevelopDiagnostics();
         });
-      }
+      });
     },
     onHide: () => {},
   });
