@@ -1,5 +1,5 @@
 const DB_NAME = 'candela-catalog';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 export function openCatalogDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -21,6 +21,10 @@ export function openCatalogDb(): Promise<IDBDatabase> {
 
       if (event.oldVersion < 2) {
         db.createObjectStore('thumbnails', { keyPath: 'fileId' });
+      }
+
+      if (event.oldVersion < 3) {
+        db.createObjectStore('presets', { keyPath: 'id', autoIncrement: true });
       }
     };
 

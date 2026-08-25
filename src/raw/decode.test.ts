@@ -19,6 +19,41 @@ describe('decode', () => {
     // The full 6x6 CFA is always present, one byte per position.
     expect(result.cfa6.length).toBe(36);
     expect([...result.cfa6].every((c) => c === 0 || c === 1 || c === 2)).toBe(true);
+
+    // The camera color matrix (LibRaw rgb_cam folded to a 3x3) is present
+    // and sane: rows are row-normalized (sum to ~1), and it's not the
+    // identity (the X100V has a real matrix). This exercises the new
+    // wrapper accessors end-to-end on a real file.
+    expect(result.hasColorMatrix).toBe(true);
+    expect(result.colorMatrix.length).toBe(9);
+    for (const row of [0, 3, 6]) {
+      const sum = result.colorMatrix[row] + result.colorMatrix[row + 1] + result.colorMatrix[row + 2];
+      expect(Math.abs(sum - 1)).toBeLessThan(0.05);
+    }
+    expect([...result.colorMatrix]).not.toEqual([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+
+    // Shooting metadata: the fixture is a real X100V exposure, so EXIF fills
+    // all four. A value of 0 means "not reported" (the wrapper's sentinel),
+    // so a photo that lacks one field stays valid -- but a real shot must
+    // carry an ISO and an exposure time.
+    expect(result.cameraMeta.iso).toBeGreaterThan(0);
+    expect(result.cameraMeta.shutter).toBeGreaterThan(0);
+    expect(result.cameraMeta.aperture).toBeGreaterThan(0);
+    expect(result.cameraMeta.focal).toBeGreaterThan(0);
+
+    // As-Shot WB: a real camera reports cam_mul, so asShotGains is present,
+    // green-normalized (g=1), and not the flat neutral (1,1,1) -- a daylight
+    // shot of a real scene needs real WB multipliers. Exercises the new
+    // cam_mul wrapper accessors + DataView read + green normalization
+    // end-to-end. The exact values are EXIF-verified: this X100V records
+    // WB_GRBLevels [G=302, R=567, B=560], so R/G=567/302 and B/G=560/302.
+    // The regression this locks in: Fuji stores WB as 3 values, so cam_mul's
+    // G2 is 0 -- a naive (G1+G2)/2 average halves green and doubles the R/B
+    // gains (a 2x warm cast vs the camera's actual WB).
+    expect(result.asShotGains).toBeDefined();
+    expect(result.asShotGains!.g).toBe(1);
+    expect(result.asShotGains!.r).toBeCloseTo(567 / 302, 5);
+    expect(result.asShotGains!.b).toBeCloseTo(560 / 302, 5);
   });
 
   it('reports a 6x6 CFA for the X-Trans fixture (not an all-G 2x2 tile)', async () => {

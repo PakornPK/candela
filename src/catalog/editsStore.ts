@@ -47,14 +47,47 @@ export function isValidEditRow(row: unknown): row is EditRow {
 // unconditionally and assume they're only ever called on real Ops, so
 // this is the one place that needs to check that assumption before a
 // stored row is trusted.
-function isValidOp(op: unknown): op is Op {
+export function isValidOp(op: unknown): op is Op {
   if (typeof op !== 'object' || op === null) return false;
   const candidate = op as { kind?: unknown };
+  if (candidate.kind === 'profile') {
+    const p = (op as { profile?: unknown }).profile;
+    return p === 'camera' || p === 'neutral';
+  }
   if (candidate.kind === 'exposure') {
     return typeof (op as { ev?: unknown }).ev === 'number';
   }
   if (candidate.kind === 'whiteBalance') {
-    return typeof (op as { kelvin?: unknown }).kelvin === 'number';
+    // `tint` optional: rows saved before the tint slider existed are valid.
+    // `gains` optional: only present on As-Shot WB rows (exact camera gains).
+    const wb = op as { kelvin?: unknown; tint?: unknown; gains?: unknown };
+    const g = wb.gains as { r?: unknown; g?: unknown; b?: unknown } | undefined;
+    const gainsOk =
+      wb.gains === undefined ||
+      (typeof wb.gains === 'object' && wb.gains !== null &&
+        typeof g?.r === 'number' && typeof g?.g === 'number' && typeof g?.b === 'number');
+    return typeof wb.kelvin === 'number' && (wb.tint === undefined || typeof wb.tint === 'number') && gainsOk;
+  }
+  if (candidate.kind === 'tone') {
+    const t = op as { contrast?: unknown; highlights?: unknown; shadows?: unknown; whites?: unknown; blacks?: unknown };
+    return [t.contrast, t.highlights, t.shadows, t.whites, t.blacks].every((v) => typeof v === 'number');
+  }
+  if (candidate.kind === 'toneCurve') {
+    const c = op as { mode?: unknown; points?: unknown; highlights?: unknown; lights?: unknown; darks?: unknown; shadows?: unknown };
+    if (c.mode === 'region') {
+      return [c.highlights, c.lights, c.darks, c.shadows].every((v) => typeof v === 'number');
+    }
+    // `mode: 'point'` rows and pre-mode legacy rows carry a flat [x,y] list.
+    return (
+      Array.isArray(c.points) &&
+      c.points.length > 0 &&
+      c.points.length % 2 === 0 &&
+      c.points.every((v) => typeof v === 'number')
+    );
+  }
+  if (candidate.kind === 'presence') {
+    const pr = op as { texture?: unknown; clarity?: unknown; dehaze?: unknown; vibrance?: unknown; saturation?: unknown };
+    return [pr.texture, pr.clarity, pr.dehaze, pr.vibrance, pr.saturation].every((v) => typeof v === 'number');
   }
   return false;
 }

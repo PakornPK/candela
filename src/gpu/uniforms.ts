@@ -1,32 +1,34 @@
+import type { WbGains } from '../catalog/types';
+
 export function evToGain(ev: number): number {
   return Math.pow(2, ev);
 }
 
 export interface WhiteBalanceGains {
   rGain: number;
+  gGain: number;
   bGain: number;
 }
 
 // wbShift in [-1, 1]: positive shifts warmer (boost red, cut blue).
-export function wbShiftToGains(wbShift: number): WhiteBalanceGains {
-  const clamped = Math.max(-1, Math.min(1, wbShift));
+// tint in [-150, 150] (LrC's range): positive shifts magenta (cut green),
+// negative shifts green (boost green) -- the green/magenta axis orthogonal to
+// the blue/yellow Kelvin axis.
+export function wbShiftToGains(wbShift: number, tint = 0): WhiteBalanceGains {
+  // Exponential gains: ±1 shift = ±1 stop (2x / 0.5x). The old linear gains
+  // (1 ± 0.5c) capped at 1.5x / 0.67x -- the "extremes too weak" complaint.
+  // 2^c is always positive, so no gain can go negative (the previous clamp
+  // existed to stop 1 + 0.5c dipping below 0).
+  const c = Math.max(-1, Math.min(1, wbShift));
+  // tint exponent 2: +150 cuts green to 2^-2 = 0.25 (strong magenta), +30 ->
+  // 2^-0.4 = 0.76 -- a small move is already visible, matching LrC's
+  // "นิดเดียวก็เข้ม" response.
+  const t = Math.max(-1, Math.min(1, tint / 150));
   return {
-    rGain: 1 + clamped * 0.5,
-    bGain: 1 - clamped * 0.5,
+    rGain: Math.pow(2, c),
+    gGain: Math.pow(2, -t * 2),
+    bGain: Math.pow(2, -c),
   };
-}
-
-export interface AdjustState {
-  exposureEV: number;
-  wbShift: number;
-}
-
-// Layout must match the `Adjust` uniform struct in adjust.wgsl:
-// struct Adjust { exposureGain: f32, rGain: f32, bGain: f32, _pad: f32 }
-export function packAdjustUniforms(state: AdjustState): Float32Array {
-  const exposureGain = evToGain(state.exposureEV);
-  const { rGain, bGain } = wbShiftToGains(state.wbShift);
-  return new Float32Array([exposureGain, rGain, bGain, 0]);
 }
 
 // Layout must match the `Cfa` uniform struct in demosaic.wgsl:
@@ -45,13 +47,65 @@ export function packCfa6(cfa6: Uint8Array): Uint32Array {
   return Uint32Array.from(cfa6, (c) => c);
 }
 
-export const WB_NEUTRAL_KELVIN = 5500;
-const WB_KELVIN_HALF_RANGE = 3500;
+// Camera -> linear sRGB 3x3 (row-major, 9 floats) padded to 3 vec4s, matching
+// the `ColorMat` struct in cameraColor.wgsl (one vec4 per output row, .w pad).
+export function packColorMatrix(m: Float32Array): Float32Array {
+  if (m.length !== 9) {
+    throw new Error(`Expected 9 matrix entries, got ${m.length}`);
+  }
+  return new Float32Array([
+    m[0], m[1], m[2], 0,
+    m[3], m[4], m[5], 0,
+    m[6], m[7], m[8], 0,
+  ]);
+}
 
-// UI-facing conversion only: the WB slider is displayed in Kelvin, but the
-// gain math above (wbShiftToGains) and the GPU uniform layout stay in their
-// existing [-1, 1] shift space. Not a physically accurate color-temperature
-// model.
+export const WB_NEUTRAL_KELVIN = 5500;
+export const WB_MIN_KELVIN = 2000;
+export const WB_MAX_KELVIN = 50000;
+
+// UI-facing conversion only: the WB slider is displayed in Kelvin (2000..50000,
+// LrC's full range), but the gain math above (wbShiftToGains) and the GPU
+// uniform layout stay in their existing [-1, 1] shift space. MIRED-linear:
+// mired = 1e6/K is the perceptually uniform temperature scale, so shift is
+// linear in mired and each equal slider step is an equal warmth step. This is
+// the fix for "temp slider is clustered": on a linear-Kelvin track the whole
+// cool half of the response (2000..5500K) sat in the left ~7% of the width.
+// Both ends still reach ±1 (full shift). 5500K -> 0. Not a physically
+// accurate color-temperature model.
 export function kelvinToShift(kelvin: number): number {
-  return (kelvin - WB_NEUTRAL_KELVIN) / WB_KELVIN_HALF_RANGE;
+  const m = 1e6 / kelvin;
+  const mN = 1e6 / WB_NEUTRAL_KELVIN;
+  if (m > mN) return -(m - mN) / (1e6 / WB_MIN_KELVIN - mN); // cool: 5500..2000K -> 0..-1
+  if (m < mN) return (mN - m) / (mN - 1e6 / WB_MAX_KELVIN); // warm: 5500..50000K -> 0..+1
+  return 0; // exact neutral (m == mN): avoid the cool branch's -0
+}
+
+// Inverse of kelvinToShift. Used for the WB slider readout when an edit
+// carries exact As-Shot gains -- the slider is still a kelvin track. Clamps
+// like the forward direction (which is bounded to [-1, 1] by the Kelvin
+// range), so an out-of-range shift reads as the corresponding end.
+export function shiftToKelvin(c: number): number {
+  const s = Math.max(-1, Math.min(1, c));
+  const mN = 1e6 / WB_NEUTRAL_KELVIN;
+  if (s < 0) return 1e6 / (mN + -s * (1e6 / WB_MIN_KELVIN - mN));
+  if (s > 0) return 1e6 / (mN - s * (mN - 1e6 / WB_MAX_KELVIN));
+  return WB_NEUTRAL_KELVIN;
+}
+
+// As-Shot gains -> kelvin/tint readout only (the render keeps the exact gains
+// until the user drags). Temp axis is the R/B ratio: wbShiftToGains maps
+// shift c to rGain=2^c, bGain=2^-c, so the shift matching a (r,b) pair is the
+// midpoint of the two log gains. Tint is the green residual -- a pure
+// temperature keeps rGain*bGain=1, so a product >1 means both R and B need
+// green cut (magenta cast, +tint) and <1 is a green boost (-tint). Both
+// clamped to the slider ranges.
+export function gainsToKelvin(g: WbGains): number {
+  const c = Math.max(-1, Math.min(1, 0.5 * (Math.log2(Math.max(g.r, 1e-6)) - Math.log2(Math.max(g.b, 1e-6)))));
+  return shiftToKelvin(c);
+}
+
+export function gainsToTint(g: WbGains): number {
+  const p = Math.log2(Math.max(g.r, 1e-6)) + Math.log2(Math.max(g.b, 1e-6));
+  return Math.max(-150, Math.min(150, 37.5 * p));
 }

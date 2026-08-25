@@ -21,17 +21,36 @@ function ev(p: {
 
 describe('keyToAction', () => {
   it('maps module and navigation keys', () => {
-    expect(keyToAction(ev({ key: 'g' }))).toBe('grid');
-    expect(keyToAction(ev({ key: 'G' }))).toBe('grid');
-    expect(keyToAction(ev({ key: 'e' }))).toBe('loupe');
-    expect(keyToAction(ev({ key: 'ArrowLeft' }))).toBe('prev');
-    expect(keyToAction(ev({ key: 'ArrowRight' }))).toBe('next');
+    expect(keyToAction(ev({ key: 'g' }))).toEqual({ type: 'grid' });
+    expect(keyToAction(ev({ key: 'G' }))).toEqual({ type: 'grid' });
+    expect(keyToAction(ev({ key: 'e' }))).toEqual({ type: 'loupe' });
+    expect(keyToAction(ev({ key: 'ArrowLeft' }))).toEqual({ type: 'prev' });
+    expect(keyToAction(ev({ key: 'ArrowRight' }))).toEqual({ type: 'next' });
   });
 
   it('maps Ctrl/Cmd+Z to undo, with Shift for redo', () => {
-    expect(keyToAction(ev({ key: 'z', ctrl: true }))).toBe('undo');
-    expect(keyToAction(ev({ key: 'z', meta: true }))).toBe('undo');
-    expect(keyToAction(ev({ key: 'z', ctrl: true, shift: true }))).toBe('redo');
+    expect(keyToAction(ev({ key: 'z', ctrl: true }))).toEqual({ type: 'undo' });
+    expect(keyToAction(ev({ key: 'z', meta: true }))).toEqual({ type: 'undo' });
+    expect(keyToAction(ev({ key: 'z', ctrl: true, shift: true }))).toEqual({ type: 'redo' });
+  });
+
+  it('maps culling keys: p/x/u pick, reject, and clear', () => {
+    expect(keyToAction(ev({ key: 'p' }))).toEqual({ type: 'pick' });
+    expect(keyToAction(ev({ key: 'X' }))).toEqual({ type: 'reject' });
+    expect(keyToAction(ev({ key: 'u' }))).toEqual({ type: 'clearCull' });
+  });
+
+  it('maps 1-5 to ratings and 6-9 to colors (red/yellow/green/blue)', () => {
+    expect(keyToAction(ev({ key: '1' }))).toEqual({ type: 'rate', rating: 1 });
+    expect(keyToAction(ev({ key: '5' }))).toEqual({ type: 'rate', rating: 5 });
+    expect(keyToAction(ev({ key: '6' }))).toEqual({ type: 'color', color: 1 });
+    expect(keyToAction(ev({ key: '9' }))).toEqual({ type: 'color', color: 4 });
+  });
+
+  it('does not fire culls with a modifier held', () => {
+    expect(keyToAction(ev({ key: 'p', ctrl: true }))).toBeNull();
+    expect(keyToAction(ev({ key: 'x', shift: true }))).toBeNull();
+    expect(keyToAction(ev({ key: '3', meta: true }))).toBeNull();
   });
 
   it('ignores unknown keys', () => {

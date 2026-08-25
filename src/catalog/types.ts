@@ -13,19 +13,66 @@ export interface FileRecord {
   handle: FileSystemFileHandle;
   size: number;
   lastModified: number;
+  // Culling marks -- optional so existing rows load unchanged (IndexedDB rows
+  // are schemaless; no version bump needed for these).
+  flag?: boolean; // true = picked, false = rejected; absent = unflagged
+  rating?: number; // 1..5 stars, absent = unrated
+  color?: number; // 1..4 red/yellow/green/blue, absent = none
+}
+
+// The tone curve op has two shapes -- LrC's "Adjust:" modes. `region` is the
+// parametric curve (4 tonal-region sliders), `point` is the direct curve
+// editor (flat [x0,y0,...] list). Stored rows from before the region mode
+// existed have `{kind:'toneCurve', points}` with no `mode`; isValidOp treats
+// those as point mode.
+export type ToneCurveOp =
+  | { kind: 'toneCurve'; mode: 'region'; highlights: number; lights: number; darks: number; shadows: number }
+  | { kind: 'toneCurve'; mode: 'point'; points: number[] };
+
+// Raw white-balance channel gains (green-normalized: g=1). The `whiteBalance`
+// op carries these when it's an As-Shot WB -- a camera's cam_mul is not
+// representable as kelvin+tint in wbShiftToGains (which forces rGain*bGain=1),
+// so the exact gains must survive as an op field to render the camera's own
+// white point faithfully.
+export interface WbGains {
+  r: number;
+  g: number;
+  b: number;
 }
 
 export type Op =
+  | { kind: 'profile'; profile: 'camera' | 'neutral' }
   | { kind: 'exposure'; ev: number }
-  | { kind: 'whiteBalance'; kelvin: number };
-  // future op kinds (crop, curve, ...) extend this union.
+  | { kind: 'whiteBalance'; kelvin: number; tint: number; gains?: WbGains }
+  | { kind: 'tone'; contrast: number; highlights: number; shadows: number; whites: number; blacks: number }
+  | ToneCurveOp
+  | { kind: 'presence'; texture: number; clarity: number; dehaze: number; vibrance: number; saturation: number };
+  // future op kinds (crop, ...) extend this union.
+
+export function isProfileOp(op: Op): op is { kind: 'profile'; profile: 'camera' | 'neutral' } {
+  return op.kind === 'profile';
+}
 
 export function isExposureOp(op: Op): op is { kind: 'exposure'; ev: number } {
   return op.kind === 'exposure';
 }
 
-export function isWhiteBalanceOp(op: Op): op is { kind: 'whiteBalance'; kelvin: number } {
+export function isWhiteBalanceOp(op: Op): op is { kind: 'whiteBalance'; kelvin: number; tint: number; gains?: WbGains } {
   return op.kind === 'whiteBalance';
+}
+
+export function isToneOp(op: Op): op is { kind: 'tone'; contrast: number; highlights: number; shadows: number; whites: number; blacks: number } {
+  return op.kind === 'tone';
+}
+
+export function isToneCurveOp(op: Op): op is ToneCurveOp {
+  return op.kind === 'toneCurve';
+}
+
+export function isPresenceOp(
+  op: Op,
+): op is { kind: 'presence'; texture: number; clarity: number; dehaze: number; vibrance: number; saturation: number } {
+  return op.kind === 'presence';
 }
 
 export interface EditState {

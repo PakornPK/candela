@@ -56,6 +56,7 @@ export function createFilmstrip(opts: FilmstripOptions): Filmstrip {
 
       const cell = document.createElement('div');
       cell.className = 'filmstrip-cell' + (file.id === selectedId ? ' selected' : '');
+      cell.dataset.fileId = String(file.id); // lets selection paint in place (subscribe) without a rebuild
       cell.style.left = `${item.start}px`;
       cell.title = file.name;
       cell.addEventListener('click', () => onSelect(file));
@@ -75,16 +76,33 @@ export function createFilmstrip(opts: FilmstripOptions): Filmstrip {
     }
   }
 
-  // Re-render on every state change: highlights the selected cell and
-  // (when the selection changed) scrolls it into view. Re-rendering on
-  // module switches too is harmless -- cells rebuild from the thumbnail
-  // promise cache, no re-extraction.
+  // Selection changed (grid click, arrow keys, module switch). A full
+  // renderVisible() rebuild on every click was the strip "reloading" jank,
+  // so when the selected cell is already fully on screen, paint the
+  // highlight in place (toggle .selected keyed by dataset.fileId) -- no
+  // scroll, no rebuild. Any other case (cell off-screen or not yet rendered)
+  // scrolls it into view and rebuilds synchronously, THIS frame: waiting for
+  // the scroll event's onChange is a frame or more later and reads as a
+  // selection lag.
   const unsubscribe = subscribe(() => {
     const { selectedId } = getState();
     const files = getFiles();
     const index = files.findIndex((f) => f.id === selectedId);
-    if (index >= 0) virtualizer.scrollToIndex(index, { align: 'center' });
-    renderVisible();
+    if (index < 0) { renderVisible(); return; }
+    virtualizer._willUpdate();
+    const item = virtualizer.getVirtualItems().find((v) => v.index === index);
+    if (item) {
+      const start = item.start, end = start + CELL_WIDTH;
+      const viewStart = scrollEl.scrollLeft, viewEnd = viewStart + scrollEl.clientWidth;
+      if (start >= viewStart && end <= viewEnd) {
+        for (const cell of trackEl.querySelectorAll<HTMLElement>('.filmstrip-cell')) {
+          cell.classList.toggle('selected', cell.dataset.fileId === String(selectedId));
+        }
+        return; // no scroll, no rebuild
+      }
+    }
+    virtualizer.scrollToIndex(index, { align: 'center' });
+    renderVisible(); // synchronous: outline paints the same frame as the click
   });
 
   return {

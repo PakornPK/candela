@@ -66,6 +66,31 @@ struct DecodeResult {
     // at the moment decode() returned -- the number of short reads / corrupt
     // samples the unpacker hit while decoding. 0 for clean decodes.
     uint32_t data_error = 0;
+    // Camera color matrix: the row-normalized camera-RGB -> linear-sRGB 3x3
+    // folded from imgdata.color.rgb_cam[3][4]. Row-major, one row per output
+    // channel: [Rr Rg Rb, Gr Gg Gb, Br Bg Bb]. All zeros when the camera has
+    // no usable matrix (see has_color_matrix).
+    float color_matrix[9] = {};
+    // 1 when the camera has a usable color matrix (imgdata.color.cam_xyz
+    // populated by adobe_coeff during open_buffer), 0 when JS must fall back
+    // to the identity matrix.
+    int has_color_matrix = 0;
+    // Shooting metadata, packed [iso_speed, shutter, aperture, focal_len]
+    // from imgdata.other -- 0 when the file doesn't report a value (not every
+    // camera fills all four). shutter is exposure time in seconds (1/140s ->
+    // ~0.00714); JS formats it as a fraction. Same array-of-floats pattern as
+    // color_matrix so JS can DataView-read without a HEAPF32 heap view.
+    float camera_meta[4] = {};
+    // As-shot white-balance scale factors (imgdata.color.cam_mul), one per CFA
+    // channel [R, G1, B, G2]. NOT normalized: LibRaw stores them in the
+    // camera's natural scale, so JS normalizes by the green reference before
+    // use. G2 (cam_mul[3]) can be 0 -- cameras that report a 3-value WB
+    // (Fuji: [G, R, B]) leave the second green unfilled -- so JS averages
+    // G1+G2 only when both are nonzero (a naive average would halve green
+    // and double the R/B gains, a 2x warm cast). has_cam_mul is 0 when the
+    // camera reports no usable values (all-zero cam_mul -- rare).
+    float cam_mul[4] = {};
+    int has_cam_mul = 0;
     // 0 = success, LibRaw error codes otherwise (all LibRaw codes are <= 0),
     // -1000 = implausible dimensions or missing raw_image (wrapper-detected,
     // not from LibRaw -- kept clear of LibRaw's own range, which includes
@@ -201,6 +226,55 @@ DecodeResult* decode(const uint8_t* file_bytes, uint32_t length) {
             }
         }
         result->cfa6 = cfa6_owned.release(); // ownership crosses to JS; freed via free_decoded()
+
+        // Camera color matrix from imgdata.color.rgb_cam -- computed by LibRaw
+        // inside open_buffer (adobe_coeff() -> cam_xyz_coeff()), so this just
+        // reads the result. Channel order 0=R, 1=G1, 2=B, 3=G2. The two green
+        // CFA positions share one color filter and the demosaic averages the
+        // green spatial samples into a single G channel, so the folded green
+        // column is rgb_cam[i][1] + rgb_cam[i][3] -- a SUM, not an average.
+        // (Adobe's 3x3 tables leave the G2 row of cam_xyz zero, so
+        // rgb_cam[*][3] is also zero and the sum equals rgb_cam[i][1] for
+        // standard Bayer files; averaging would halve green and cast the image
+        // magenta.) White balance is deliberately separate: cam_mul is exposed
+        // below (as-shot WB) so the app can open files at the camera's own
+        // white point, applied by the whiteBalance op BEFORE this matrix --
+        // LrC's order -- instead of being folded into a matrix-neutral
+        // daylight look.
+        {
+            const float* rgb_cam = &processor.imgdata.color.rgb_cam[0][0]; // [3][4], row-major
+            for (int i = 0; i < 3; ++i) {
+                result->color_matrix[i * 3 + 0] = rgb_cam[i * 4 + 0];
+                result->color_matrix[i * 3 + 1] = rgb_cam[i * 4 + 1] + rgb_cam[i * 4 + 3];
+                result->color_matrix[i * 3 + 2] = rgb_cam[i * 4 + 2];
+            }
+            // LibRaw's own "no usable camera matrix" test (identify.cpp):
+            // cam_xyz absent means the matrix is all-zero and must not apply.
+            result->has_color_matrix = processor.imgdata.color.cam_xyz[0][0] >= 0.01f ? 1 : 0;
+        }
+
+        // As-shot white balance. Exposed so the app can open files at the
+        // camera's own WB (Lightroom's "As Shot") instead of a matrix-neutral
+        // daylight white point; the whiteBalance op consumes these as raw
+        // gains and keeps them exact until the user drags the WB sliders
+        // (kelvin+tint cannot represent an arbitrary cam_mul).
+        {
+            const float* cam_mul = processor.imgdata.color.cam_mul;
+            result->cam_mul[0] = cam_mul[0];
+            result->cam_mul[1] = cam_mul[1];
+            result->cam_mul[2] = cam_mul[2];
+            result->cam_mul[3] = cam_mul[3];
+            result->has_cam_mul = (cam_mul[0] > 0.0f && cam_mul[1] > 0.0f && cam_mul[2] > 0.0f) ? 1 : 0;
+        }
+
+        // Shooting metadata. These sit in imgdata.other; they're filled by
+        // LibRaw's EXIF parsing (inside open_buffer/identify), and 0.0 is the
+        // library's "not reported" sentinel for each. We're past unpack() at
+        // this point, so any decoder-side metadata is also settled.
+        result->camera_meta[0] = processor.imgdata.other.iso_speed;
+        result->camera_meta[1] = processor.imgdata.other.shutter;
+        result->camera_meta[2] = processor.imgdata.other.aperture;
+        result->camera_meta[3] = processor.imgdata.other.focal_len;
     } catch (const std::exception&) {
         // Allocation failure (new/make_unique) or any other exception raised
         // by the wrapper's own code, as opposed to a LibRaw-internal error
@@ -248,6 +322,21 @@ int decode_result_error_code(DecodeResult* r) { return r->error_code; }
 
 EMSCRIPTEN_KEEPALIVE
 uint32_t decode_result_data_error(DecodeResult* r) { return r->data_error; }
+
+EMSCRIPTEN_KEEPALIVE
+float* decode_result_color_matrix(DecodeResult* r) { return r->color_matrix; }
+
+EMSCRIPTEN_KEEPALIVE
+int decode_result_has_color_matrix(DecodeResult* r) { return r->has_color_matrix; }
+
+EMSCRIPTEN_KEEPALIVE
+float* decode_result_camera_meta(DecodeResult* r) { return r->camera_meta; }
+
+EMSCRIPTEN_KEEPALIVE
+float* decode_result_cam_mul(DecodeResult* r) { return r->cam_mul; }
+
+EMSCRIPTEN_KEEPALIVE
+int decode_result_has_cam_mul(DecodeResult* r) { return r->has_cam_mul; }
 
 EMSCRIPTEN_KEEPALIVE
 void free_decoded(DecodeResult* r) {

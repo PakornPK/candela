@@ -80,4 +80,22 @@ describe('isValidEditRow', () => {
     const row = { fileId: 1, history: [[{ kind: 'whiteBalance', kelvin: 5500 }]], cursor: 0 };
     expect(isValidEditRow(row)).toBe(true);
   });
+
+  it('accepts an As-Shot whiteBalance op carrying exact gains', () => {
+    const row = {
+      fileId: 1,
+      history: [[{ kind: 'whiteBalance', kelvin: 5200, tint: 5, gains: { r: 2.1, g: 1, b: 1.4 } }]],
+      cursor: 0,
+    };
+    expect(isValidEditRow(row)).toBe(true);
+  });
+
+  it('rejects a whiteBalance op with malformed gains', () => {
+    expect(
+      isValidEditRow({ fileId: 1, history: [[{ kind: 'whiteBalance', kelvin: 5200, gains: { r: 2.1 } }]], cursor: 0 })
+    ).toBe(false);
+    expect(
+      isValidEditRow({ fileId: 1, history: [[{ kind: 'whiteBalance', kelvin: 5200, gains: 'nope' }]], cursor: 0 })
+    ).toBe(false);
+  });
 });

@@ -204,6 +204,7 @@
         gap: 4px;
       }
       .catalog-cell {
+        position: relative; /* cull badges overlay the thumbnail */
         width: 160px;
         height: 160px;
         background: var(--thumb-bg);
@@ -214,6 +215,63 @@
       }
       .catalog-cell.selected {
         outline: 2px solid var(--accent);
+      }
+      .cell-badge {
+        position: absolute;
+        top: 4px;
+        right: 4px;
+        width: 18px;
+        height: 18px;
+        line-height: 18px;
+        text-align: center;
+        border-radius: 2px;
+        font-size: 12px;
+        color: #fff;
+        z-index: 1;
+      }
+      .cell-badge-reject { background: #d33; }
+      .cell-badge-pick { background: #2a8; }
+      .cell-rating {
+        position: absolute;
+        bottom: 2px;
+        left: 4px;
+        color: #fff;
+        text-shadow: 0 1px 2px rgba(0, 0, 0, 0.9);
+        font-size: 11px;
+        letter-spacing: 1px;
+        z-index: 1;
+      }
+      .cell-color {
+        position: absolute;
+        left: 0;
+        top: 0;
+        bottom: 0;
+        width: 5px;
+        z-index: 1;
+      }
+      .cell-color-1 { background: #e33; }
+      .cell-color-2 { background: #ec3; }
+      .cell-color-3 { background: #3c3; }
+      .cell-color-4 { background: #38f; }
+      .cull-filter {
+        padding: 8px 12px;
+        border-top: 1px solid var(--panel-border);
+        font-size: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .cull-filter-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+      }
+      .cull-filter select {
+        font-size: 12px;
+        background: var(--panel);
+        color: inherit;
+        border: 1px solid var(--panel-border);
+        border-radius: 2px;
       }
       .catalog-cell img {
         width: 100%;
@@ -313,6 +371,58 @@
       .history-buttons button:hover {
         background: #2f2f34;
       }
+      #preset-save {
+        width: 100%;
+        margin: 6px 0;
+        background: none;
+        border: 1px solid var(--panel-border);
+        color: var(--text);
+        border-radius: 4px;
+        padding: 3px 8px;
+        cursor: pointer;
+        font: inherit;
+        font-size: 12px;
+      }
+      #preset-save:hover {
+        background: #2f2f34;
+      }
+      #preset-list {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .preset-row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 6px;
+        padding: 3px 6px;
+        border-radius: 3px;
+        cursor: pointer;
+        font-size: 12px;
+        overflow: hidden;
+      }
+      .preset-row:hover {
+        background: #2f2f34;
+      }
+      .preset-row span {
+        flex: 1;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .preset-row button {
+        background: none;
+        border: none;
+        color: var(--text);
+        cursor: pointer;
+        font-size: 12px;
+        padding: 0 2px;
+        opacity: 0.6;
+      }
+      .preset-row button:hover {
+        opacity: 1;
+      }
       .slider-label {
         display: block;
         font-size: 12px;
@@ -321,6 +431,104 @@
       .slider-label output {
         float: right;
         color: var(--accent);
+      }
+      .curve-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        font-size: 12px;
+        margin: 10px 0 2px;
+      }
+      .curve-header button {
+        font-size: 11px;
+        padding: 1px 8px;
+      }
+      .curve-header .adjust-label {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+      }
+      .curve-header select {
+        font-size: 11px;
+        background: var(--panel);
+        color: inherit;
+        border: 1px solid var(--panel-border);
+        border-radius: 2px;
+      }
+      #curve-region[hidden],
+      #curve-point[hidden] {
+        display: none;
+      }
+      #curve {
+        display: block;
+        width: 100%;
+        height: auto;
+        background: #2a2a2e;
+        border: 1px solid var(--panel-border);
+        border-radius: 3px;
+        cursor: crosshair;
+        touch-action: none;
+      }
+      .export-row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 10px;
+        font-size: 12px;
+      }
+      .export-row select {
+        flex: 1;
+        font-size: 12px;
+        background: var(--panel);
+        color: inherit;
+        border: 1px solid var(--panel-border);
+        border-radius: 2px;
+      }
+      /* Lightroom-style collapsible Develop sections. */
+      .panel-section {
+        margin-bottom: 4px;
+        border-top: 1px solid var(--panel-border);
+        padding-top: 2px;
+      }
+      .panel-section summary {
+        cursor: pointer;
+        font-size: 11px;
+        font-weight: 600;
+        text-transform: uppercase;
+        letter-spacing: 0.06em;
+        color: var(--text-dim);
+        padding: 6px 0 2px;
+        user-select: none;
+      }
+      .panel-section summary:hover {
+        color: var(--text);
+      }
+      #histogram {
+        display: block;
+        width: 100%;
+        height: auto;
+        background: #2a2a2e;
+        border: 1px solid var(--panel-border);
+        border-radius: 3px;
+        margin-bottom: 4px;
+      }
+      /* LrC-style shooting-info line (SO 320 · 23 mm · f/2.8 · 1/140 sec). */
+      .camera-info {
+        display: block;
+        padding: 4px 2px;
+        font-size: 11px;
+        color: var(--text-dim);
+        text-align: center;
+        min-height: 16px;
+        line-height: 16px;
+      }
+      #profile {
+        width: 100%;
+        font-size: 12px;
+        background: var(--panel);
+        color: inherit;
+        border: 1px solid var(--panel-border);
+        border-radius: 2px;
       }
 
       /* ---- shared filmstrip ---- */
@@ -404,6 +612,20 @@
             <button id="add-folder" title="Add folder">＋</button>
           </div>
           <div id="folder-list"></div>
+          <div class="cull-filter">
+            <label><input type="checkbox" id="filter-hide-rejected" checked /> Hide rejected</label>
+            <label><input type="checkbox" id="filter-picked" /> Picked only</label>
+            <label class="cull-filter-row">Min rating
+              <select id="filter-min-rating">
+                <option value="0" selected>None</option>
+                <option value="1">1★</option>
+                <option value="2">2★</option>
+                <option value="3">3★</option>
+                <option value="4">4★</option>
+                <option value="5">5★</option>
+              </select>
+            </label>
+          </div>
         </aside>
         <main class="content">
           <div id="library-scroll">
@@ -424,16 +646,93 @@
             <button id="undo-btn">Undo</button>
             <button id="redo-btn">Redo</button>
           </div>
+          <h2 class="panel-title">Presets</h2>
+          <button id="preset-save">Save current…</button>
+          <div id="preset-list"></div>
         </aside>
         <main class="content">
           <canvas id="canvas"></canvas>
         </main>
         <aside class="panel right">
-          <h2 class="panel-title">Basic</h2>
-          <label class="slider-label" for="exposure">Exposure <output id="exposure-value" for="exposure">+0.00</output></label>
-          <input type="range" id="exposure" min="-3" max="3" step="0.01" value="0" />
-          <label class="slider-label" for="wb">White Balance <output id="wb-value" for="wb">5500K</output></label>
-          <input type="range" id="wb" min="2000" max="10000" step="50" value="5500" />
+          <div id="camera-info" class="camera-info"></div>
+          <canvas id="histogram" width="256" height="110"></canvas>
+          <details class="panel-section" open>
+            <summary>Profile</summary>
+            <select id="profile">
+              <option value="camera" selected>Camera</option>
+              <option value="neutral">Neutral</option>
+            </select>
+          </details>
+          <details class="panel-section" open>
+            <summary>White Balance</summary>
+            <label class="slider-label" for="wb">Temperature <output id="wb-value" for="wb">5500K</output></label>
+            <input type="range" id="wb" min="0" max="480" step="1" value="318" />
+            <label class="slider-label" for="tint">Tint <output id="tint-value" for="tint">0</output></label>
+            <input type="range" id="tint" min="-150" max="150" step="1" value="0" />
+          </details>
+          <details class="panel-section" open>
+            <summary>Tone</summary>
+            <label class="slider-label" for="exposure">Exposure <output id="exposure-value" for="exposure">+0.00</output></label>
+            <input type="range" id="exposure" min="-5" max="5" step="0.01" value="0" />
+            <label class="slider-label" for="contrast">Contrast <output id="contrast-value" for="contrast">0</output></label>
+            <input type="range" id="contrast" min="-100" max="100" step="1" value="0" />
+            <label class="slider-label" for="highlights">Highlights <output id="highlights-value" for="highlights">0</output></label>
+            <input type="range" id="highlights" min="-100" max="100" step="1" value="0" />
+            <label class="slider-label" for="shadows">Shadows <output id="shadows-value" for="shadows">0</output></label>
+            <input type="range" id="shadows" min="-100" max="100" step="1" value="0" />
+            <label class="slider-label" for="whites">Whites <output id="whites-value" for="whites">0</output></label>
+            <input type="range" id="whites" min="-100" max="100" step="1" value="0" />
+            <label class="slider-label" for="blacks">Blacks <output id="blacks-value" for="blacks">0</output></label>
+            <input type="range" id="blacks" min="-100" max="100" step="1" value="0" />
+          </details>
+          <details class="panel-section" open>
+            <summary>Presence</summary>
+            <label class="slider-label" for="texture">Texture <output id="texture-value" for="texture">0</output></label>
+            <input type="range" id="texture" min="-100" max="100" step="1" value="0" />
+            <label class="slider-label" for="clarity">Clarity <output id="clarity-value" for="clarity">0</output></label>
+            <input type="range" id="clarity" min="-100" max="100" step="1" value="0" />
+            <label class="slider-label" for="dehaze">Dehaze <output id="dehaze-value" for="dehaze">0</output></label>
+            <input type="range" id="dehaze" min="-100" max="100" step="1" value="0" />
+            <label class="slider-label" for="vibrance">Vibrance <output id="vibrance-value" for="vibrance">0</output></label>
+            <input type="range" id="vibrance" min="-100" max="100" step="1" value="0" />
+            <label class="slider-label" for="saturation">Saturation <output id="saturation-value" for="saturation">0</output></label>
+            <input type="range" id="saturation" min="-100" max="100" step="1" value="0" />
+          </details>
+          <details class="panel-section" open>
+            <summary>Tone Curve</summary>
+            <div class="curve-header">
+              <label class="adjust-label">Adjust
+                <select id="curve-adjust">
+                  <option value="region" selected>Region</option>
+                  <option value="point">Point</option>
+                </select>
+              </label>
+              <button id="curve-reset" type="button" title="Reset the active curve to linear">Reset</button>
+            </div>
+            <div id="curve-region">
+              <label class="slider-label" for="region-highlights">Highlights <output id="region-highlights-value" for="region-highlights">0</output></label>
+              <input type="range" id="region-highlights" min="-100" max="100" step="1" value="0" />
+              <label class="slider-label" for="region-lights">Lights <output id="region-lights-value" for="region-lights">0</output></label>
+              <input type="range" id="region-lights" min="-100" max="100" step="1" value="0" />
+              <label class="slider-label" for="region-darks">Darks <output id="region-darks-value" for="region-darks">0</output></label>
+              <input type="range" id="region-darks" min="-100" max="100" step="1" value="0" />
+              <label class="slider-label" for="region-shadows">Shadows <output id="region-shadows-value" for="region-shadows">0</output></label>
+              <input type="range" id="region-shadows" min="-100" max="100" step="1" value="0" />
+            </div>
+            <div id="curve-point">
+              <canvas id="curve" width="240" height="160"></canvas>
+            </div>
+          </details>
+          <details class="panel-section">
+            <summary>Export</summary>
+            <div class="export-row">
+              <select id="export-format">
+                <option value="jpeg" selected>JPEG</option>
+                <option value="png">PNG</option>
+              </select>
+              <button id="export-btn">Export</button>
+            </div>
+          </details>
         </aside>
       </section>
 

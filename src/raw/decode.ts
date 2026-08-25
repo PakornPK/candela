@@ -27,6 +27,13 @@ export class DecodeError extends Error {
   }
 }
 
+export interface CameraMeta {
+  iso: number; // ISO speed; 0 = not reported
+  shutter: number; // exposure time in seconds (1/140s -> 0.00714); 0 = not reported
+  aperture: number; // f-number; 0 = not reported
+  focal: number; // focal length in mm; 0 = not reported
+}
+
 export interface DecodedRaw {
   width: number;
   height: number;
@@ -38,6 +45,18 @@ export interface DecodedRaw {
   // always use a 6x6 lookup.
   cfa6: Uint8Array;
   bayerData: Uint16Array;
+  // Camera -> linear sRGB 3x3 (row-major), folded from LibRaw's rgb_cam by
+  // the wrapper (see wrapper.cpp). Always a valid matrix: identity when the
+  // camera has no usable one (hasColorMatrix false).
+  colorMatrix: Float32Array;
+  hasColorMatrix: boolean;
+  // As-shot white balance, normalized by green (g=1) from LibRaw's cam_mul
+  // [R, G1, B, G2]. Absent when the camera reports no usable values. The app
+  // opens files at this WB ("As Shot", like LrC) and preserves the exact
+  // gains until the user touches the WB sliders.
+  asShotGains?: { r: number; g: number; b: number };
+  // Shooting metadata (iso/shutter/aperture/focal), 0 when not reported.
+  cameraMeta: CameraMeta;
 }
 
 export async function decode(fileBytes: ArrayBuffer): Promise<DecodedRaw> {
@@ -78,13 +97,77 @@ export async function decode(fileBytes: ArrayBuffer): Promise<DecodedRaw> {
   const cfaPacked = module.ccall('decode_result_cfa_pattern', 'number', ['number'], [resultPtr]);
   const bayerPtr = module.ccall('decode_result_bayer_ptr', 'number', ['number'], [resultPtr]);
   const cfa6Ptr = module.ccall('decode_result_cfa6', 'number', ['number'], [resultPtr]);
+  const colorMatrixPtr = module.ccall('decode_result_color_matrix', 'number', ['number'], [resultPtr]);
+  const hasColorMatrix = module.ccall('decode_result_has_color_matrix', 'number', ['number'], [resultPtr]) === 1;
 
   const pixelCount = width * height;
   const bayerData = module.HEAPU16.slice(bayerPtr / 2, bayerPtr / 2 + pixelCount);
   // HEAPU8.slice copies -- safe to read after free_decoded() below.
   const cfa6 = module.HEAPU8.slice(cfa6Ptr, cfa6Ptr + 36);
+  // Read the 9 floats via a DataView over HEAPU8.buffer rather than a
+  // HEAPF32 slice -- the Emscripten glue only creates heap views it actually
+  // references, and nothing referenced HEAPF32 before, so it isn't there.
+  // The wrapper's 9 floats are 4-byte aligned and wasm memory is
+  // little-endian.
+  const colorView = new DataView(module.HEAPU8.buffer, colorMatrixPtr, 36);
+  const matrix = new Float32Array(9);
+  for (let i = 0; i < 9; i++) matrix[i] = colorView.getFloat32(i * 4, true);
+  // Identity fallback when the camera has no usable matrix -- downstream
+  // (cameraColor pass) applies colorMatrix unconditionally.
+  const colorMatrix = hasColorMatrix ? matrix : new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+
+  // Shooting metadata: 4 consecutive floats [iso, shutter, aperture, focal]
+  // -- same DataView trick as color_matrix (no HEAPF32 view in the glue).
+  const metaPtr = module.ccall('decode_result_camera_meta', 'number', ['number'], [resultPtr]);
+  const metaView = new DataView(module.HEAPU8.buffer, metaPtr, 16);
+  const cameraMeta: CameraMeta = {
+    iso: metaView.getFloat32(0, true),
+    shutter: metaView.getFloat32(4, true),
+    aperture: metaView.getFloat32(8, true),
+    focal: metaView.getFloat32(12, true),
+  };
+
+  // As-shot WB: 4 consecutive floats [R, G1, B, G2] -- same DataView trick
+  // as the matrix (no HEAPF32 view in the glue). Normalized by the green
+  // reference so the gains match the app's green=1 convention; skipped when
+  // the camera reports no usable values.
+  //
+  // The green reference averages G1+G2 only when BOTH are reported: Fuji
+  // stores WB as [G, R, B] (three values), so cam_mul[3] (G2) is 0 -- the
+  // X100V fixture reports [567, 302, 560, 0]. Averaging 302 with 0 would
+  // halve green and DOUBLE the R/B gains (a strong warm/magenta cast vs the
+  // camera's actual WB, which is what LrC applies). Nonzero-green cameras
+  // (Bayer) report both greens, and the average is then a no-op.
+  const camMulPtr = module.ccall('decode_result_cam_mul', 'number', ['number'], [resultPtr]);
+  const hasCamMul = module.ccall('decode_result_has_cam_mul', 'number', ['number'], [resultPtr]) === 1;
+  let asShotGains: { r: number; g: number; b: number } | undefined;
+  if (hasCamMul) {
+    const camMulView = new DataView(module.HEAPU8.buffer, camMulPtr, 16);
+    const g1 = camMulView.getFloat32(4, true);
+    const g2 = camMulView.getFloat32(12, true);
+    const green = g1 > 0 && g2 > 0 ? (g1 + g2) / 2 : (g1 > 0 ? g1 : g2);
+    if (green > 0) {
+      asShotGains = {
+        r: camMulView.getFloat32(0, true) / green,
+        g: 1,
+        b: camMulView.getFloat32(8, true) / green,
+      };
+    }
+  }
 
   module.ccall('free_decoded', null, ['number'], [resultPtr]);
 
-  return { width, height, blackLevel, whiteLevel, cfaPattern: unpackCfaPattern(cfaPacked), cfa6, bayerData };
+  return {
+    width,
+    height,
+    blackLevel,
+    whiteLevel,
+    cfaPattern: unpackCfaPattern(cfaPacked),
+    cfa6,
+    bayerData,
+    colorMatrix,
+    hasColorMatrix,
+    asShotGains,
+    cameraMeta,
+  };
 }

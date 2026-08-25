@@ -1,17 +1,20 @@
 import { Virtualizer, elementScroll, observeElementRect, observeElementOffset } from '@tanstack/virtual-core';
 import { Pipeline } from './gpu/pipeline';
-import { decode, DecodeError, type DecodedRaw } from './raw/decode';
+import { decode, DecodeError, type CameraMeta, type DecodedRaw } from './raw/decode';
 import { extractThumbnail } from './raw/thumbnail';
-import { WB_NEUTRAL_KELVIN } from './gpu/uniforms';
+import { gainsToKelvin, gainsToTint, WB_NEUTRAL_KELVIN } from './gpu/uniforms';
 import { openCatalogDb } from './catalog/db';
 import { listFolders, listFiles } from './catalog/query';
+import { setCull } from './catalog/culling';
 import { importFolder } from './catalog/import';
 import { ensureReadPermission } from './catalog/permissions';
 import { loadEditState, saveEditState } from './catalog/editsStore';
+import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
 import { commitEdit, undo, redo, currentOps } from './catalog/editHistory';
-import { opsToAdjustState } from './catalog/adjust';
 import { getOrExtractThumbnail } from './catalog/thumbnails';
-import { isExposureOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord } from './catalog/types';
+import { isExposureOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type WbGains } from './catalog/types';
+import { buildParametricToneLut, buildToneCurveLut, isNeutralTone, parametricControlPoints, TONE_LUT_SIZE, type ToneParams } from './gpu/tone';
+import { isNeutralPresence, type PresenceParams } from './gpu/presence';
 import { getState, selectFile, subscribe, type ModuleId } from './app/state';
 import { registerModule, switchModule } from './app/modules';
 import { createFilmstrip } from './app/filmstrip';
@@ -26,8 +29,31 @@ const libraryScroll = document.querySelector<HTMLDivElement>('#library-scroll')!
 const libraryGrid = document.querySelector<HTMLDivElement>('#library-grid')!;
 const exposureSlider = document.querySelector<HTMLInputElement>('#exposure')!;
 const wbSlider = document.querySelector<HTMLInputElement>('#wb')!;
+const tintSlider = document.querySelector<HTMLInputElement>('#tint')!;
 const exposureValue = document.querySelector<HTMLOutputElement>('#exposure-value')!;
 const wbValue = document.querySelector<HTMLOutputElement>('#wb-value')!;
+const tintValue = document.querySelector<HTMLOutputElement>('#tint-value')!;
+const profileSelect = document.querySelector<HTMLSelectElement>('#profile')!;
+const contrastSlider = document.querySelector<HTMLInputElement>('#contrast')!;
+const highlightsSlider = document.querySelector<HTMLInputElement>('#highlights')!;
+const shadowsSlider = document.querySelector<HTMLInputElement>('#shadows')!;
+const whitesSlider = document.querySelector<HTMLInputElement>('#whites')!;
+const blacksSlider = document.querySelector<HTMLInputElement>('#blacks')!;
+const contrastValue = document.querySelector<HTMLOutputElement>('#contrast-value')!;
+const highlightsValue = document.querySelector<HTMLOutputElement>('#highlights-value')!;
+const shadowsValue = document.querySelector<HTMLOutputElement>('#shadows-value')!;
+const whitesValue = document.querySelector<HTMLOutputElement>('#whites-value')!;
+const blacksValue = document.querySelector<HTMLOutputElement>('#blacks-value')!;
+const textureSlider = document.querySelector<HTMLInputElement>('#texture')!;
+const claritySlider = document.querySelector<HTMLInputElement>('#clarity')!;
+const dehazeSlider = document.querySelector<HTMLInputElement>('#dehaze')!;
+const vibranceSlider = document.querySelector<HTMLInputElement>('#vibrance')!;
+const saturationSlider = document.querySelector<HTMLInputElement>('#saturation')!;
+const textureValue = document.querySelector<HTMLOutputElement>('#texture-value')!;
+const clarityValue = document.querySelector<HTMLOutputElement>('#clarity-value')!;
+const dehazeValue = document.querySelector<HTMLOutputElement>('#dehaze-value')!;
+const vibranceValue = document.querySelector<HTMLOutputElement>('#vibrance-value')!;
+const saturationValue = document.querySelector<HTMLOutputElement>('#saturation-value')!;
 const canvas = document.querySelector<HTMLCanvasElement>('#canvas')!;
 const errorEl = document.querySelector<HTMLDivElement>('#error')!;
 const errorMessageEl = document.querySelector<HTMLParagraphElement>('#error-message')!;
@@ -39,6 +65,30 @@ const undoButton = document.querySelector<HTMLButtonElement>('#undo-btn')!;
 const redoButton = document.querySelector<HTMLButtonElement>('#redo-btn')!;
 const filmstripScroll = document.querySelector<HTMLElement>('#filmstrip')!;
 const filmstripTrack = document.querySelector<HTMLDivElement>('#filmstrip-track')!;
+const curveCanvas = document.querySelector<HTMLCanvasElement>('#curve')!;
+const curveResetButton = document.querySelector<HTMLButtonElement>('#curve-reset')!;
+const curveCtx = curveCanvas.getContext('2d')!;
+const curveAdjust = document.querySelector<HTMLSelectElement>('#curve-adjust')!;
+const curveRegion = document.querySelector<HTMLDivElement>('#curve-region')!;
+const curvePoint = document.querySelector<HTMLDivElement>('#curve-point')!;
+const regionHighlightsSlider = document.querySelector<HTMLInputElement>('#region-highlights')!;
+const regionLightsSlider = document.querySelector<HTMLInputElement>('#region-lights')!;
+const regionDarksSlider = document.querySelector<HTMLInputElement>('#region-darks')!;
+const regionShadowsSlider = document.querySelector<HTMLInputElement>('#region-shadows')!;
+const regionHighlightsValue = document.querySelector<HTMLOutputElement>('#region-highlights-value')!;
+const regionLightsValue = document.querySelector<HTMLOutputElement>('#region-lights-value')!;
+const regionDarksValue = document.querySelector<HTMLOutputElement>('#region-darks-value')!;
+const regionShadowsValue = document.querySelector<HTMLOutputElement>('#region-shadows-value')!;
+const histogramCanvas = document.querySelector<HTMLCanvasElement>('#histogram')!;
+const histogramCtx = histogramCanvas.getContext('2d')!;
+const cameraInfoEl = document.querySelector<HTMLDivElement>('#camera-info')!;
+const filterHideRejected = document.querySelector<HTMLInputElement>('#filter-hide-rejected')!;
+const filterPicked = document.querySelector<HTMLInputElement>('#filter-picked')!;
+const filterMinRating = document.querySelector<HTMLSelectElement>('#filter-min-rating')!;
+const exportButton = document.querySelector<HTMLButtonElement>('#export-btn')!;
+const exportFormat = document.querySelector<HTMLSelectElement>('#export-format')!;
+const presetSaveButton = document.querySelector<HTMLButtonElement>('#preset-save')!;
+const presetListEl = document.querySelector<HTMLDivElement>('#preset-list')!;
 
 function showError(message: string, detail?: string): void {
   errorMessageEl.textContent = message;
@@ -68,32 +118,300 @@ function updateSliderFill(slider: HTMLInputElement, neutral = 0): void {
   slider.style.setProperty('--to', `${Math.max(neutralPct, valuePct)}%`);
 }
 
-function updateReadout(output: HTMLOutputElement, value: number, decimals: number): void {
-  output.textContent = (value >= 0 ? '+' : '') + value.toFixed(decimals);
+function formatSigned(value: number, decimals = 0): string {
+  return (value >= 0 ? '+' : '') + value.toFixed(decimals);
+}
+
+// The WB slider carries a MIRED-offset value, not Kelvin: v = 500 - 1e6/K, so
+// the track is linear in mired (perceptually uniform temperature) -- 2000K -> 0
+// (cool), 50000K -> 480 (warm), 5500K -> ~318 (neutral). A linear-Kelvin track
+// crams the whole cool side into ~7% of its width. kelvinToWbSlider is left
+// unrounded so the neutral (318.1818...) formats back to exactly 5500K.
+const wbSliderToKelvin = (v: number): number => Math.round(1e6 / (500 - v));
+const kelvinToWbSlider = (k: number): number => 500 - 1e6 / k;
+
+// As-Shot white balance for the currently loaded file, set by loadIntoPipeline
+// after each decode. A fresh file (no WB op) renders at these exact camera
+// gains ("As Shot", like LrC) until the user touches WB/tint -- kelvin+tint
+// cannot represent an arbitrary cam_mul (wbShiftToGains forces rGain*bGain=1),
+// so the exact gains must survive as an op field, not be re-derived.
+interface AsShotWB { kelvin: number; tint: number; gains: WbGains }
+let asShotWB: AsShotWB | null = null;
+// True once the user drags the WB/tint sliders (set in the input handler),
+// cleared by applyOpsToSliders whenever the applied WB is the As-Shot default.
+// Gates whether currentOpsFromSliders emits the exact camera gains or the
+// slider kelvin/tint.
+let wbTouched = false;
+
+// All seven Basic sliders, with their fill-neutral points and readout
+// formatters. One array drives the initial paint, applyOpsToSliders, and the
+// shared input/change wiring (see wireSliders) -- adding a slider is one
+// entry here plus one <input>/<output> pair in index.html.
+interface SliderConfig {
+  slider: HTMLInputElement;
+  output: HTMLOutputElement;
+  neutral: number;
+  format: (v: number) => string;
+}
+const ALL_SLIDERS: SliderConfig[] = [
+  { slider: exposureSlider, output: exposureValue, neutral: 0, format: (v) => formatSigned(v, 2) },
+  { slider: wbSlider, output: wbValue, neutral: kelvinToWbSlider(WB_NEUTRAL_KELVIN), format: (v) => `${wbSliderToKelvin(v)}K` },
+  { slider: tintSlider, output: tintValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: contrastSlider, output: contrastValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: highlightsSlider, output: highlightsValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: shadowsSlider, output: shadowsValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: whitesSlider, output: whitesValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: blacksSlider, output: blacksValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: textureSlider, output: textureValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: claritySlider, output: clarityValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: dehazeSlider, output: dehazeValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: vibranceSlider, output: vibranceValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: saturationSlider, output: saturationValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: regionHighlightsSlider, output: regionHighlightsValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: regionLightsSlider, output: regionLightsValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: regionDarksSlider, output: regionDarksValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: regionShadowsSlider, output: regionShadowsValue, neutral: 0, format: (v) => formatSigned(v) },
+];
+
+function paintSliders(): void {
+  for (const cfg of ALL_SLIDERS) {
+    updateSliderFill(cfg.slider, cfg.neutral);
+    cfg.output.textContent = cfg.format(Number(cfg.slider.value));
+  }
+}
+
+// --- Tone curve editor state. Two modes behind the "Adjust:" dropdown:
+// Region (LrC's default -- four parametric sliders) and Point (the direct
+// curve). The point curve is a flat [x0,y0,x1,y1,...] list in [0,1]; the
+// default linear curve is omitted from ops (identity LUT, no pass).
+let curvePoints: number[] = [0, 0, 1, 1];
+
+interface RegionParams { highlights: number; lights: number; darks: number; shadows: number; }
+
+function isRegionMode(): boolean {
+  return curveAdjust.value === 'region';
+}
+
+function readRegionParams(): RegionParams {
+  return {
+    highlights: Number(regionHighlightsSlider.value),
+    lights: Number(regionLightsSlider.value),
+    darks: Number(regionDarksSlider.value),
+    shadows: Number(regionShadowsSlider.value),
+  };
+}
+
+function isNeutralRegion(r: RegionParams): boolean {
+  return r.highlights === 0 && r.lights === 0 && r.darks === 0 && r.shadows === 0;
+}
+
+function isLinearCurve(): boolean {
+  return (
+    curvePoints.length === 4 &&
+    curvePoints[0] === 0 && curvePoints[1] === 0 &&
+    curvePoints[2] === 1 && curvePoints[3] === 1
+  );
+}
+
+// Which LUT + control points the active mode currently produces -- shared by
+// drawCurve (what the user sees) and the op chain (what the GPU applies).
+function activeCurve(): { lut: Float32Array; controls: number[] } {
+  if (isRegionMode()) {
+    const r = readRegionParams();
+    return { lut: buildParametricToneLut(r.highlights, r.lights, r.darks, r.shadows), controls: parametricControlPoints(r.highlights, r.lights, r.darks, r.shadows) };
+  }
+  return { lut: buildToneCurveLut(curvePoints), controls: curvePoints };
+}
+
+// Renders the curve the GPU will actually apply: the grid, the identity
+// diagonal, the sampled PCHIP LUT polyline, and the control points.
+function drawCurve(): void {
+  const w = curveCanvas.width;
+  const h = curveCanvas.height;
+  const ctx = curveCtx;
+  ctx.clearRect(0, 0, w, h);
+
+  ctx.strokeStyle = '#3a3a40';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  for (let i = 1; i < 10; i++) {
+    ctx.moveTo((i / 10) * w, 0); ctx.lineTo((i / 10) * w, h);
+    ctx.moveTo(0, (i / 10) * h); ctx.lineTo(w, (i / 10) * h);
+  }
+  ctx.stroke();
+
+  ctx.strokeStyle = '#4a4a52';
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath(); ctx.moveTo(0, h); ctx.lineTo(w, 0); ctx.stroke();
+  ctx.setLineDash([]);
+
+  const { lut, controls } = activeCurve();
+  ctx.strokeStyle = '#6ab0f3';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  for (let i = 0; i < TONE_LUT_SIZE; i++) {
+    const x = (i / (TONE_LUT_SIZE - 1)) * w;
+    const y = h - lut[i] * h;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = '#fff';
+  for (let i = 0; i < controls.length; i += 2) {
+    ctx.beginPath();
+    ctx.arc(controls[i] * w, h - controls[i + 1] * h, 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = '#6ab0f3';
+    ctx.stroke();
+  }
+}
+
+// Shows the active "Adjust:" mode -- region sliders vs the point-curve canvas.
+function syncCurveMode(): void {
+  const region = isRegionMode();
+  curveRegion.hidden = !region;
+  curvePoint.hidden = region;
+}
+
+function curvePointFromEvent(e: { clientX: number; clientY: number }): { x: number; y: number } {
+  const rect = curveCanvas.getBoundingClientRect();
+  return {
+    x: Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width)),
+    y: Math.min(1, Math.max(0, 1 - (e.clientY - rect.top) / rect.height)),
+  };
+}
+
+// Flat x-index of the control point nearest (x,y), or -1 when none is within
+// reach. Threshold is in curve units (~6% of the canvas).
+function nearestCurvePoint(x: number, y: number): number {
+  let best = -1;
+  let bestDist = 0.06;
+  for (let i = 0; i < curvePoints.length; i += 2) {
+    const d = Math.hypot(curvePoints[i] - x, curvePoints[i + 1] - y);
+    if (d < bestDist) { bestDist = d; best = i; }
+  }
+  return best;
+}
+
+// Clamps x to [0,1], nudging it clear of any other point's x so a drag can't
+// stack duplicates (buildToneCurveLut would silently drop one).
+function clampCurveX(x: number, exclude: number): number {
+  let best = Math.min(1, Math.max(0, x));
+  for (let i = 0; i < curvePoints.length; i += 2) {
+    if (i === exclude) continue;
+    const other = curvePoints[i];
+    if (Math.abs(best - other) < 0.02) {
+      best = Math.min(1, Math.max(0, other + (best >= other ? 0.02 : -0.02)));
+    }
+  }
+  return best;
+}
+
+function readToneParams(): ToneParams {
+  return {
+    contrast: Number(contrastSlider.value),
+    highlights: Number(highlightsSlider.value),
+    shadows: Number(shadowsSlider.value),
+    whites: Number(whitesSlider.value),
+    blacks: Number(blacksSlider.value),
+  };
+}
+
+function readPresenceParams(): PresenceParams {
+  return {
+    texture: Number(textureSlider.value),
+    clarity: Number(claritySlider.value),
+    dehaze: Number(dehazeSlider.value),
+    vibrance: Number(vibranceSlider.value),
+    saturation: Number(saturationSlider.value),
+  };
 }
 
 function currentOpsFromSliders(): Op[] {
-  return [
+  // As-Shot: while the WB/tint sliders are untouched, the exact camera gains
+  // are preserved (kelvin+tint can't represent an arbitrary cam_mul). Once the
+  // user drags (wbTouched), the slider kelvin/tint is authoritative.
+  const wb: Op = wbTouched || !asShotWB
+    ? { kind: 'whiteBalance', kelvin: wbSliderToKelvin(Number(wbSlider.value)), tint: Number(tintSlider.value) }
+    : { kind: 'whiteBalance', ...asShotWB };
+  const ops: Op[] = [
+    { kind: 'profile', profile: profileSelect.value === 'neutral' ? 'neutral' : 'camera' },
     { kind: 'exposure', ev: Number(exposureSlider.value) },
-    { kind: 'whiteBalance', kelvin: Number(wbSlider.value) },
+    wb,
   ];
+  // The parametric tone op is emitted only when non-neutral, so an all-
+  // neutral state renders as exposure+WB (no extra LUT pass) and history
+  // rows don't carry a do-nothing op.
+  const tone = readToneParams();
+  if (!isNeutralTone(tone)) ops.push({ kind: 'tone', ...tone });
+  if (isRegionMode()) {
+    const region = readRegionParams();
+    if (!isNeutralRegion(region)) ops.push({ kind: 'toneCurve', mode: 'region', ...region });
+  } else if (!isLinearCurve()) {
+    ops.push({ kind: 'toneCurve', mode: 'point', points: [...curvePoints] });
+  }
+  const presence = readPresenceParams();
+  if (!isNeutralPresence(presence)) ops.push({ kind: 'presence', ...presence });
+  return ops;
 }
 
 function applyOpsToSliders(ops: Op[]): void {
+  const profileOp = ops.find(isProfileOp);
   const exposureOp = ops.find(isExposureOp);
   const wbOp = ops.find(isWhiteBalanceOp);
+  const toneOp = ops.find(isToneOp);
+  const curveOp = ops.find(isToneCurveOp);
+  const presenceOp = ops.find(isPresenceOp);
+  profileSelect.value = profileOp?.profile ?? 'camera';
   exposureSlider.value = String(exposureOp?.ev ?? 0);
-  wbSlider.value = String(wbOp?.kelvin ?? WB_NEUTRAL_KELVIN);
-  updateSliderFill(exposureSlider);
-  updateSliderFill(wbSlider, WB_NEUTRAL_KELVIN);
-  updateReadout(exposureValue, Number(exposureSlider.value), 2);
-  wbValue.textContent = `${Number(wbSlider.value)}K`;
+  // WB slider is a kelvin track, but the applied white point may be an exact
+  // As-Shot gains pair (a cam_mul can't round-trip through kelvin+tint). An
+  // As-Shot op shows its readout and keeps wbTouched false so
+  // currentOpsFromSliders preserves the exact gains; a manual op (no gains) is
+  // the slider values themselves; no op at all falls back to the file's
+  // As-Shot (neutral daylight when the camera reports none).
+  if (wbOp?.gains) {
+    wbSlider.value = String(kelvinToWbSlider(gainsToKelvin(wbOp.gains)));
+    tintSlider.value = String(wbOp.tint ?? gainsToTint(wbOp.gains));
+    wbTouched = false;
+  } else if (wbOp) {
+    wbSlider.value = String(kelvinToWbSlider(wbOp.kelvin));
+    tintSlider.value = String(wbOp.tint ?? 0);
+    wbTouched = true;
+  } else {
+    wbSlider.value = String(kelvinToWbSlider(asShotWB?.kelvin ?? WB_NEUTRAL_KELVIN));
+    tintSlider.value = String(asShotWB?.tint ?? 0);
+    wbTouched = false;
+  }
+  contrastSlider.value = String(toneOp?.contrast ?? 0);
+  highlightsSlider.value = String(toneOp?.highlights ?? 0);
+  shadowsSlider.value = String(toneOp?.shadows ?? 0);
+  whitesSlider.value = String(toneOp?.whites ?? 0);
+  blacksSlider.value = String(toneOp?.blacks ?? 0);
+  textureSlider.value = String(presenceOp?.texture ?? 0);
+  claritySlider.value = String(presenceOp?.clarity ?? 0);
+  dehazeSlider.value = String(presenceOp?.dehaze ?? 0);
+  vibranceSlider.value = String(presenceOp?.vibrance ?? 0);
+  saturationSlider.value = String(presenceOp?.saturation ?? 0);
+  // Tone curve: restore the stored mode. A point op (including pre-region
+  // legacy rows, which have no `mode`) sets the direct-curve points; a region
+  // op sets the four sliders; no stored curve -> LrC's default (region,
+  // neutral).
+  const curveMode = curveOp ? (curveOp.mode ?? 'point') : 'region';
+  curveAdjust.value = curveMode;
+  regionHighlightsSlider.value = String(curveOp?.mode === 'region' ? curveOp.highlights : 0);
+  regionLightsSlider.value = String(curveOp?.mode === 'region' ? curveOp.lights : 0);
+  regionDarksSlider.value = String(curveOp?.mode === 'region' ? curveOp.darks : 0);
+  regionShadowsSlider.value = String(curveOp?.mode === 'region' ? curveOp.shadows : 0);
+  curvePoints = curveOp && curveOp.mode !== 'region' ? [...curveOp.points] : [0, 0, 1, 1];
+  syncCurveMode();
+  paintSliders();
+  drawCurve();
 }
 
-updateSliderFill(exposureSlider);
-updateSliderFill(wbSlider, WB_NEUTRAL_KELVIN);
-updateReadout(exposureValue, Number(exposureSlider.value), 2);
-wbValue.textContent = `${Number(wbSlider.value)}K`;
+syncCurveMode();
+paintSliders();
+drawCurve();
 
 // The flattened, virtualizer-facing shape of the catalog: one entry per
 // folder heading, one entry per row of up to COLUMNS_PER_ROW files. This
@@ -115,10 +433,99 @@ function opsToLabel(ops: Op[]): string {
   if (ops.length === 0) return 'Import';
   return ops
     .map((op) => {
+      if (isProfileOp(op)) return op.profile === 'neutral' ? 'Neutral profile' : 'Camera profile';
       if (isExposureOp(op)) return `Exposure ${op.ev >= 0 ? '+' : ''}${op.ev.toFixed(2)}`;
-      return `WB ${op.kelvin}K`;
+      if (isWhiteBalanceOp(op)) {
+        return op.gains
+          ? `WB As Shot${op.tint ? ` · Tint ${formatSigned(op.tint)}` : ''}`
+          : `WB ${op.kelvin}K${op.tint ? ` · Tint ${formatSigned(op.tint)}` : ''}`;
+      }
+      if (isToneOp(op)) {
+        const parts: string[] = [];
+        if (op.contrast !== 0) parts.push(`Contrast ${formatSigned(op.contrast)}`);
+        if (op.highlights !== 0) parts.push(`Highlights ${formatSigned(op.highlights)}`);
+        if (op.shadows !== 0) parts.push(`Shadows ${formatSigned(op.shadows)}`);
+        if (op.whites !== 0) parts.push(`Whites ${formatSigned(op.whites)}`);
+        if (op.blacks !== 0) parts.push(`Blacks ${formatSigned(op.blacks)}`);
+        return parts.join(' · ');
+      }
+      if (isToneCurveOp(op)) {
+        if (op.mode === 'region') {
+          const parts: string[] = [];
+          if (op.highlights !== 0) parts.push(`H ${formatSigned(op.highlights)}`);
+          if (op.lights !== 0) parts.push(`L ${formatSigned(op.lights)}`);
+          if (op.darks !== 0) parts.push(`D ${formatSigned(op.darks)}`);
+          if (op.shadows !== 0) parts.push(`S ${formatSigned(op.shadows)}`);
+          return `Curve ${parts.join(' · ')}`;
+        }
+        return `Curve (${op.points.length / 2} pts)`;
+      }
+      if (isPresenceOp(op)) {
+        const parts: string[] = [];
+        if (op.texture !== 0) parts.push(`Texture ${formatSigned(op.texture)}`);
+        if (op.clarity !== 0) parts.push(`Clarity ${formatSigned(op.clarity)}`);
+        if (op.dehaze !== 0) parts.push(`Dehaze ${formatSigned(op.dehaze)}`);
+        if (op.vibrance !== 0) parts.push(`Vibrance ${formatSigned(op.vibrance)}`);
+        if (op.saturation !== 0) parts.push(`Saturation ${formatSigned(op.saturation)}`);
+        return parts.join(' · ');
+      }
+      return 'Unknown';
     })
     .join(' · ');
+}
+
+// Applying a preset merges, never replaces: ops whose kind the preset doesn't
+// cover stay as they are, and the preset's ops win for the kinds it does
+// cover. So a "contrast+curve" preset leaves your exposure untouched.
+function mergePresetOps(current: Op[], preset: Op[]): Op[] {
+  const presetKinds = new Set(preset.map((o) => o.kind));
+  return [...current.filter((o) => !presetKinds.has(o.kind)), ...preset];
+}
+
+// LrC-style histogram: R/G/B as translucent filled curves (overlaps show as
+// yellow/cyan/magenta), luminance as a white outline on top. `data` is the
+// 512x256 rgba8unorm readback -- already sRGB-encoded, i.e. display-referred
+// like Lightroom's. One bin per pixel column of the 256-wide canvas.
+const LUMA_COEF = [0.2126729, 0.7151522, 0.0721750];
+
+function drawHistogram(data: Uint8Array): void {
+  const W = histogramCanvas.width; // 256
+  const H = histogramCanvas.height; // 110
+  const counts = [new Float64Array(256), new Float64Array(256), new Float64Array(256), new Float64Array(256)];
+  for (let p = 0; p < data.length; p += 4) {
+    const r = data[p], g = data[p + 1], b = data[p + 2];
+    const luma = Math.round(LUMA_COEF[0] * r + LUMA_COEF[1] * g + LUMA_COEF[2] * b);
+    counts[0][Math.min(255, r)]++;
+    counts[1][Math.min(255, g)]++;
+    counts[2][Math.min(255, b)]++;
+    counts[3][Math.min(255, luma)]++;
+  }
+  const ctx = histogramCtx;
+  ctx.clearRect(0, 0, W, H);
+  ctx.lineWidth = 1;
+  const colors = ['rgba(235,70,55,0.5)', 'rgba(70,205,100,0.5)', 'rgba(80,115,235,0.5)'];
+  for (let ch = 0; ch < 4; ch++) {
+    let max = 0;
+    for (let i = 0; i < 256; i++) if (counts[ch][i] > max) max = counts[ch][i];
+    if (max === 0) continue;
+    ctx.beginPath();
+    for (let i = 0; i < 256; i++) {
+      const x = i + 0.5;
+      const y = H - (counts[ch][i] / max) * (H - 3) - 1;
+      if (i === 0) ctx.moveTo(x, y);
+      else ctx.lineTo(x, y);
+    }
+    if (ch < 3) {
+      ctx.lineTo(W, H);
+      ctx.lineTo(0, H);
+      ctx.closePath();
+      ctx.fillStyle = colors[ch];
+      ctx.fill();
+    } else {
+      ctx.strokeStyle = 'rgba(255,255,255,0.95)';
+      ctx.stroke();
+    }
+  }
 }
 
 async function init(): Promise<void> {
@@ -142,9 +549,15 @@ async function init(): Promise<void> {
     return;
   }
 
+  // Histogram follows the edited image: each render()'s blit also captures a
+  // 512x256 nearest-sampled copy of displayTexture (see pipeline.ts), and the
+  // readback lands here as soon as it maps -- throttled by the one-in-flight
+  // gate, so the slider hot path never waits on it.
+  pipeline.setHistogramListener(drawHistogram);
+
   let currentFileId: number | null = null;
   let currentEditState: EditState | null = null;
-  let lastDecoded: { width: number; height: number } | null = null;
+  let lastDecoded: { width: number; height: number; cameraMeta: CameraMeta | null } | null = null;
   // Embedded-JPEG preview fallback (Develop loupe): WebGPU and 2D can't
   // share one canvas, so when a raw can't be decoded the camera's embedded
   // JPEG renders through an absolutely-positioned <img> layered over #canvas
@@ -175,6 +588,35 @@ async function init(): Promise<void> {
   let folderFilter: number | null = null;
   let gridEntries: GridEntry[] = [];
 
+  // Culling filter state. Filtering is grid-only: allFiles (filmstrip + arrow
+  // navigation) is always unfiltered, Lightroom-style.
+  let cullFilter = { hideRejected: true, pickedOnly: false, minRating: 0 };
+
+  function matchesCullFilter(f: FileRecord): boolean {
+    if (cullFilter.hideRejected && f.flag === false) return false;
+    if (cullFilter.pickedOnly && f.flag !== true) return false;
+    if (cullFilter.minRating > 0 && (f.rating ?? 0) < cullFilter.minRating) return false;
+    return true;
+  }
+
+  // Re-chunks allFiles into grid entries honoring folderFilter + cullFilter,
+  // then repaints. Called after a filter change or a cull keypress (which
+  // mutates allFiles in place); keeps the DB out of the hot path.
+  function rebuildGrid(): void {
+    gridEntries = [];
+    for (const folder of folders) {
+      if (folderFilter !== null && folder.id !== folderFilter) continue;
+      const visible = allFiles.filter((f) => f.folderId === folder.id && matchesCullFilter(f));
+      gridEntries.push({ kind: 'heading', folderName: folder.name });
+      for (const row of chunkIntoRows(visible)) {
+        gridEntries.push({ kind: 'row', files: row });
+      }
+    }
+    virtualizer.setOptions({ ...virtualizer.options, count: gridEntries.length });
+    virtualizer.measure();
+    renderVisibleRows();
+  }
+
   // Caches the in-flight or resolved thumbnail request per file id, so
   // re-rendering the same visible cell across multiple virtualizer
   // range-changes (a normal scroll produces many) doesn't re-issue a fresh
@@ -201,7 +643,7 @@ async function init(): Promise<void> {
   }
 
   function renderOps(ops: Op[]): void {
-    pipeline.render(opsToAdjustState(ops));
+    pipeline.render(ops);
   }
 
   const virtualizer = new Virtualizer<HTMLDivElement, HTMLDivElement>({
@@ -252,9 +694,34 @@ async function init(): Promise<void> {
       for (const file of entry.files) {
         const cell = document.createElement('div');
         cell.className = 'catalog-cell' + (file.id === selectedId ? ' selected' : '');
+        cell.dataset.fileId = String(file.id); // lets selection paint in place (see the selection subscribe)
         cell.title = file.path;
         cell.addEventListener('click', () => openFile(file));
         cell.addEventListener('dblclick', () => switchModule('develop'));
+        // Cull badges: reject/pick in the corner, rating stars at the foot,
+        // color as a left edge bar.
+        if (file.flag === false) {
+          const b = document.createElement('span');
+          b.className = 'cell-badge cell-badge-reject';
+          b.textContent = '✕';
+          cell.appendChild(b);
+        } else if (file.flag === true) {
+          const b = document.createElement('span');
+          b.className = 'cell-badge cell-badge-pick';
+          b.textContent = '✓';
+          cell.appendChild(b);
+        }
+        if (file.rating && file.rating > 0) {
+          const r = document.createElement('span');
+          r.className = 'cell-rating';
+          r.textContent = '★'.repeat(file.rating);
+          cell.appendChild(r);
+        }
+        if (file.color) {
+          const c = document.createElement('span');
+          c.className = `cell-color cell-color-${file.color}`;
+          cell.appendChild(c);
+        }
         row.appendChild(cell);
 
         getThumbnail(file).then((blob) => {
@@ -273,25 +740,18 @@ async function init(): Promise<void> {
     }
   }
 
-  // Rebuilds the flattened catalog (folders, allFiles, gridEntries) from
-  // the database, honoring folderFilter, then refreshes grid, folder
-  // list, and filmstrip. Called on import and on folder-filter clicks.
+  // Rebuilds the flattened catalog (folders, allFiles) from the database,
+  // honoring folderFilter, then refreshes grid, folder list, and filmstrip.
+  // Called on import and on folder-filter clicks; filter changes and cull
+  // keypresses go through rebuildGrid() instead (no DB re-query).
   async function renderCatalog(): Promise<void> {
     folders = await listFolders(db);
     allFiles = [];
-    gridEntries = [];
     for (const folder of folders) {
       if (folderFilter !== null && folder.id !== folderFilter) continue;
-      const files = await listFiles(db, folder.id);
-      allFiles.push(...files);
-      gridEntries.push({ kind: 'heading', folderName: folder.name });
-      for (const row of chunkIntoRows(files)) {
-        gridEntries.push({ kind: 'row', files: row });
-      }
+      allFiles.push(...(await listFiles(db, folder.id)));
     }
-    virtualizer.setOptions({ ...virtualizer.options, count: gridEntries.length });
-    virtualizer.measure();
-    renderVisibleRows();
+    rebuildGrid();
     renderFolderList();
     filmstrip.setFiles(allFiles.length);
   }
@@ -336,6 +796,24 @@ async function init(): Promise<void> {
     v.textContent = value;
     row.append(l, v);
     metadataEl.appendChild(row);
+  }
+
+  // LrC-style shooting-info line at the top of the Develop panel:
+  // "SO 320 · 23 mm · f/2.8 · 1/140 sec". Only reported values appear (0 =
+  // not reported by the file). Shutter < 1s renders as the reciprocal
+  // fraction LrC uses; >= 1s as seconds.
+  function renderCameraInfo(): void {
+    cameraInfoEl.textContent = '';
+    const meta = lastDecoded?.cameraMeta;
+    if (!meta || (meta.iso === 0 && meta.shutter === 0 && meta.aperture === 0 && meta.focal === 0)) return;
+    const parts: string[] = [];
+    if (meta.iso > 0) parts.push(`SO ${Math.round(meta.iso)}`);
+    if (meta.focal > 0) parts.push(`${Number.isInteger(meta.focal) ? meta.focal : meta.focal.toFixed(1)} mm`);
+    if (meta.aperture > 0) parts.push(`f/${meta.aperture.toFixed(1)}`);
+    if (meta.shutter > 0) {
+      parts.push(meta.shutter < 1 ? `1/${Math.round(1 / meta.shutter)} sec` : `${meta.shutter.toFixed(1)} sec`);
+    }
+    cameraInfoEl.textContent = parts.join(' · ');
   }
 
   function renderHistory(): void {
@@ -415,11 +893,18 @@ async function init(): Promise<void> {
       // previous file's dimensions.
       if (getState().module === 'develop') {
         const ok = await loadIntoPipeline(record, requestId);
-        if (ok) renderOps(currentOps(currentEditState));
+        if (ok) {
+          // loadIntoPipeline just set asShotWB from the decoded camera WB --
+          // re-apply so the WB slider shows the As-Shot readout (kelvin/tint)
+          // before the first render, for a fresh file.
+          applyOpsToSliders(currentOps(currentEditState));
+          renderOps(currentOps(currentEditState));
+        }
       } else {
         lastDecoded = null;
       }
       renderMetadata();
+      renderCameraInfo();
       renderHistory();
     } catch (err) {
       if (err instanceof DecodeError) {
@@ -434,8 +919,11 @@ async function init(): Promise<void> {
   // While a preview is showing they're disabled, so the UI doesn't offer an
   // adjustment that can't do anything.
   function setAdjustEnabled(enabled: boolean): void {
-    exposureSlider.disabled = !enabled;
-    wbSlider.disabled = !enabled;
+    for (const cfg of ALL_SLIDERS) cfg.slider.disabled = !enabled;
+    profileSelect.disabled = !enabled;
+    curveAdjust.disabled = !enabled;
+    curveCanvas.style.pointerEvents = enabled ? 'auto' : 'none';
+    curveResetButton.disabled = !enabled;
   }
 
   function hidePreview(): void {
@@ -522,7 +1010,8 @@ async function init(): Promise<void> {
           if (requestId !== openRequestId) return false; // superseded during preview extract
           if (dims) {
             loadedFileId = record.id;
-            lastDecoded = dims;
+            lastDecoded = { width: dims.width, height: dims.height, cameraMeta: null };
+            asShotWB = null; // no raw camera data behind a preview
             canvas.width = dims.width;
             canvas.height = dims.height;
             console.log(`decode failed (LibRaw ${err.code}), showing embedded preview (${dims.width}x${dims.height})`);
@@ -541,8 +1030,19 @@ async function init(): Promise<void> {
       // mismatched with the loaded image.
       pipeline.show();
       pipeline.load(decoded);
+      // The fresh (no-WB-op) default renders at the camera's As-Shot gains;
+      // the WB slider readout is derived from them (kelvin/tint).
+      if (decoded.asShotGains) {
+        asShotWB = {
+          gains: decoded.asShotGains,
+          kelvin: gainsToKelvin(decoded.asShotGains),
+          tint: gainsToTint(decoded.asShotGains),
+        };
+      } else {
+        asShotWB = null;
+      }
       loadedFileId = record.id;
-      lastDecoded = { width: decoded.width, height: decoded.height };
+      lastDecoded = { width: decoded.width, height: decoded.height, cameraMeta: decoded.cameraMeta };
       // waitForGPU() is awaited only for the perf log below -- it doesn't gate
       // anything, since nothing after it touches shared state.
       await pipeline.waitForGPU();
@@ -575,13 +1075,28 @@ async function init(): Promise<void> {
     }
   }
 
+  // Live preview during a drag must never queue renders behind each other --
+  // a fast drag over a slow op (the presence box kernels) would stack full
+  // frames on the GPU and the thumb visibly lags the mouse. Latest-wins: one
+  // render in flight; any input during it marks pending and re-renders once
+  // it lands, so the preview always shows the newest slider position.
+  let liveRenderInFlight = false;
+  let liveRenderPending = false;
   async function onSliderInput(): Promise<void> {
     if (currentFileId === null) return;
-    const start = performance.now();
-    renderOps(currentOpsFromSliders());
-    await pipeline.waitForGPU();
-    const elapsed = performance.now() - start;
-    console.log(`slider->frame: ${elapsed.toFixed(1)}ms`);
+    if (liveRenderInFlight) {
+      liveRenderPending = true;
+      return;
+    }
+    liveRenderInFlight = true;
+    do {
+      liveRenderPending = false;
+      const start = performance.now();
+      renderOps(currentOpsFromSliders());
+      await pipeline.waitForGPU();
+      console.log(`slider->frame: ${(performance.now() - start).toFixed(1)}ms`);
+    } while (liveRenderPending);
+    liveRenderInFlight = false;
   }
 
   // Fires on slider release (the 'change' event), not on every 'input'
@@ -611,29 +1126,198 @@ async function init(): Promise<void> {
     }
   }
 
-  exposureSlider.addEventListener('input', () => {
-    updateSliderFill(exposureSlider);
-    updateReadout(exposureValue, Number(exposureSlider.value), 2);
+  // All seven sliders share the same live-update (input) and
+  // commit-on-release (change) path; paintSliders() repaints fill + readout
+  // for whichever one moved.
+  for (const cfg of ALL_SLIDERS) {
+    cfg.slider.addEventListener('input', () => {
+      // Dragging WB/tint exits the As-Shot default: from here on the slider
+      // kelvin/tint is authoritative (exact camera gains stop being emitted).
+      if (cfg.slider === wbSlider || cfg.slider === tintSlider) wbTouched = true;
+      paintSliders();
+      onSliderInput();
+    });
+    cfg.slider.addEventListener('change', () => {
+      commitCurrentEdit();
+    });
+  }
+
+  // Profile is a discrete pick, not a drag -- one render + one history
+  // commit per change.
+  profileSelect.addEventListener('change', () => {
     onSliderInput();
-  });
-  exposureSlider.addEventListener('change', () => {
     commitCurrentEdit();
   });
 
-  wbSlider.addEventListener('input', () => {
-    updateSliderFill(wbSlider, WB_NEUTRAL_KELVIN);
-    wbValue.textContent = `${Number(wbSlider.value)}K`;
+  // Tone curve editor: click on empty space adds a point and starts dragging
+  // it, drag moves the nearest point, double-click deletes it, Reset restores
+  // linear. Edits render live during the drag and commit on release -- one
+  // drag is one undo step, matching the sliders.
+  let draggingCurveIdx = -1;
+  const curveLive = (): void => {
+    drawCurve();
     onSliderInput();
+  };
+  const endCurveDrag = (): void => {
+    if (draggingCurveIdx === -1) return;
+    draggingCurveIdx = -1;
+    commitCurrentEdit();
+  };
+  curveCanvas.addEventListener('pointerdown', (e) => {
+    if (currentFileId === null) return;
+    e.preventDefault();
+    const p = curvePointFromEvent(e);
+    const idx = nearestCurvePoint(p.x, p.y);
+    if (idx === -1) {
+      curvePoints.push(p.x, p.y);
+      draggingCurveIdx = curvePoints.length - 2;
+    } else {
+      draggingCurveIdx = idx;
+    }
+    curveCanvas.setPointerCapture(e.pointerId);
+    curveLive();
   });
-  wbSlider.addEventListener('change', () => {
+  curveCanvas.addEventListener('pointermove', (e) => {
+    if (draggingCurveIdx === -1) return;
+    const p = curvePointFromEvent(e);
+    curvePoints[draggingCurveIdx] = clampCurveX(p.x, draggingCurveIdx);
+    curvePoints[draggingCurveIdx + 1] = p.y;
+    curveLive();
+  });
+  curveCanvas.addEventListener('pointerup', endCurveDrag);
+  curveCanvas.addEventListener('pointercancel', endCurveDrag);
+  curveCanvas.addEventListener('dblclick', (e) => {
+    if (currentFileId === null) return;
+    const p = curvePointFromEvent(e);
+    const idx = nearestCurvePoint(p.x, p.y);
+    if (idx === -1 || curvePoints.length <= 4) return; // keep at least 2 points
+    curvePoints.splice(idx, 2);
+    drawCurve();
+    onSliderInput();
+    commitCurrentEdit();
+  });
+  curveResetButton.addEventListener('click', () => {
+    if (currentFileId === null) return;
+    if (isRegionMode()) {
+      regionHighlightsSlider.value = '0';
+      regionLightsSlider.value = '0';
+      regionDarksSlider.value = '0';
+      regionShadowsSlider.value = '0';
+    } else {
+      curvePoints = [0, 0, 1, 1];
+    }
+    paintSliders();
+    drawCurve();
+    onSliderInput();
+    commitCurrentEdit();
+  });
+
+  // Switching Adjust: Region <-> Point keeps both edits stored (they're
+  // separate op shapes) but only the active one is rendered. One render + one
+  // history commit per switch, like the profile pick.
+  curveAdjust.addEventListener('change', () => {
+    if (currentFileId === null) return;
+    syncCurveMode();
+    drawCurve();
+    onSliderInput();
     commitCurrentEdit();
   });
 
   undoButton.addEventListener('click', () => applyUndoRedo(false));
   redoButton.addEventListener('click', () => applyUndoRedo(true));
 
+  // Export current Develop state -> JPEG/PNG download. The one allowed
+  // GPU->CPU readback. A preview (HE*/undecodable file) can't be exported --
+  // there's no full-res image behind it, only the embedded JPEG.
+  exportButton.addEventListener('click', async () => {
+    if (currentFileId === null) return;
+    if (loadedFileId !== currentFileId) {
+      showError("Nothing to export — a preview can't be exported.");
+      return;
+    }
+    const format = exportFormat.value === 'png' ? 'png' : 'jpeg';
+    exportButton.disabled = true;
+    try {
+      const blob = await pipeline.exportImage(currentOpsFromSliders(), format);
+      const record = allFiles.find((f) => f.id === currentFileId);
+      const base = record?.name.replace(/\.[^.]+$/, '') ?? 'export';
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${base}.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      showError('Export failed.', errorDetail(err));
+    } finally {
+      exportButton.disabled = false;
+    }
+  });
+
+  // ---- presets ----
+  let presets: PresetRow[] = [];
+
+  function renderPresets(): void {
+    presetListEl.textContent = '';
+    for (const preset of presets) {
+      const row = document.createElement('div');
+      row.className = 'preset-row';
+      row.dataset.presetId = String(preset.id);
+      const name = document.createElement('span');
+      name.textContent = preset.name;
+      name.title = opsToLabel(preset.ops);
+      const del = document.createElement('button');
+      del.textContent = '✕';
+      del.title = 'Delete preset';
+      del.addEventListener('click', (e) => {
+        e.stopPropagation();
+        deletePreset(db, preset.id!)
+          .then(() => {
+            presets = presets.filter((p) => p.id !== preset.id);
+            renderPresets();
+          })
+          .catch((err) => showError("Couldn't delete the preset.", errorDetail(err)));
+      });
+      row.append(name, del);
+      presetListEl.appendChild(row);
+    }
+  }
+
+  presetSaveButton.addEventListener('click', async () => {
+    if (currentFileId === null || !currentEditState) return;
+    const name = window.prompt('Preset name:', '');
+    if (name === null) return; // cancelled
+    const trimmed = name.trim();
+    if (!trimmed) return;
+    try {
+      await savePreset(db, trimmed, currentOpsFromSliders());
+      presets = await listPresets(db);
+      renderPresets();
+    } catch (err) {
+      showError("Couldn't save the preset.", errorDetail(err));
+    }
+  });
+
+  // Click a preset to apply it (merge by kind); the ✕ button on each row
+  // deletes instead (it stops propagation above).
+  presetListEl.addEventListener('click', async (e) => {
+    const row = (e.target as HTMLElement).closest('.preset-row') as HTMLElement | null;
+    const preset = row && presets.find((p) => String(p.id) === row.dataset.presetId);
+    if (!preset || currentFileId === null || !currentEditState) return;
+    const merged = mergePresetOps(currentOps(currentEditState), preset.ops);
+    currentEditState = commitEdit(currentEditState, merged);
+    applyOpsToSliders(merged);
+    renderOps(merged);
+    renderHistory();
+    try {
+      await saveEditState(db, currentFileId, currentEditState);
+    } catch (err) {
+      showError("Couldn't save the applied preset.", errorDetail(err));
+    }
+  });
+
   // Temporary diagnostic (Develop-mode black-image investigation): reports
-  // whether the GPU compute chain produced a non-black image (adjustedTexture
+  // whether the GPU compute chain produced a non-black image (displayTexture
   // readback) and what the canvas actually displays (1x1 pixel readback at the
   // image center). Output goes to the browser console.
   function runDevelopDiagnostics(): void {
@@ -688,6 +1372,9 @@ async function init(): Promise<void> {
           // canvas has been resized to the loaded image (loadIntoPipeline
           // already did, if it ran).
           pipeline.show();
+          // Re-apply sliders: ensureDevelopImage may have just decoded and set
+          // asShotWB (As-Shot WB readout for a file first opened in Develop).
+          applyOpsToSliders(currentOps(currentEditState!));
           renderOps(currentOps(currentEditState!));
           // A preview file renders through the overlay img, not the canvas --
           // the diagnostic would read a black canvas under it, so skip.
@@ -711,21 +1398,55 @@ async function init(): Promise<void> {
     }
   });
 
+  // Paints the grid selection outline in place on every selection change --
+  // renderVisibleRows() only rebuilds on scroll/import, so without this the
+  // outline would lag one click behind (a sibling of the filmstrip jank fix).
+  subscribe(() => {
+    const selectedId = getState().selectedId;
+    for (const cell of libraryGrid.querySelectorAll<HTMLElement>('.catalog-cell')) {
+      cell.classList.toggle('selected', cell.dataset.fileId === String(selectedId));
+    }
+  });
+
   // ---- shortcuts ----
   window.addEventListener('keydown', async (e) => {
     const action = keyToAction(e);
     if (!action) return;
 
-    if (action === 'grid' || action === 'loupe') {
+    if (action.type === 'grid' || action.type === 'loupe') {
       e.preventDefault();
       // Shortcut actions are named for the target workspace; module ids
       // are 'library'/'develop'.
-      switchModule(action === 'grid' ? 'library' : 'develop');
+      switchModule(action.type === 'grid' ? 'library' : 'develop');
       return;
     }
-    if (action === 'undo' || action === 'redo') {
+    if (action.type === 'undo' || action.type === 'redo') {
       e.preventDefault();
-      await applyUndoRedo(action === 'redo');
+      await applyUndoRedo(action.type === 'redo');
+      return;
+    }
+
+    // Culling marks on the selected file, applied to the in-memory record so
+    // the grid repaints instantly (no DB re-query).
+    if (
+      action.type === 'pick' || action.type === 'reject' || action.type === 'clearCull' ||
+      action.type === 'rate' || action.type === 'color'
+    ) {
+      e.preventDefault();
+      const record = allFiles.find((f) => f.id === getState().selectedId);
+      if (!record) return;
+      const patch =
+        action.type === 'pick' ? { flag: true } :
+        action.type === 'reject' ? { flag: false } :
+        action.type === 'clearCull' ? { flag: undefined, rating: 0, color: 0 } :
+        action.type === 'rate' ? { rating: action.rating } :
+        { color: action.color };
+      try {
+        Object.assign(record, await setCull(db, record.id, patch));
+        rebuildGrid();
+      } catch (err) {
+        showError("Couldn't save the cull mark.", errorDetail(err));
+      }
       return;
     }
 
@@ -733,10 +1454,23 @@ async function init(): Promise<void> {
     // yet, the first arrow selects the first file (Lightroom-ish).
     e.preventDefault();
     const index = allFiles.findIndex((f) => f.id === getState().selectedId);
-    const nextIndex = index === -1 ? 0 : action === 'next' ? index + 1 : index - 1;
+    const nextIndex = index === -1 ? 0 : action.type === 'next' ? index + 1 : index - 1;
     const file = allFiles[nextIndex];
     if (file) await openFile(file);
   });
+
+  // ---- cull filter bar (grid-only; the filmstrip always shows everything) ----
+  function applyCullFilterControls(): void {
+    cullFilter = {
+      hideRejected: filterHideRejected.checked,
+      pickedOnly: filterPicked.checked,
+      minRating: Number(filterMinRating.value),
+    };
+    rebuildGrid();
+  }
+  filterHideRejected.addEventListener('change', applyCullFilterControls);
+  filterPicked.addEventListener('change', applyCullFilterControls);
+  filterMinRating.addEventListener('change', applyCullFilterControls);
 
   // ---- filmstrip ----
   const filmstrip = createFilmstrip({
@@ -766,6 +1500,12 @@ async function init(): Promise<void> {
   });
 
   await renderCatalog();
+  try {
+    presets = await listPresets(db);
+  } catch (err) {
+    presets = []; // a broken presets store shouldn't block the catalog
+  }
+  renderPresets();
 
   window.addEventListener(
     'beforeunload',

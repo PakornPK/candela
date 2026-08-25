@@ -24,7 +24,19 @@ fn vs_main(@builtin(vertex_index) idx: u32) -> VertexOut {
   return out;
 }
 
+// Linear -> sRGB OETF (the standard piecewise function). The pipeline
+// produces linear rgba16float; the canvas is unorm8, so this encode is what
+// makes images display at the correct brightness (before it, linear-to-8bit
+// was shown directly = too dark). The export path reuses this same fragment
+// shader via a second render pipeline targeting an rgba8unorm offscreen
+// texture. max(c, 0) guards the color matrix's small negatives.
+fn linearToSrgb(c: f32) -> f32 {
+  let x = max(c, 0.0);
+  return select(1.055 * pow(x, 1.0 / 2.4) - 0.055, 12.92 * x, x <= 0.0031308);
+}
+
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
-  return textureSample(srcTex, srcSampler, in.uv);
+  let c = textureSample(srcTex, srcSampler, in.uv);
+  return vec4<f32>(linearToSrgb(c.r), linearToSrgb(c.g), linearToSrgb(c.b), 1.0);
 }
