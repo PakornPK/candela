@@ -24,7 +24,7 @@ export class Pipeline {
   private constructor(
     private readonly device: GPUDevice,
     private readonly context: GPUCanvasContext,
-    format: GPUTextureFormat,
+    private readonly format: GPUTextureFormat,
   ) {
     this.unpackPipeline = device.createComputePipeline({
       layout: 'auto',
@@ -71,6 +71,12 @@ export class Pipeline {
     const device = await adapter.requestDevice({
       requiredLimits: { maxTextureDimension2D: adapter.limits.maxTextureDimension2D },
     });
+    // Surface every GPU validation/runtime error to the console so a failed
+    // render isn't a silent black canvas (see the Develop-mode black-image
+    // investigation).
+    device.addEventListener('uncapturederror', (e) => {
+      console.error('[gpu] uncaptured error:', e.error.message);
+    });
     const context = canvas.getContext('webgpu');
     if (!context) {
       throw new Error('Failed to get a WebGPU canvas context.');
@@ -78,6 +84,15 @@ export class Pipeline {
     const format = navigator.gpu.getPreferredCanvasFormat();
     context.configure({ device, format, alphaMode: 'opaque' });
     return new Pipeline(device, context, format);
+  }
+
+  // (Re)creates the canvas surface. The develop module hides its canvas
+  // (display:none) while Library is active, and a WebGPU surface acquired on
+  // a hidden / zero-layout canvas can stay stale or 1x1 when it becomes
+  // visible again. Re-configuring on show forces a fresh drawing buffer at
+  // the canvas's current width/height.
+  show(): void {
+    this.context.configure({ device: this.device, format: this.format, alphaMode: 'opaque' });
   }
 
   // Destroys prior textures before uploading the new file's data — this is
@@ -196,9 +211,23 @@ export class Pipeline {
         { binding: 1, resource: this.blitSampler },
       ],
     });
+    // The blit target is the canvas's drawing buffer -- if it comes back
+    // 1x1 or throws (hidden/stale surface), the canvas stays black no matter
+    // how correct the compute output is. Log its size so the Develop-mode
+    // black-image diagnosis can tell surface failures apart from compute
+    // failures.
+    let targetView: GPUTextureView;
+    try {
+      const target = this.context.getCurrentTexture();
+      console.log(`[gpu] render blit target: ${target.width}x${target.height}`);
+      targetView = target.createView();
+    } catch (err) {
+      console.error('[gpu] getCurrentTexture() threw:', err);
+      throw err;
+    }
     const renderPass = encoder.beginRenderPass({
       colorAttachments: [{
-        view: this.context.getCurrentTexture().createView(),
+        view: targetView,
         loadOp: 'clear',
         storeOp: 'store',
         clearValue: { r: 0, g: 0, b: 0, a: 1 },
@@ -210,6 +239,46 @@ export class Pipeline {
     renderPass.end();
 
     this.device.queue.submit([encoder.finish()]);
+  }
+
+  // Diagnostic: reads back an 8x8 block at the center of the adjusted
+  // (blit-source) texture and reports its average and max RGB. If this comes
+  // back non-black, the GPU compute chain is producing an image and any
+  // black canvas is a surface/presentation problem; if it's black, the
+  // compute chain itself is broken. Temporary, for the Develop-mode
+  // black-image investigation.
+  async diagnostic(): Promise<string> {
+    if (!this.adjustedTexture) return 'adjustedTexture: none loaded';
+    const { width, height } = this.adjustedTexture;
+    const sample = 8;
+    const bytesPerRow = 256; // copyTextureToBuffer requires 256 alignment
+    const buffer = this.device.createBuffer({
+      size: bytesPerRow * sample,
+      usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+    });
+    const encoder = this.device.createCommandEncoder();
+    encoder.copyTextureToBuffer(
+      { texture: this.adjustedTexture, origin: [Math.floor(width / 2), Math.floor(height / 2)] },
+      { buffer, bytesPerRow },
+      { width: sample, height: sample },
+    );
+    this.device.queue.submit([encoder.finish()]);
+    await buffer.mapAsync(GPUMapMode.READ);
+    const floats = new Float32Array(buffer.getMappedRange());
+    let r = 0, g = 0, b = 0, max = 0;
+    for (let j = 0; j < sample; j++) {
+      for (let i = 0; i < sample; i++) {
+        // rgba16float = 8 bytes/texel; row stride = bytesPerRow.
+        const o = (j * bytesPerRow) / 4 + i * 2;
+        r += floats[o];
+        g += floats[o + 1];
+        b += floats[o + 2];
+        max = Math.max(max, floats[o], floats[o + 1], floats[o + 2]);
+      }
+    }
+    buffer.unmap();
+    const n = sample * sample;
+    return `adjustedTexture center ${sample}x${sample} of ${width}x${height}: avg rgb=(${(r / n).toFixed(4)}, ${(g / n).toFixed(4)}, ${(b / n).toFixed(4)}) max=${max.toFixed(4)}`;
   }
 
   // Resolves once GPU work submitted so far has actually finished executing,

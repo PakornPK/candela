@@ -342,7 +342,13 @@ async function init(): Promise<void> {
   // failure is, instead of becoming an unhandled rejection.
   async function openFile(record: FileRecord): Promise<void> {
     clearError();
+    // Temporary perf probe (click-jank investigation): every selection
+    // synchronously notifies subscribers -- the filmstrip scrolls the
+    // selected cell into view and re-renders its visible cells. Log how long
+    // that sync block takes so the jank can be attributed or ruled out.
+    const selStart = performance.now();
     selectFile(record.id);
+    console.log(`[app] selectFile sync block: ${(performance.now() - selStart).toFixed(1)}ms`);
     const requestId = ++openRequestId;
     try {
       // Checked separately from ensureReadPermission() below so we know
@@ -470,6 +476,30 @@ async function init(): Promise<void> {
   undoButton.addEventListener('click', () => applyUndoRedo(false));
   redoButton.addEventListener('click', () => applyUndoRedo(true));
 
+  // Temporary diagnostic (Develop-mode black-image investigation): reports
+  // whether the GPU compute chain produced a non-black image (adjustedTexture
+  // readback) and what the canvas actually displays (1x1 pixel readback at the
+  // image center). Output goes to the browser console.
+  function runDevelopDiagnostics(): void {
+    pipeline
+      .diagnostic()
+      .then((s) => console.log('[app]', s))
+      .catch((e) => console.error('[app] diagnostic readback failed:', e));
+    try {
+      const probe = document.createElement('canvas');
+      probe.width = 1;
+      probe.height = 1;
+      const p2d = probe.getContext('2d', { willReadFrequently: true })!;
+      const cx = Math.floor(canvas.width / 2);
+      const cy = Math.floor(canvas.height / 2);
+      p2d.drawImage(canvas, cx, cy, 1, 1, 0, 0, 1, 1);
+      const px = p2d.getImageData(0, 0, 1, 1).data;
+      console.log(`[app] canvas pixel at (${cx},${cy}) = rgba(${px[0]},${px[1]},${px[2]},${px[3]})`);
+    } catch (e) {
+      console.error('[app] canvas pixel probe failed:', e);
+    }
+  }
+
   // ---- module wiring ----
   registerModule({
     id: 'library',
@@ -486,7 +516,19 @@ async function init(): Promise<void> {
       // the surface is hidden/re-shown, so re-render from the existing
       // textures (cheap -- no decode; the pipeline already holds them).
       if (currentFileId !== null && currentEditState) {
-        renderOps(currentOps(currentEditState));
+        const ops = currentOps(currentEditState);
+        // Two-part fix for the black canvas when entering Develop:
+        //  1. show() re-creates the WebGPU surface -- a surface configured
+        //     while the canvas was display:none can stay stale/1x1 when it
+        //     becomes visible again.
+        //  2. the render is deferred to the next animation frame so layout
+        //     has run on the now-visible canvas first (switchModule calls
+        //     onShow() synchronously right after unhiding).
+        pipeline.show();
+        requestAnimationFrame(() => {
+          renderOps(ops);
+          runDevelopDiagnostics();
+        });
       }
     },
     onHide: () => {},
