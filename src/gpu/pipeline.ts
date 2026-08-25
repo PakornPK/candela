@@ -130,7 +130,9 @@ export class Pipeline {
     this.adjustedTexture = this.device.createTexture({
       size,
       format: 'rgba16float',
-      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+      // COPY_SRC is for the diagnostic() readback (Develop-mode black-image
+      // investigation); it also makes export readbacks possible later.
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
     });
 
     this.device.queue.writeBuffer(this.levelsBuffer, 0, new Float32Array([raw.blackLevel, raw.whiteLevel, 0, 0]));

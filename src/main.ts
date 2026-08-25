@@ -420,6 +420,11 @@ async function init(): Promise<void> {
     if (requestId !== openRequestId) return false; // superseded during decode
     canvas.width = decoded.width;
     canvas.height = decoded.height;
+    // Re-create the WebGPU surface at the just-set size. Chrome 151 ties the
+    // drawing buffer to the canvas size at configure() time -- a configure
+    // left over from a different-size file would leave the blit target
+    // mismatched with the loaded image.
+    pipeline.show();
     pipeline.load(decoded);
     loadedFileId = record.id;
     lastDecoded = { width: decoded.width, height: decoded.height };
@@ -545,20 +550,22 @@ async function init(): Promise<void> {
       // the surface is hidden/re-shown, so re-render from the existing
       // textures (cheap -- no decode; the pipeline already holds them).
       if (currentFileId === null || !currentEditState) return;
-      // Two-part fix for the black canvas when entering Develop:
-      //  1. show() re-creates the WebGPU surface -- a surface configured
-      //     while the canvas was display:none can stay stale/1x1 when it
-      //     becomes visible again.
-      //  2. the render is deferred to the next animation frame so layout has
-      //     run on the now-visible canvas first (switchModule calls onShow()
-      //     synchronously right after unhiding).
-      pipeline.show();
+      // The render is deferred to the next animation frame so layout has run
+      // on the now-visible canvas first (switchModule calls onShow()
+      // synchronously right after unhiding).
       requestAnimationFrame(() => {
         // Files selected from Library are decoded lazily (see openFile), so
         // on first Develop entry the Bayer data may not be in the pipeline
         // yet -- decode + load it, then render from the existing textures
         // (cheap: no re-decode when the data is already loaded).
         ensureDevelopImage().then(() => {
+          // show() re-creates the surface at the canvas's current size. The
+          // surface was configured while the canvas was display:none or for
+          // a previous file, and Chrome 151 ties the drawing buffer to the
+          // canvas size at configure() time, so this must happen after the
+          // canvas has been resized to the loaded image (loadIntoPipeline
+          // already did, if it ran).
+          pipeline.show();
           renderOps(currentOps(currentEditState!));
           runDevelopDiagnostics();
         });
