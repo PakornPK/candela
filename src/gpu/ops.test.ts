@@ -5,7 +5,7 @@ import { TONE_LUT_SIZE } from './tone';
 import type { Op } from '../catalog/types';
 
 const NEUTRAL_TONE = { kind: 'tone', contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0 } as const;
-// Registry order: [whiteBalance, profile, exposure, tone, toneCurve, presence].
+// Registry order: [whiteBalance, profile, exposure, tone, toneCurve, presence, vignette].
 // Three passes are mandatory -- they always run even with no ops (fresh open):
 // whiteBalance (As-Shot fallback), profile (camera matrix), and tone (neutral
 // tone now renders the ACR baseline curve -- the LrC import look, see tone.ts).
@@ -24,6 +24,7 @@ describe('presentOpIndices', () => {
     expect(presentOpIndices([{ kind: 'whiteBalance', kelvin: 6000, tint: 0 }])).toEqual([0, 1, 3]);
     expect(presentOpIndices([{ ...NEUTRAL_TONE, contrast: 20 }])).toEqual([0, 1, 3]);
     expect(presentOpIndices([{ kind: 'toneCurve', mode: 'point', points: [0, 0, 0.5, 0.6, 1, 1] }])).toEqual([0, 1, 3, 4]);
+    expect(presentOpIndices([{ kind: 'vignette', amount: -50, midpoint: 50, roundness: 0, feather: 50, highlights: 0 }])).toEqual([0, 1, 3, 6]);
   });
 
   it('reports all present ops in registry order, independent of Op[] order', () => {
@@ -165,6 +166,20 @@ describe('OP_RENDERERS packParams', () => {
     // the stock's character. (Both anchor mid-gray at 0.39 -- the per-stock
     // exposure scale keeps a switch a look, not a re-exposure.)
     expect(slide[TONE_LUT_SIZE + 256]).toBeLessThan(portra[TONE_LUT_SIZE + 256]);
+  });
+
+  it('vignette packs 8 floats; neutral when absent, amount-driven when present', () => {
+    const vignette = OP_RENDERERS[6];
+    expect(vignette.kind).toBe('vignette');
+    const absent = vignette.packParams([]);
+    expect(absent.length).toBe(8);
+    expect(absent[0]).toBe(0); // amount 0 = off
+    expect(absent[1]).toBe(50); // LrC neutral midpoint
+    expect(absent[3]).toBe(50); // LrC neutral feather
+    const dark = vignette.packParams([
+      { kind: 'vignette', amount: -60, midpoint: 40, roundness: 20, feather: 30, highlights: 10 },
+    ]);
+    expect(Array.from(dark)).toEqual([-60, 40, 20, 30, 10, 0, 0, 0]);
   });
 
   it('toneCurve packs a LUT, identity when absent or linear', () => {

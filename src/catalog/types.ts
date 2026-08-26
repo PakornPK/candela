@@ -67,7 +67,8 @@ export type Op =
   | { kind: 'whiteBalance'; kelvin: number; tint: number; gains?: WbGains }
   | { kind: 'tone'; contrast: number; highlights: number; shadows: number; whites: number; blacks: number }
   | ToneCurveOp
-  | { kind: 'presence'; texture: number; clarity: number; dehaze: number; vibrance: number; saturation: number };
+  | { kind: 'presence'; texture: number; clarity: number; dehaze: number; vibrance: number; saturation: number }
+  | { kind: 'vignette'; amount: number; midpoint: number; roundness: number; feather: number; highlights: number };
   // future op kinds (crop, ...) extend this union.
 
 export function isProfileOp(op: Op): op is { kind: 'profile'; profile: ProfileKind } {
@@ -94,6 +95,12 @@ export function isPresenceOp(
   op: Op,
 ): op is { kind: 'presence'; texture: number; clarity: number; dehaze: number; vibrance: number; saturation: number } {
   return op.kind === 'presence';
+}
+
+export function isVignetteOp(
+  op: Op,
+): op is { kind: 'vignette'; amount: number; midpoint: number; roundness: number; feather: number; highlights: number } {
+  return op.kind === 'vignette';
 }
 
 export interface EditState {

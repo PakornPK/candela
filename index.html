@@ -428,6 +428,16 @@
         font-size: 12px;
         margin: 10px 0 2px;
       }
+      .group-label {
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.03em;
+        text-transform: uppercase;
+        color: var(--text-dim);
+        margin: 12px 0 2px;
+        padding-bottom: 4px;
+        border-bottom: 1px solid var(--panel-border);
+      }
       .slider-label output {
         float: right;
         color: var(--accent);
@@ -725,6 +735,20 @@
             <div id="curve-point">
               <canvas id="curve" width="240" height="160"></canvas>
             </div>
+          </details>
+          <details class="panel-section">
+            <summary>Effects</summary>
+            <div class="group-label">Post-Crop Vignetting</div>
+            <label class="slider-label" for="vignette-amount">Amount <output id="vignette-amount-value" for="vignette-amount">0</output></label>
+            <input type="range" id="vignette-amount" min="-100" max="100" step="1" value="0" />
+            <label class="slider-label" for="vignette-midpoint">Midpoint <output id="vignette-midpoint-value" for="vignette-midpoint">50</output></label>
+            <input type="range" id="vignette-midpoint" min="0" max="100" step="1" value="50" />
+            <label class="slider-label" for="vignette-roundness">Roundness <output id="vignette-roundness-value" for="vignette-roundness">0</output></label>
+            <input type="range" id="vignette-roundness" min="-100" max="100" step="1" value="0" />
+            <label class="slider-label" for="vignette-feather">Feather <output id="vignette-feather-value" for="vignette-feather">50</output></label>
+            <input type="range" id="vignette-feather" min="0" max="100" step="1" value="50" />
+            <label class="slider-label" for="vignette-highlights">Highlights <output id="vignette-highlights-value" for="vignette-highlights">0</output></label>
+            <input type="range" id="vignette-highlights" min="0" max="100" step="1" value="0" />
           </details>
           <details class="panel-section">
             <summary>Export</summary>

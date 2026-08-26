@@ -4,10 +4,12 @@ import toneShader from '../shaders/tone.wgsl?raw';
 import tonecurveShader from '../shaders/tonecurve.wgsl?raw';
 import cameraColorShader from '../shaders/cameraColor.wgsl?raw';
 import presenceShader from '../shaders/presence.wgsl?raw';
+import vignetteShader from '../shaders/vignette.wgsl?raw';
 import { evToGain, kelvinToShift, packColorMatrix, wbShiftToGains, type WhiteBalanceGains } from './uniforms';
 import { buildParametricToneLut, buildToneCurveLut, buildToneLuts, TONE_LUT_SIZE, type ToneParams, type ToneLook } from './tone';
-import { isPresenceOp, isExposureOp, isProfileOp, isToneCurveOp, isToneOp, isWhiteBalanceOp, type Op, type WbGains } from '../catalog/types';
+import { isPresenceOp, isExposureOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type WbGains } from '../catalog/types';
 import { packPresence, type PresenceParams } from './presence';
+import { packVignette, type VignetteParams } from './vignette';
 import { FILM_STOCKS, isFilmStockId } from './film';
 import type { FilmStock } from './film';
 
@@ -171,6 +173,19 @@ export const OP_RENDERERS: OpRenderer[] = [
       const op = ops.find(isPresenceOp);
       const p: PresenceParams = op ?? { texture: 0, clarity: 0, dehaze: 0, vibrance: 0, saturation: 0 };
       return packPresence(p);
+    },
+  },
+  {
+    kind: 'vignette',
+    // LAST -- a display-level effect (LrC's Effects panel applies it after
+    // the color/tone chain). Absent op packs the neutral defaults (amount 0,
+    // midpoint/feather 50) so a no-op pass renders as identity.
+    shader: vignetteShader,
+    uniformSize: 32, // struct Vignette { 5 f32 + 3 pad }
+    packParams: (ops) => {
+      const op = ops.find(isVignetteOp);
+      const p: VignetteParams = op ?? { amount: 0, midpoint: 50, roundness: 0, feather: 50, highlights: 0 };
+      return packVignette(p);
     },
   },
 ];

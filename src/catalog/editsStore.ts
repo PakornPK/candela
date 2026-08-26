@@ -90,6 +90,10 @@ export function isValidOp(op: unknown): op is Op {
     const pr = op as { texture?: unknown; clarity?: unknown; dehaze?: unknown; vibrance?: unknown; saturation?: unknown };
     return [pr.texture, pr.clarity, pr.dehaze, pr.vibrance, pr.saturation].every((v) => typeof v === 'number');
   }
+  if (candidate.kind === 'vignette') {
+    const v = op as { amount?: unknown; midpoint?: unknown; roundness?: unknown; feather?: unknown; highlights?: unknown };
+    return [v.amount, v.midpoint, v.roundness, v.feather, v.highlights].every((x) => typeof x === 'number');
+  }
   return false;
 }
 

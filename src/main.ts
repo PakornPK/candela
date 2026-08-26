@@ -13,10 +13,11 @@ import { loadEditState, saveEditState } from './catalog/editsStore';
 import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
 import { commitEdit, undo, redo, currentOps } from './catalog/editHistory';
 import { getOrExtractThumbnail } from './catalog/thumbnails';
-import { isExposureOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type WbGains } from './catalog/types';
+import { isExposureOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type WbGains } from './catalog/types';
 import { FILM_STOCKS } from './gpu/film';
 import { buildParametricToneLut, buildToneCurveLut, fitRegionParams, isNeutralTone, parametricControlPoints, TONE_LUT_SIZE, type ToneParams } from './gpu/tone';
 import { isNeutralPresence, type PresenceParams } from './gpu/presence';
+import { isNeutralVignette, type VignetteParams } from './gpu/vignette';
 import { getState, selectFile, subscribe, type ModuleId } from './app/state';
 import { registerModule, switchModule } from './app/modules';
 import { createFilmstrip } from './app/filmstrip';
@@ -73,6 +74,16 @@ const clarityValue = document.querySelector<HTMLOutputElement>('#clarity-value')
 const dehazeValue = document.querySelector<HTMLOutputElement>('#dehaze-value')!;
 const vibranceValue = document.querySelector<HTMLOutputElement>('#vibrance-value')!;
 const saturationValue = document.querySelector<HTMLOutputElement>('#saturation-value')!;
+const vignetteAmountSlider = document.querySelector<HTMLInputElement>('#vignette-amount')!;
+const vignetteMidpointSlider = document.querySelector<HTMLInputElement>('#vignette-midpoint')!;
+const vignetteRoundnessSlider = document.querySelector<HTMLInputElement>('#vignette-roundness')!;
+const vignetteFeatherSlider = document.querySelector<HTMLInputElement>('#vignette-feather')!;
+const vignetteHighlightsSlider = document.querySelector<HTMLInputElement>('#vignette-highlights')!;
+const vignetteAmountValue = document.querySelector<HTMLOutputElement>('#vignette-amount-value')!;
+const vignetteMidpointValue = document.querySelector<HTMLOutputElement>('#vignette-midpoint-value')!;
+const vignetteRoundnessValue = document.querySelector<HTMLOutputElement>('#vignette-roundness-value')!;
+const vignetteFeatherValue = document.querySelector<HTMLOutputElement>('#vignette-feather-value')!;
+const vignetteHighlightsValue = document.querySelector<HTMLOutputElement>('#vignette-highlights-value')!;
 const canvas = document.querySelector<HTMLCanvasElement>('#canvas')!;
 const errorEl = document.querySelector<HTMLDivElement>('#error')!;
 const errorMessageEl = document.querySelector<HTMLParagraphElement>('#error-message')!;
@@ -186,6 +197,11 @@ const ALL_SLIDERS: SliderConfig[] = [
   { slider: dehazeSlider, output: dehazeValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: vibranceSlider, output: vibranceValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: saturationSlider, output: saturationValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: vignetteAmountSlider, output: vignetteAmountValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: vignetteMidpointSlider, output: vignetteMidpointValue, neutral: 50, format: (v) => formatSigned(v) },
+  { slider: vignetteRoundnessSlider, output: vignetteRoundnessValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: vignetteFeatherSlider, output: vignetteFeatherValue, neutral: 50, format: (v) => formatSigned(v) },
+  { slider: vignetteHighlightsSlider, output: vignetteHighlightsValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: regionHighlightsSlider, output: regionHighlightsValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: regionLightsSlider, output: regionLightsValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: regionDarksSlider, output: regionDarksValue, neutral: 0, format: (v) => formatSigned(v) },
@@ -366,6 +382,16 @@ function readPresenceParams(): PresenceParams {
   };
 }
 
+function readVignetteParams(): VignetteParams {
+  return {
+    amount: Number(vignetteAmountSlider.value),
+    midpoint: Number(vignetteMidpointSlider.value),
+    roundness: Number(vignetteRoundnessSlider.value),
+    feather: Number(vignetteFeatherSlider.value),
+    highlights: Number(vignetteHighlightsSlider.value),
+  };
+}
+
 function currentOpsFromSliders(): Op[] {
   // As-Shot: while the WB/tint sliders are untouched, the exact camera gains
   // are preserved (kelvin+tint can't represent an arbitrary cam_mul). Once the
@@ -391,6 +417,11 @@ function currentOpsFromSliders(): Op[] {
   }
   const presence = readPresenceParams();
   if (!isNeutralPresence(presence)) ops.push({ kind: 'presence', ...presence });
+  // Vignette is emitted only when the amount is non-zero (the midpoint/
+  // roundness/feather/highlights sliders do nothing on their own) -- a
+  // neutral state renders without an extra full-res pass, like presence.
+  const vignette = readVignetteParams();
+  if (!isNeutralVignette(vignette)) ops.push({ kind: 'vignette', ...vignette });
   return ops;
 }
 
@@ -401,6 +432,7 @@ function applyOpsToSliders(ops: Op[]): void {
   const toneOp = ops.find(isToneOp);
   const curveOp = ops.find(isToneCurveOp);
   const presenceOp = ops.find(isPresenceOp);
+  const vignetteOp = ops.find(isVignetteOp);
   profileSelect.value = profileOp?.profile ?? 'camera';
   exposureSlider.value = String(exposureOp?.ev ?? 0);
   // WB slider is a kelvin track, but the applied white point may be an exact
@@ -432,6 +464,14 @@ function applyOpsToSliders(ops: Op[]): void {
   dehazeSlider.value = String(presenceOp?.dehaze ?? 0);
   vibranceSlider.value = String(presenceOp?.vibrance ?? 0);
   saturationSlider.value = String(presenceOp?.saturation ?? 0);
+  // Vignette: LrC's neutral defaults are midpoint 50 / feather 50 (amount 0
+  // off), so an absent op restores those, not zero, so the fill-from-zero
+  // track reads right on a fresh open.
+  vignetteAmountSlider.value = String(vignetteOp?.amount ?? 0);
+  vignetteMidpointSlider.value = String(vignetteOp?.midpoint ?? 50);
+  vignetteRoundnessSlider.value = String(vignetteOp?.roundness ?? 0);
+  vignetteFeatherSlider.value = String(vignetteOp?.feather ?? 50);
+  vignetteHighlightsSlider.value = String(vignetteOp?.highlights ?? 0);
   // Tone curve: restore the stored mode. Region and Point are one shared
   // curve, so either op shape restores BOTH handles: a region op regenerates
   // the point curve from its sliders; a point op (including pre-region legacy
@@ -519,6 +559,9 @@ function opsToLabel(ops: Op[]): string {
         if (op.vibrance !== 0) parts.push(`Vibrance ${formatSigned(op.vibrance)}`);
         if (op.saturation !== 0) parts.push(`Saturation ${formatSigned(op.saturation)}`);
         return parts.join(' · ');
+      }
+      if (isVignetteOp(op)) {
+        return `Vignette ${formatSigned(op.amount)}`;
       }
       return 'Unknown';
     })
