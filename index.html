@@ -659,9 +659,8 @@
           <details class="panel-section" open>
             <summary>Profile</summary>
             <select id="profile">
-              <option value="camera" selected>Camera</option>
-              <option value="neutral">Neutral</option>
-              <option value="film">Portra 400</option>
+              <!-- Camera + Neutral + every film stock, built from the FILM_STOCKS
+                   registry in main.ts (so a new stock auto-appears). -->
             </select>
           </details>
           <details class="panel-section" open>

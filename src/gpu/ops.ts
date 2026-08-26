@@ -8,6 +8,8 @@ import { evToGain, kelvinToShift, packColorMatrix, wbShiftToGains, type WhiteBal
 import { buildParametricToneLut, buildToneCurveLut, buildToneLuts, TONE_LUT_SIZE, type ToneParams, type ToneLook } from './tone';
 import { isPresenceOp, isExposureOp, isProfileOp, isToneCurveOp, isToneOp, isWhiteBalanceOp, type Op, type WbGains } from '../catalog/types';
 import { packPresence, type PresenceParams } from './presence';
+import { FILM_STOCKS, isFilmStockId } from './film';
+import type { FilmStock } from './film';
 
 // The currently loaded raw's camera color matrix (LibRaw rgb_cam). The
 // `profile` op's 'camera' choice resolves against THIS -- a profile op is
@@ -126,12 +128,18 @@ export const OP_RENDERERS: OpRenderer[] = [
     packParams: (ops) => {
       const op = ops.find(isToneOp);
       const p: ToneParams = op ?? { contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0 };
-      // The active profile picks the tone base: 'neutral' -> ACR baseline,
-      // 'film' -> the film stock's H-D response (per-channel), else the camera
+      // The active profile picks the tone base: 'neutral' -> ACR baseline, a
+      // film stock -> that stock's H-D response (per-channel), else the camera
       // look. The tone sliders perturb whichever base is active.
       const profile = ops.find(isProfileOp)?.profile;
-      const look: ToneLook = profile === 'neutral' ? 'standard' : profile === 'film' ? 'film' : 'camera';
-      return buildToneLuts(p, look);
+      let look: ToneLook = 'camera';
+      let stock: FilmStock | undefined;
+      if (profile === 'neutral') look = 'standard';
+      else if (profile !== undefined && isFilmStockId(profile)) {
+        look = 'film';
+        stock = FILM_STOCKS[profile];
+      }
+      return buildToneLuts(p, look, stock);
     },
   },
   {

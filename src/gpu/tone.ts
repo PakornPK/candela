@@ -31,8 +31,8 @@
 // ponytail: strengths are rough calibrations -- tune against LrC screenshots
 // (phase J verification); directions are correct as-is.
 
-import { PORTRA_400, filmRenderLinear, FILM_EXPOSURE_SCALE } from './film';
-import type { FilmChannelParams } from './film';
+import { PORTRA_400, filmRenderLinear, filmExposureScale } from './film';
+import type { FilmChannelParams, FilmStock } from './film';
 
 export interface ToneParams {
   contrast: number; // -100..100, 0 neutral
@@ -206,15 +206,16 @@ export function buildToneLut(p: ToneParams): Float32Array {
 // fallback. 'film' builds three DIFFERENT per-channel LUTs (each channel's own
 // film H-D curve) -- the stock's color character lives in those differences.
 // Concatenated R,G,B, 3*512.
-export function buildToneLuts(p: ToneParams, look: ToneLook = 'camera'): Float32Array {
+export function buildToneLuts(p: ToneParams, look: ToneLook = 'camera', filmStock?: FilmStock): Float32Array {
   const luts = new Float32Array(TONE_LUT_SIZE * 3);
   if (look === 'film') {
-    const { channels, gain } = PORTRA_400;
+    // Each stock has its own H-D curves, scan gain, and exposure scale (the
+    // mid-gray anchor -- filmExposureScale keeps a stock switch a look swap,
+    // not a re-exposure). The per-channel shape differences carry the color.
+    const stock = filmStock ?? PORTRA_400;
+    const scale = filmExposureScale(stock);
     for (let ch = 0; ch < 3; ch++) {
-      // Each channel carries its own scanner output gain (the film's
-      // neutralization); the per-channel shape differences live in the H-D
-      // curves (tone.ts's film base multiplies the composite by this gain).
-      luts.set(buildToneLutForChannel(p, 'film', { ch: channels[ch], gain: gain[ch] }), ch * TONE_LUT_SIZE);
+      luts.set(buildToneLutForChannel(p, 'film', { ch: stock.channels[ch], gain: stock.gain[ch], scale }), ch * TONE_LUT_SIZE);
     }
     return luts;
   }
@@ -231,6 +232,7 @@ export function buildToneLuts(p: ToneParams, look: ToneLook = 'camera'): Float32
 export interface FilmToneConfig {
   ch: FilmChannelParams;
   gain: number;
+  scale: number;
 }
 
 export function buildToneLutForChannel(p: ToneParams, look: ToneLook, film?: FilmToneConfig): Float32Array {
@@ -273,7 +275,7 @@ export function buildToneLutForChannel(p: ToneParams, look: ToneLook, film?: Fil
   const base = (xLin: number): number => {
     if (look === 'camera') return logToNorm(cameraOutput(sampleAcrCurve(xLin)));
     if (look === 'film') {
-      return logToNorm(filmRenderLinear(xLin, film!.ch, FILM_EXPOSURE_SCALE) * film!.gain);
+      return logToNorm(filmRenderLinear(xLin, film!.ch, film!.scale) * film!.gain);
     }
     return logToNorm(sampleAcrCurve(xLin));
   };

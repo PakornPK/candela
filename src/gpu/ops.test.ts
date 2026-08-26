@@ -135,9 +135,9 @@ describe('OP_RENDERERS packParams', () => {
     expect(std[1024 + 256]).toBeCloseTo(0.5475, 3);
   });
 
-  it("tone builds the Portra 400 per-channel film look when profile is 'film'", () => {
+  it("tone builds the per-channel film look when profile is a film stock (Portra 400)", () => {
     const tone = OP_RENDERERS[3];
-    const film = tone.packParams([{ kind: 'profile', profile: 'film' }]);
+    const film = tone.packParams([{ kind: 'profile', profile: 'portra400' }]);
     expect(film.length).toBe(TONE_LUT_SIZE * 3);
     // Per-channel: the film's H-D curves differ (gamma/d_min rise R<G<B), so
     // unlike camera/standard the three LUTs are NOT identical -- that IS the
@@ -151,6 +151,20 @@ describe('OP_RENDERERS packParams', () => {
         expect(film[ch * TONE_LUT_SIZE + i]).toBeGreaterThanOrEqual(film[ch * TONE_LUT_SIZE + i - 1]);
       }
     }
+  });
+
+  it('tone selects the requested stock -- each stock packs its own distinct LUT', () => {
+    const tone = OP_RENDERERS[3];
+    const portra = tone.packParams([{ kind: 'profile', profile: 'portra400' }]);
+    const slide = tone.packParams([{ kind: 'profile', profile: 'ektachrome100' }]);
+    const diff = (a: Float32Array, b: Float32Array) =>
+      Array.from(a).some((v, i) => Math.abs(v - b[i]) > 1e-4);
+    expect(diff(portra, slide)).toBe(true);
+    // Index 256 is the log-domain midpoint (~lum 0.06, a shadow): the punchy
+    // slide curve sits darker there than a soft negative -- the divergence IS
+    // the stock's character. (Both anchor mid-gray at 0.39 -- the per-stock
+    // exposure scale keeps a switch a look, not a re-exposure.)
+    expect(slide[TONE_LUT_SIZE + 256]).toBeLessThan(portra[TONE_LUT_SIZE + 256]);
   });
 
   it('toneCurve packs a LUT, identity when absent or linear', () => {

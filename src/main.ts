@@ -13,7 +13,8 @@ import { loadEditState, saveEditState } from './catalog/editsStore';
 import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
 import { commitEdit, undo, redo, currentOps } from './catalog/editHistory';
 import { getOrExtractThumbnail } from './catalog/thumbnails';
-import { isExposureOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type WbGains } from './catalog/types';
+import { isExposureOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type WbGains } from './catalog/types';
+import { FILM_STOCKS } from './gpu/film';
 import { buildParametricToneLut, buildToneCurveLut, fitRegionParams, isNeutralTone, parametricControlPoints, TONE_LUT_SIZE, type ToneParams } from './gpu/tone';
 import { isNeutralPresence, type PresenceParams } from './gpu/presence';
 import { getState, selectFile, subscribe, type ModuleId } from './app/state';
@@ -35,6 +36,23 @@ const exposureValue = document.querySelector<HTMLOutputElement>('#exposure-value
 const wbValue = document.querySelector<HTMLOutputElement>('#wb-value')!;
 const tintValue = document.querySelector<HTMLOutputElement>('#tint-value')!;
 const profileSelect = document.querySelector<HTMLSelectElement>('#profile')!;
+// The profile picker's options -- Camera, Neutral, then every film stock --
+// built from the FILM_STOCKS registry so a new stock auto-appears (the HTML
+// select is empty until this runs).
+const profileOptions: Array<[string, string]> = [
+  ['camera', 'Camera'],
+  ['neutral', 'Neutral'],
+  ...(Object.keys(FILM_STOCKS) as FilmStockId[]).map((id) => [id, FILM_STOCKS[id].name] as [string, string]),
+];
+profileSelect.replaceChildren(
+  ...profileOptions.map(([value, label]) => {
+    const option = document.createElement('option');
+    option.value = value;
+    option.textContent = label;
+    return option;
+  }),
+);
+profileSelect.value = 'camera';
 const contrastSlider = document.querySelector<HTMLInputElement>('#contrast')!;
 const highlightsSlider = document.querySelector<HTMLInputElement>('#highlights')!;
 const shadowsSlider = document.querySelector<HTMLInputElement>('#shadows')!;
@@ -466,7 +484,7 @@ function opsToLabel(ops: Op[]): string {
   if (ops.length === 0) return 'Import';
   return ops
     .map((op) => {
-      if (isProfileOp(op)) return op.profile === 'neutral' ? 'Neutral profile' : op.profile === 'film' ? 'Portra 400' : 'Camera profile';
+      if (isProfileOp(op)) return op.profile === 'neutral' ? 'Neutral profile' : op.profile === 'camera' ? 'Camera profile' : FILM_STOCKS[op.profile].name;
       if (isExposureOp(op)) return `Exposure ${op.ev >= 0 ? '+' : ''}${op.ev.toFixed(2)}`;
       if (isWhiteBalanceOp(op)) {
         return op.gains

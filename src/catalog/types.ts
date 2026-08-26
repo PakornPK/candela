@@ -40,10 +40,26 @@ export interface WbGains {
   b: number;
 }
 
+// Film-stock ids, defined here (the shared type layer) and keyed by the
+// FILM_STOCKS registry in gpu/film.ts. Kept as an explicit union so the
+// profile picker and history rows never hold an unknown stock.
+export type FilmStockId =
+  | 'portra400'
+  | 'portra160'
+  | 'portra800'
+  | 'gold200'
+  | 'ektar100'
+  | 'superia400'
+  | 'ektachrome100'
+  | 'provia100f'
+  | 'velvia50'
+  | 'cinestill800t';
+
 // The color-profile picker's options. 'camera' = the loaded raw's embedded
 // camera profile (LibRaw rgb_cam -- the default), 'neutral' = identity matrix,
-// 'film' = a film-stock look (Portra 400 tone; color stays camera-based).
-export type ProfileKind = 'camera' | 'neutral' | 'film';
+// a FilmStockId = that stock's film-sim look (per-channel H-D tone; color stays
+// camera-based -- the matrix does not change).
+export type ProfileKind = 'camera' | 'neutral' | FilmStockId;
 
 export type Op =
   | { kind: 'profile'; profile: ProfileKind }

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { PORTRA_400, FILM_EXPOSURE_SCALE, filmDensity, filmicNegative, filmRenderLinear, srgbToLinear } from './film';
+import { PORTRA_400, FILM_EXPOSURE_SCALE, FILM_MID_GRAY_TARGET, FILM_STOCKS, filmDensity, filmExposureScale, filmicNegative, filmRenderLinear, isFilmStockId, neutralGain, srgbToLinear } from './film';
 
 // sRGB OETF -- the CPU twin of the blit encode; filmRenderLinear's output
 // unwraps THIS, so screen values below go through it to check the exposure pin.
@@ -114,5 +114,85 @@ describe('srgbToLinear', () => {
     for (const v of [0.0, 0.1, 0.3, 0.468, 0.9, 1.0]) {
       expect(srgbToLinear(srgbEncode(v))).toBeCloseTo(v, 5);
     }
+  });
+});
+
+describe('filmExposureScale (per-stock mid-gray anchor)', () => {
+  it('reproduces Portra 400\'s original FILM_EXPOSURE_SCALE', () => {
+    // The solver must land back on the analytically-fitted Portra anchor
+    // (0.39 mid-gray was fit to 2dp; the binary search converges to ~0.3 of
+    // scale, i.e. mid-gray within 1e-4 -- well inside the output tolerance).
+    expect(Math.abs(filmExposureScale(PORTRA_400) - FILM_EXPOSURE_SCALE)).toBeLessThan(0.5);
+  });
+
+  it('renders the SAME mid-gray (0.39) for every stock -- stock switch is a look, not a re-exposure', () => {
+    // filmr's exposure_offset is not comparable across presets (Portra e0=625,
+    // others 0.03-0.6) and gammas differ (slides ~1.3 vs negatives ~0.6). The
+    // per-stock scale compensates: a Fuji slide or a fast negative must NOT
+    // blow out at the exposure-0 mid-gray the camera look renders.
+    for (const stock of Object.values(FILM_STOCKS)) {
+      const scale = filmExposureScale(stock);
+      const out = filmRenderLinear(0.18, stock.channels[1], scale);
+      expect(out).toBeCloseTo(FILM_MID_GRAY_TARGET, 3);
+      expect(scale).toBeGreaterThan(1e-3);
+      expect(scale).toBeLessThan(1e6);
+    }
+  });
+});
+
+describe('neutralGain (the scanner balance)', () => {
+  it('renders a NEUTRAL mid-gray for every stock', () => {
+    for (const stock of Object.values(FILM_STOCKS)) {
+      const gain = neutralGain(stock);
+      const scale = filmExposureScale(stock);
+      const r = filmRenderLinear(0.18, stock.channels[0], scale) * gain[0];
+      const g = filmRenderLinear(0.18, stock.channels[1], scale) * gain[1];
+      const b = filmRenderLinear(0.18, stock.channels[2], scale) * gain[2];
+      expect(r).toBeCloseTo(g, 6);
+      expect(b).toBeCloseTo(g, 6);
+    }
+  });
+
+  it('gains are positive and sane', () => {
+    for (const stock of Object.values(FILM_STOCKS)) {
+      for (const v of neutralGain(stock)) {
+        expect(v).toBeGreaterThan(0.2);
+        expect(v).toBeLessThan(5);
+      }
+    }
+  });
+});
+
+describe('FILM_STOCKS registry', () => {
+  it('covers every ProfileKind film id and isFilmStockId agrees', () => {
+    const ids = ['portra400', 'portra160', 'portra800', 'gold200', 'ektar100', 'superia400', 'ektachrome100', 'provia100f', 'velvia50', 'cinestill800t'] as const;
+    expect(Object.keys(FILM_STOCKS).sort()).toEqual([...ids].sort());
+    for (const id of ids) {
+      expect(isFilmStockId(id)).toBe(true);
+      expect(FILM_STOCKS[id].id).toBe(id);
+      expect(FILM_STOCKS[id].name.length).toBeGreaterThan(0);
+    }
+    expect(isFilmStockId('camera')).toBe(false);
+    expect(isFilmStockId('neutral')).toBe(false);
+    expect(isFilmStockId('film')).toBe(false); // the old single-film value is gone
+    expect(isFilmStockId(undefined)).toBe(false);
+  });
+
+  it('stocks are visually distinct -- a slide departs from a negative off mid-gray', () => {
+    // Both anchor mid-gray at 0.39 (above), but the punchy slide curve (gamma
+    // ~1.3, dMax 3.5) diverges in the shadows and highlights vs a soft negative.
+    const render = (id: keyof typeof FILM_STOCKS, lin: number, ch: number) => {
+      const stock = FILM_STOCKS[id];
+      const gain = neutralGain(stock);
+      return filmRenderLinear(lin, stock.channels[ch], filmExposureScale(stock)) * gain[ch];
+    };
+    const slideSh = render('ektachrome100', 0.02, 1);
+    const portraSh = render('portra400', 0.02, 1);
+    const slideHi = render('ektachrome100', 0.9, 1);
+    const portraHi = render('portra400', 0.9, 1);
+    expect(slideSh).not.toBeCloseTo(portraSh, 3);
+    expect(slideHi).not.toBeCloseTo(portraHi, 3);
+    // And Cinestill (equal gammas, tungsten neg) differs from Portra too.
+    expect(render('cinestill800t', 0.9, 0)).not.toBeCloseTo(render('portra400', 0.9, 0), 3);
   });
 });
