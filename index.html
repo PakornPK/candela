@@ -176,8 +176,15 @@
         color: #fff;
       }
 
+      /* Library is a flex column so the footer bar sits under the scroll area
+         (Develop/Contact keep the plain block .content -- #canvas relies on it). */
+      #module-library .content {
+        display: flex;
+        flex-direction: column;
+      }
       #library-scroll {
-        height: 100%;
+        flex: 1;
+        min-height: 0;
         overflow-y: auto;
         position: relative;
       }
@@ -241,6 +248,29 @@
         letter-spacing: 1px;
         z-index: 1;
       }
+      .cell-stars {
+        position: absolute;
+        left: 0;
+        right: 0;
+        bottom: 0;
+        display: flex;
+        justify-content: center;
+        gap: 2px;
+        padding: 14px 4px 3px;
+        background: linear-gradient(transparent, rgba(0, 0, 0, 0.6));
+        font-size: 13px;
+        line-height: 1;
+        z-index: 1;
+      }
+      .cell-star {
+        cursor: pointer;
+        color: #555;
+        user-select: none;
+        text-shadow: 0 1px 1px rgba(0, 0, 0, 0.8);
+      }
+      .cell-star.on { color: var(--accent, #fff); }
+      .cell-star:hover { color: var(--accent); }
+      .catalog-cell.selected .cell-star.on { color: var(--accent); }
       .cell-color {
         position: absolute;
         left: 0;
@@ -707,6 +737,56 @@
       #reset-btn:hover {
         border-color: var(--accent);
       }
+      #beforeafter-btn {
+        width: 100%;
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--panel-border);
+        border-radius: 4px;
+        padding: 5px 0;
+        cursor: pointer;
+        font-size: 13px;
+        margin-bottom: 6px;
+      }
+      #beforeafter-btn.active, #beforeafter-btn:hover {
+        border-color: var(--accent);
+      }
+
+      .library-footer {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        padding: 6px 10px;
+        border-top: 1px solid var(--panel-border);
+        background: var(--panel);
+        flex-shrink: 0;
+      }
+      .footer-filters { display: flex; gap: 3px; align-items: center; }
+      .footer-filters button {
+        background: none;
+        border: 1px solid var(--panel-border);
+        color: var(--text-dim);
+        border-radius: 4px;
+        padding: 3px 8px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      .footer-filters button:hover { border-color: var(--accent); }
+      .footer-filters button.active { border-color: var(--accent); color: var(--accent); }
+      .footer-counts { color: var(--text-dim); font-size: 12px; }
+      .footer-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+      .selection-info { color: var(--text-dim); font-size: 12px; }
+      #sync-btn {
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--panel-border);
+        border-radius: 4px;
+        padding: 3px 10px;
+        cursor: pointer;
+        font-size: 12px;
+      }
+      #sync-btn:hover:not(:disabled) { border-color: var(--accent); }
+      #sync-btn:disabled { opacity: 0.4; cursor: default; }
     </style>
   </head>
   <body>
@@ -744,6 +824,22 @@
           <div id="library-scroll">
             <div id="library-grid"></div>
           </div>
+          <div id="library-footer" class="library-footer">
+            <div class="footer-filters" id="footer-filters">
+              <button data-minrating="0" class="active" type="button" title="All photos">All</button>
+              <button data-minrating="1" type="button" title="1★ and up">★</button>
+              <button data-minrating="2" type="button" title="2★ and up">★★</button>
+              <button data-minrating="3" type="button" title="3★ and up">★★★</button>
+              <button data-minrating="4" type="button" title="4★ and up">★★★★</button>
+              <button data-minrating="5" type="button" title="5★">★★★★★</button>
+            </div>
+            <span id="footer-counts" class="footer-counts"></span>
+            <div class="footer-actions">
+              <span id="selection-info" class="selection-info"></span>
+              <button id="sync-btn" type="button" disabled
+                title="Copy the reference photo's edits to every selected photo (Ctrl/Cmd+click to multi-select)">Sync Settings</button>
+            </div>
+          </div>
         </main>
         <aside class="panel right">
           <h2 class="panel-title">Metadata</h2>
@@ -775,6 +871,12 @@
               <!-- Camera + Neutral + every film stock, built from the FILM_STOCKS
                    registry in main.ts (so a new stock auto-appears). -->
             </select>
+            <label class="adjust-label">Treatment
+              <select id="bw-treatment">
+                <option value="color" selected>Color</option>
+                <option value="bw">Black &amp; White</option>
+              </select>
+            </label>
           </details>
           <details class="panel-section" open>
             <summary>White Balance</summary>
@@ -801,14 +903,8 @@
             <label class="slider-label" for="blacks">Blacks <output id="blacks-value" for="blacks">0</output></label>
             <input type="range" id="blacks" min="-100" max="100" step="1" value="0" />
           </details>
-          <details class="panel-section">
+          <details class="panel-section" id="bw-section">
             <summary>Black &amp; White</summary>
-            <label class="adjust-label">Treatment
-              <select id="bw-treatment">
-                <option value="color" selected>Color</option>
-                <option value="bw">Black &amp; White</option>
-              </select>
-            </label>
             <div id="bw-controls" class="bw-controls" hidden>
               <div class="group-label">B&amp;W Mix</div>
               <label class="slider-label" for="bw-red">Reds <output id="bw-red-value" for="bw-red">0</output></label>
@@ -913,6 +1009,7 @@
             </div>
           </details>
           <div class="develop-footer">
+            <button id="beforeafter-btn" type="button" title="Before / After -- hold \ to peek at the original">Before / After</button>
             <button id="reset-btn" type="button" title="Reset this photo to its fresh-import default (undoable)">Reset</button>
           </div>
         </aside>

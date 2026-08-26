@@ -11,7 +11,7 @@ import { importFolder } from './catalog/import';
 import { ensureReadPermission } from './catalog/permissions';
 import { loadEditState, saveEditState } from './catalog/editsStore';
 import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
-import { commitEdit, undo, redo, currentOps } from './catalog/editHistory';
+import { commitEdit, undo, redo, currentOps, createEditState } from './catalog/editHistory';
 import { getOrExtractThumbnail } from './catalog/thumbnails';
 import { isExposureOp, isBwOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type WbGains, type BwMix, type BwToneId } from './catalog/types';
 import { FILM_STOCKS } from './gpu/film';
@@ -19,7 +19,7 @@ import { buildParametricToneLut, buildToneCurveLut, fitRegionParams, isNeutralTo
 import { isNeutralPresence, type PresenceParams } from './gpu/presence';
 import { isNeutralVignette, type VignetteParams } from './gpu/vignette';
 import { BW_FILTERS, BW_TONES, type BwFilterId } from './gpu/bw';
-import { getState, selectFile, subscribe, type ModuleId } from './app/state';
+import { getState, selectFile, setSelection, subscribe, type ModuleId } from './app/state';
 import { registerModule, switchModule } from './app/modules';
 import { createFilmstrip } from './app/filmstrip';
 import { keyToAction } from './app/shortcuts';
@@ -148,8 +148,14 @@ const filterMinRating = document.querySelector<HTMLSelectElement>('#filter-min-r
 const exportButton = document.querySelector<HTMLButtonElement>('#export-btn')!;
 const exportFormat = document.querySelector<HTMLSelectElement>('#export-format')!;
 const resetButton = document.querySelector<HTMLButtonElement>('#reset-btn')!;
+const beforeAfterBtn = document.querySelector<HTMLButtonElement>('#beforeafter-btn')!;
 const presetSaveButton = document.querySelector<HTMLButtonElement>('#preset-save')!;
 const presetListEl = document.querySelector<HTMLDivElement>('#preset-list')!;
+const syncBtn = document.querySelector<HTMLButtonElement>('#sync-btn')!;
+const footerCounts = document.querySelector<HTMLSpanElement>('#footer-counts')!;
+const selectionInfo = document.querySelector<HTMLSpanElement>('#selection-info')!;
+const footerFilterButtons = document.querySelectorAll<HTMLButtonElement>('#footer-filters [data-minrating]');
+const bwSection = document.querySelector<HTMLDetailsElement>('#bw-section')!;
 
 function showError(message: string, detail?: string): void {
   errorMessageEl.textContent = message;
@@ -446,8 +452,11 @@ function isBwEnabled(): boolean {
 
 // Hides/grays the B&W mix + filter + tone controls unless Treatment is B&W.
 function syncBwEnabled(): void {
-  bwControls.hidden = !isBwEnabled();
   const on = isBwEnabled();
+  // The whole B&W section (mix/filter/tone) disappears in Color mode; the
+  // treatment choice itself now lives up in the Profile panel.
+  bwSection.hidden = !on;
+  bwControls.hidden = !on;
   bwFilterSelect.disabled = !on;
   bwToneSelect.disabled = !on;
   for (const k in bwMixSliders) bwMixSliders[k as keyof typeof bwMixSliders].disabled = !on;
@@ -789,6 +798,51 @@ async function init(): Promise<void> {
     virtualizer.setOptions({ ...virtualizer.options, count: gridEntries.length });
     virtualizer.measure();
     renderVisibleRows();
+    updateFooter();
+  }
+
+  // Multi-selection: the anchor for shift+click range selection. Plain clicks
+  // and keyboard navigation (selectFile) collapse selection to one file, so the
+  // anchor is only ever read after a ctrl/cmd or shift click set it.
+  let selectionAnchor: number | null = null;
+
+  // Folder-ordered ids for shift+click range selection (the grid's reading
+  // order; cull filters don't apply -- LrC ranges over the source).
+  function orderedVisibleIds(): number[] {
+    return allFiles.filter((f) => folderFilter === null || f.folderId === folderFilter).map((f) => f.id);
+  }
+
+  // Applies a rating to the whole selection (star-strip click / number key).
+  // Clicking the current rating again clears it. No selection = the clicked
+  // file only.
+  async function rateFile(reference: FileRecord, rating: number): Promise<void> {
+    const { selectedIds } = getState();
+    const targets = selectedIds.length ? selectedIds : [reference.id];
+    try {
+      for (const id of targets) {
+        const record = allFiles.find((f) => f.id === id);
+        if (!record) continue;
+        const patch = record.rating === rating ? { rating: 0 } : { rating };
+        Object.assign(record, await setCull(db, id, patch));
+      }
+      rebuildGrid();
+    } catch (err) {
+      showError("Couldn't save the rating.", errorDetail(err));
+    }
+  }
+
+  // Star-chip tooltips carry the per-rating counts; the footer shows the total
+  // in the current folder. Re-run on folder/filter/cull changes (rebuildGrid).
+  function updateFooter(): void {
+    const scope = allFiles.filter((f) => folderFilter === null || f.folderId === folderFilter);
+    const counts = [0, 0, 0, 0, 0, 0];
+    for (const f of scope) counts[f.rating ?? 0]++;
+    footerFilterButtons.forEach((btn) => {
+      const min = Number(btn.dataset.minrating);
+      const n = min === 0 ? scope.length : counts.slice(min).reduce((a, b) => a + b, 0);
+      btn.title = `${min === 0 ? 'Show all' : `Show ${min}★ and up`} -- ${n} photo${n === 1 ? '' : 's'}`;
+    });
+    footerCounts.textContent = `${scope.length} photo${scope.length === 1 ? '' : 's'}`;
   }
 
   // Caches the in-flight or resolved thumbnail request per file id, so
@@ -848,7 +902,6 @@ async function init(): Promise<void> {
     virtualizer._willUpdate();
     libraryGrid.style.height = `${virtualizer.getTotalSize()}px`;
     libraryGrid.textContent = '';
-    const selectedId = getState().selectedId;
     for (const virtualItem of virtualizer.getVirtualItems()) {
       const entry = gridEntries[virtualItem.index];
       if (!entry) continue;
@@ -867,12 +920,43 @@ async function init(): Promise<void> {
       row.style.top = `${virtualItem.start}px`;
       for (const file of entry.files) {
         const cell = document.createElement('div');
-        cell.className = 'catalog-cell' + (file.id === selectedId ? ' selected' : '');
+        cell.className = 'catalog-cell' + (getState().selectedIds.includes(file.id) ? ' selected' : '');
         cell.dataset.fileId = String(file.id); // lets selection paint in place (see the selection subscribe)
         cell.title = file.path;
-        cell.addEventListener('click', () => openFile(file));
+        // Selection: plain click opens (single-selects), ctrl/cmd+click toggles
+        // into the multi-selection, shift+click ranges from the anchor -- the
+        // LrC grid gestures. The last-clicked cell is the sync reference.
+        cell.addEventListener('click', (e) => {
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            const { selectedIds } = getState();
+            const adding = !selectedIds.includes(file.id);
+            const next = adding ? [...selectedIds, file.id] : selectedIds.filter((id) => id !== file.id);
+            selectionAnchor = file.id;
+            // Reference = the last-clicked cell when it's in the set, otherwise
+            // the last remaining id (deselecting the reference moves sync on).
+            setSelection(next, adding ? file.id : next[next.length - 1] ?? null);
+            return;
+          }
+          if (e.shiftKey) {
+            e.preventDefault();
+            const base = selectionAnchor ?? getState().selectedId ?? file.id;
+            const ids = orderedVisibleIds();
+            const a = ids.indexOf(base);
+            const b = ids.indexOf(file.id);
+            if (a >= 0 && b >= 0) {
+              selectionAnchor = file.id;
+              setSelection(ids.slice(Math.min(a, b), Math.max(a, b) + 1), file.id);
+            }
+            return;
+          }
+          selectionAnchor = file.id;
+          openFile(file);
+        });
         cell.addEventListener('dblclick', () => switchModule('develop'));
-        // Cull badges: reject/pick in the corner, rating stars at the foot,
+        // Cull badges: reject/pick in the corner, clickable rating stars at the
+        // foot (star N sets the rating, clicking the current rating clears it;
+        // with a multi-selection the rating applies to every selected photo),
         // color as a left edge bar.
         if (file.flag === false) {
           const b = document.createElement('span');
@@ -885,12 +969,20 @@ async function init(): Promise<void> {
           b.textContent = '✓';
           cell.appendChild(b);
         }
-        if (file.rating && file.rating > 0) {
-          const r = document.createElement('span');
-          r.className = 'cell-rating';
-          r.textContent = '★'.repeat(file.rating);
-          cell.appendChild(r);
+        const stars = document.createElement('div');
+        stars.className = 'cell-stars';
+        for (let n = 1; n <= 5; n++) {
+          const s = document.createElement('span');
+          s.className = 'cell-star' + (n <= (file.rating ?? 0) ? ' on' : '');
+          s.textContent = '★';
+          s.title = `${n}★ (applies to the whole selection)`;
+          s.addEventListener('click', (e) => {
+            e.stopPropagation(); // rating a photo is not opening it
+            void rateFile(file, n);
+          });
+          stars.appendChild(s);
         }
+        cell.appendChild(stars);
         if (file.color) {
           const c = document.createElement('span');
           c.className = `cell-color cell-color-${file.color}`;
@@ -1495,6 +1587,35 @@ async function init(): Promise<void> {
     }
   });
 
+  // ---- before / after (Develop) ----
+  // LrC's \ key holds the original as-imported look; the footer button makes it
+  // sticky. "Before" = empty ops (the same fresh-import render Reset shows).
+  // ponytail: dragging a slider mid-before falls back to After (live edit wins)
+  // but leaves the button lit until clicked again -- acceptable, the momentary
+  // \ is the primary gesture.
+  let beforeAfter = false;
+  let beforeAfterSticky = false;
+  function setBeforeAfter(v: boolean, sticky: boolean): void {
+    if (beforeAfter === v && beforeAfterSticky === sticky) return;
+    beforeAfter = v;
+    beforeAfterSticky = sticky;
+    beforeAfterBtn.classList.toggle('active', v);
+    renderOps(v ? [] : currentOps(currentEditState ?? createEditState()));
+  }
+  beforeAfterBtn.addEventListener('click', () => setBeforeAfter(!beforeAfter, true));
+  window.addEventListener('keydown', (e) => {
+    if (e.key === '\\' && !e.repeat && getState().module === 'develop') {
+      e.preventDefault();
+      setBeforeAfter(true, false);
+    }
+  });
+  window.addEventListener('keyup', (e) => {
+    if (e.key === '\\' && beforeAfter && !beforeAfterSticky) setBeforeAfter(false, false);
+  });
+  window.addEventListener('blur', () => {
+    if (beforeAfter && !beforeAfterSticky) setBeforeAfter(false, false);
+  });
+
   // ---- presets ----
   let presets: PresetRow[] = [];
 
@@ -1721,11 +1842,19 @@ async function init(): Promise<void> {
   // Paints the grid selection outline in place on every selection change --
   // renderVisibleRows() only rebuilds on scroll/import, so without this the
   // outline would lag one click behind (a sibling of the filmstrip jank fix).
+  // Multi-selection: every id in selectedIds is outlined. The footer's sync
+  // button + selection readout are driven here too (the single place every
+  // selection mutation -- grid, filmstrip, arrow keys -- funnels through).
   subscribe(() => {
-    const selectedId = getState().selectedId;
+    const { selectedId, selectedIds } = getState();
+    const selected = new Set(selectedIds);
     for (const cell of libraryGrid.querySelectorAll<HTMLElement>('.catalog-cell')) {
-      cell.classList.toggle('selected', cell.dataset.fileId === String(selectedId));
+      cell.classList.toggle('selected', selected.has(Number(cell.dataset.fileId)));
     }
+    selectionInfo.textContent =
+      selectedIds.length > 1 ? `${selectedIds.length} selected · sync from the last clicked` :
+      selectedIds.length === 1 ? '1 selected' : '';
+    syncBtn.disabled = !(selectedId !== null && selectedIds.length >= 2);
   });
 
   // ---- shortcuts ----
@@ -1746,15 +1875,18 @@ async function init(): Promise<void> {
       return;
     }
 
-    // Culling marks on the selected file, applied to the in-memory record so
-    // the grid repaints instantly (no DB re-query).
+    // Culling marks on the selected file(s), applied to the in-memory records
+    // so the grid repaints instantly (no DB re-query). Like LrC, the mark hits
+    // every photo in the multi-selection; with no multi-selection it hits just
+    // the selected file.
     if (
       action.type === 'pick' || action.type === 'reject' || action.type === 'clearCull' ||
       action.type === 'rate' || action.type === 'color'
     ) {
       e.preventDefault();
-      const record = allFiles.find((f) => f.id === getState().selectedId);
-      if (!record) return;
+      const { selectedIds } = getState();
+      const ids = selectedIds.length ? selectedIds : [getState().selectedId].filter((x) => x !== null);
+      if (!ids.length) return;
       const patch =
         action.type === 'pick' ? { flag: true } :
         action.type === 'reject' ? { flag: false } :
@@ -1762,7 +1894,11 @@ async function init(): Promise<void> {
         action.type === 'rate' ? { rating: action.rating } :
         { color: action.color };
       try {
-        Object.assign(record, await setCull(db, record.id, patch));
+        for (const id of ids) {
+          const record = allFiles.find((f) => f.id === id);
+          if (!record) continue;
+          Object.assign(record, await setCull(db, id, patch));
+        }
         rebuildGrid();
       } catch (err) {
         showError("Couldn't save the cull mark.", errorDetail(err));
@@ -1786,11 +1922,41 @@ async function init(): Promise<void> {
       pickedOnly: filterPicked.checked,
       minRating: Number(filterMinRating.value),
     };
+    // The footer star chips mirror the left panel's Min rating select.
+    footerFilterButtons.forEach((btn) => {
+      btn.classList.toggle('active', Number(btn.dataset.minrating) === cullFilter.minRating);
+    });
     rebuildGrid();
   }
   filterHideRejected.addEventListener('change', applyCullFilterControls);
   filterPicked.addEventListener('change', applyCullFilterControls);
   filterMinRating.addEventListener('change', applyCullFilterControls);
+  footerFilterButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      filterMinRating.value = String(btn.dataset.minrating);
+      applyCullFilterControls();
+    });
+  });
+
+  // ---- sync settings (Library footer) ----
+  // Copies the reference photo's current ops (last clicked) as a NEW snapshot
+  // in every other selected photo's edit history -- non-destructive, so each
+  // target can undo the sync individually, exactly like LrC's Sync.
+  syncBtn.addEventListener('click', async () => {
+    const { selectedId, selectedIds } = getState();
+    if (selectedId === null || selectedIds.length < 2) return;
+    const targets = selectedIds.filter((id) => id !== selectedId);
+    try {
+      const refOps = currentOps(await loadEditState(db, selectedId));
+      for (const id of targets) {
+        const state = await loadEditState(db, id);
+        await saveEditState(db, id, commitEdit(state, refOps));
+      }
+      selectionInfo.textContent = `✓ synced to ${targets.length} photo${targets.length > 1 ? 's' : ''}`;
+    } catch (err) {
+      showError("Couldn't sync settings.", errorDetail(err));
+    }
+  });
 
   // ---- filmstrip ----
   const filmstrip = createFilmstrip({
