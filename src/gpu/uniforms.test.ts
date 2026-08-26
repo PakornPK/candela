@@ -1,5 +1,19 @@
 import { describe, it, expect } from 'vitest';
-import { evToGain, wbShiftToGains, packCfa6, packColorMatrix, kelvinToShift, shiftToKelvin, gainsToKelvin, gainsToTint, WB_NEUTRAL_KELVIN } from './uniforms';
+import { evToGain, wbShiftToGains, packCfa6, shiftCfa6, packColorMatrix, kelvinToShift, shiftToKelvin, gainsToKelvin, gainsToTint, xyToCctAndTint, WB_NEUTRAL_KELVIN } from './uniforms';
+
+// LibRaw's cam_xyz (XYZ->camera) for the Fuji X100V, as decoded from the
+// fixture -- the exact matrix the LrC-model readout decomposes As-Shot gains
+// through. Pinned in decode.test.ts against the real file; this is its
+// Float32Array copy.
+const FUJI_CAM_XYZ = new Float32Array([
+  1.3425999879837036, -0.633400022983551, -0.1177000030875206,
+  -0.4244000017642975, 1.2136000394821167, 0.2371000051498413,
+  0.057999998331069946, 0.13030000030994415, 0.5979999899864197,
+]);
+const FUJI_GAINS = { r: 567 / 302, g: 1, b: 560 / 302 };
+// The real compared file (DSCF8946.RAF, same X100V cam_xyz) -- the user's
+// current LrC measurement (5350 K / +35). Decoded via the probe, 2026-08-26.
+const REAL_GAINS = { r: 1.8344370860927153, g: 1, b: 1.8211920529801324 };
 
 describe('evToGain', () => {
   it('returns 1 at EV 0', () => {
@@ -57,6 +71,26 @@ describe('packCfa6', () => {
   });
 });
 
+describe('shiftCfa6 (effective-area crop re-indexes the CFA pattern)', () => {
+  const ramp = new Uint8Array(36); // position i -> i%3, so row r col c -> (r+ c)%3
+  for (let i = 0; i < 36; i++) ramp[i] = i % 3;
+
+  it('is a no-op for crop offsets that are whole pattern periods (X-Trans top=6)', () => {
+    expect(Array.from(shiftCfa6(ramp, 0, 6))).toEqual(Array.from(ramp));
+  });
+
+  it('re-indexes so texture pixel (x,y) reads the source pattern at (x+left, y+top)', () => {
+    const shifted = shiftCfa6(ramp, 1, 2);
+    // Texture pixel (3,4) = source (3+1, 4+2) -> pattern[(6%6)*6 + (4%6)] = pattern[4].
+    expect(shifted[4 * 6 + 3]).toBe(ramp[(6 % 6) * 6 + (4 % 6)]);
+    expect(shifted[0]).toBe(ramp[(2 % 6) * 6 + (1 % 6)]); // (0,0) -> source (1,2)
+  });
+
+  it('is length-preserving (36)', () => {
+    expect(shiftCfa6(ramp, 3, 5).length).toBe(36);
+  });
+});
+
 describe('kelvinToShift', () => {
   it('returns 0 at the neutral point', () => {
     expect(kelvinToShift(WB_NEUTRAL_KELVIN)).toBe(0);
@@ -98,6 +132,42 @@ describe('gainsToKelvin / gainsToTint (As-Shot WB readout)', () => {
     const cool = { r: 0.7, g: 1, b: 0.9 };
     expect(gainsToKelvin(cool)).toBeLessThan(WB_NEUTRAL_KELVIN);
     expect(gainsToTint(cool)).toBeLessThan(0);
+  });
+
+  it('pins the real compared file through the LrC model -- the "WB readout ≠ LrC" fix (5350K / +35)', () => {
+    // The exact As-Shot gains the app opens DSCF8946.RAF at (probe-decoded
+    // 2026-08-26), decomposed through the X100V's cam_xyz + the re-fit offsets
+    // to land on the user's LrC measurement, 5350K / +35 -- the repro for
+    // "temp 5408 vs 5350, tint +29 vs +35" is closed. The render keeps the
+    // exact gains regardless; only the readout is calibrated here.
+    expect(gainsToKelvin(REAL_GAINS, FUJI_CAM_XYZ)).toBeCloseTo(5350, 1);
+    expect(gainsToTint(REAL_GAINS, FUJI_CAM_XYZ)).toBeCloseTo(35, 1);
+  });
+
+  it('falls back to the legacy R/B-ratio axes when no camera matrix is available', () => {
+    // Same gains, no cam_xyz: the pre-calibration decomposition (5544K /
+    // +67.5). Kept as the fallback pin -- a camera with no usable matrix
+    // (hasColorMatrix false) still gets a sane readout.
+    expect(gainsToKelvin(FUJI_GAINS)).toBeCloseTo(5544.2, 1);
+    expect(gainsToTint(FUJI_GAINS)).toBeCloseTo(67.5, 1);
+  });
+});
+
+describe('xyToCctAndTint (Robertson 1968)', () => {
+  it('reads the canonical D65 white point as ~6504K with a small magenta tint', () => {
+    const { kelvin, tint } = xyToCctAndTint(0.3127, 0.329);
+    expect(kelvin).toBeCloseTo(6503.7, 0);
+    expect(tint).toBeCloseTo(9.8, 0);
+  });
+
+  it('reads the canonical Illuminant A white point as ~2855K, neutral tint', () => {
+    const { kelvin, tint } = xyToCctAndTint(0.4476, 0.4074);
+    expect(kelvin).toBeCloseTo(2854.9, 0);
+    expect(tint).toBeCloseTo(-0.1, 0);
+  });
+
+  it('returns the neutral readout for non-finite input (safety)', () => {
+    expect(xyToCctAndTint(NaN, NaN)).toEqual({ kelvin: WB_NEUTRAL_KELVIN, tint: 0 });
   });
 });
 

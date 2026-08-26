@@ -12,22 +12,25 @@
 //                 restores the structure the haze washed out -- plus a
 //                 saturation lift. (The old global-contrast-only version read
 //                 as plain contrast, not dehaze.)
-//   2. texture/clarity -> local-contrast unsharp on log luma; clarity is
-//                 ANTI-HALO clamped (boost may overshoot the neighborhood's
-//                 [min,max] range by at most HALO of its width) so edges gain
-//                 detail without the bright overshoot that reads as "glowing
-//                 edges". Texture (radius 1) halos are 1px and negligible.
+//   2. texture/clarity -> local-contrast unsharp on log luma; clarity is gated
+//                 to the MIDTONES (a bell on log luma, ~1 at mid-gray, ~0 at
+//                 black/white) -- LrC's halo management. The old ANTI-HALO hard
+//                 clamp capped the whole response at a few percent (repro:
+//                 "clarity does nothing"); halos in the midtones are a feature
+//                 (LrC +100 shows them wide and soft), only the extremes must
+//                 not bloom. Texture (radius 1) halos are 1px and negligible.
 //   3. vibrance/saturation -> luma-preserving chroma scale, boost stronger for
 //                 low-saturation pixels (vibrance) so skin tones don't blow out
 //
 // Hue is preserved by scaling RGB with the luma ratio after the luma edits,
 // the same trick tone.wgsl uses.
 //
-// ponytail: clarity/dehaze are fixed-radius boxes (3 / 5) -- a real LrC look
-// needs multi-scale detail processing (and a sampler the op bind-group shape
-// doesn't carry). Strengths are rough calibrations; the anti-halo clamp is the
-// cheap version of LrC's halo management. Upgrade path: bilinear sampler at
-// several scales.
+// ponytail: clarity/dehaze are fixed-radius boxes (8 / 5) -- a real LrC look
+// needs multi-scale detail processing (fine texture + wide halos, and a sampler
+// the op bind-group shape doesn't carry). Dehaze keeps the old HALO clamp on
+// its local-detail sub-term (its main veil term is unclamped, so it still
+// responds -- recalibrate only if the user flags dehaze). Upgrade path:
+// bilinear sampler at several scales.
 struct Presence {
   texture: f32,
   clarity: f32,
@@ -41,14 +44,23 @@ struct Presence {
 
 const LUMA: vec3<f32> = vec3<f32>(0.2126729, 0.7151522, 0.0721750);
 const TEXTURE_RADIUS: i32 = 1;
-const CLARITY_RADIUS: i32 = 3;
+// Clarity radius 8 (a 17px-wide halo) -- up from 3. LrC clarity is a
+// mid-frequency band boost; its halos are wide and soft. Radius 3 read almost
+// like texture. ponytail: fixed radius, full-res box (289 loads/px) -- a
+// scale-relative radius (~1-3% of the short dim) and multi-scale clarity are
+// the upgrade path if the 50ms budget or the LrC halo width demands them.
+const CLARITY_RADIUS: i32 = 8;
 const DEHAZE_RADIUS: i32 = 5;
-// Anti-halo: a local-contrast boost may overshoot the neighborhood's log-luma
-// range by this fraction of its width. 0 = hard clamp (no halo, but caps
-// specular highlights); 0.06 = a thin rim only -- a wider radius and larger
-// budget read as the "glowing edges" the user flagged. Radius 3 keeps the
-// halo NARROW too (a radius-5 box smears the rim ~5px, which reads as a
-// bloom), and both radii stay small for the 50 ms slider budget.
+// Midtone gate for clarity. log2(0.18) = mid-gray -- MUST match CLARITY_MID_LOG
+// in presence.ts. Replaces the old HALO hard clamp (which capped +100 at ~6%
+// brightness): LrC clarity is gated to the midtones, full at mid-gray, rolling
+// to ~0 toward black/white. The smooth rolloff is the "soft edge-aware" half of
+// halo management -- midtone halos show (a feature), extremes don't bloom.
+const CLARITY_MID: f32 = -2.473931188;
+const CLARITY_GATE_WIDTH: f32 = 3.5;
+// Anti-halo for DEHAZE's local-detail sub-term only (its main veil term is
+// unclamped): a detail boost may overshoot the neighborhood's log-luma range
+// by this fraction of its width before it would crush details into black.
 const HALO: f32 = 0.06;
 
 @group(0) @binding(0) var inTex: texture_2d<f32>;
@@ -123,9 +135,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     outL = l + 0.7 * dehaze * (mid - d.x) + 0.6 * dehaze * detail;
   }
 
-  // 2. Texture + clarity: local-contrast unsharp on log luma. Clarity is
-  // anti-halo clamped -- without it, a strong clarity overshoots at edges and
-  // the bright side glows ("weuang saeng").
+  // 2. Texture + clarity: local-contrast unsharp on log luma. Clarity is gated
+  // to the midtones (the gate replaces the old anti-halo clamp -- the repro'ed
+  // cap that made +100 do ~nothing). At mid-gray a +100 edge boost runs at full
+  // 1.5x strength (halos there are LrC's "pop"); near black/white the gate
+  // rolls it off so nothing blooms in the extremes.
   if (texAmt != 0.0 || claAmt != 0.0) {
     if (texAmt != 0.0) {
       let t = boxStatsLogLuma(center, dims, TEXTURE_RADIUS);
@@ -133,8 +147,9 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     if (claAmt != 0.0) {
       let cc = boxStatsLogLuma(center, dims, CLARITY_RADIUS);
-      let range = max(cc.z - cc.y, 1e-3);
-      outL = clamp(outL + 1.5 * claAmt * (outL - cc.x), cc.y - HALO * range, cc.z + HALO * range);
+      let dev = outL - cc.x;
+      let gate = exp(-3.0 * pow((outL - CLARITY_MID) / CLARITY_GATE_WIDTH, 2.0));
+      outL = outL + 1.5 * claAmt * dev * gate;
     }
   }
 

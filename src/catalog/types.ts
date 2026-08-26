@@ -40,8 +40,13 @@ export interface WbGains {
   b: number;
 }
 
+// The color-profile picker's options. 'camera' = the loaded raw's embedded
+// camera profile (LibRaw rgb_cam -- the default), 'neutral' = identity matrix,
+// 'film' = a film-stock look (Portra 400 tone; color stays camera-based).
+export type ProfileKind = 'camera' | 'neutral' | 'film';
+
 export type Op =
-  | { kind: 'profile'; profile: 'camera' | 'neutral' }
+  | { kind: 'profile'; profile: ProfileKind }
   | { kind: 'exposure'; ev: number }
   | { kind: 'whiteBalance'; kelvin: number; tint: number; gains?: WbGains }
   | { kind: 'tone'; contrast: number; highlights: number; shadows: number; whites: number; blacks: number }
@@ -49,7 +54,7 @@ export type Op =
   | { kind: 'presence'; texture: number; clarity: number; dehaze: number; vibrance: number; saturation: number };
   // future op kinds (crop, ...) extend this union.
 
-export function isProfileOp(op: Op): op is { kind: 'profile'; profile: 'camera' | 'neutral' } {
+export function isProfileOp(op: Op): op is { kind: 'profile'; profile: ProfileKind } {
   return op.kind === 'profile';
 }
 

@@ -1,8 +1,8 @@
 import unpackShader from '../shaders/unpack.wgsl?raw';
 import demosaicShader from '../shaders/demosaic.wgsl?raw';
 import blitShader from '../shaders/blit.wgsl?raw';
-import { packCfa6 } from './uniforms';
-import { OP_RENDERERS, presentOpIndices, setAsShotGains, setCameraColorMatrix } from './ops';
+import { packCfa6, shiftCfa6 } from './uniforms';
+import { OP_RENDERERS, presentOpIndices, setAsShotGains, setCameraColorMatrix, setCameraXyz } from './ops';
 import type { Op } from '../catalog/types';
 import type { DecodedRaw } from '../raw/decode';
 
@@ -155,18 +155,32 @@ export class Pipeline {
     this.opB?.destroy();
     this.displayTexture = null;
 
-    const size = [raw.width, raw.height];
+    // Crop the raw buffer to the effective (sensor-cropped) image area. LibRaw's
+    // raw_width/raw_height include sensor margins (Fuji X100V: 6384x4182 buffer,
+    // 6240x4160 real); rendering the full buffer shows the unused margin as a
+    // dark column -- the tone's black-floor lift turns the zeros into a visible
+    // near-black bar down the right edge. The crop happens at the bayer upload:
+    // the texture IS the effective area, so every downstream pass, the histogram
+    // and the canvas blit are auto-cropped. No shader changes.
+    const effW = raw.effectiveWidth ?? raw.width;
+    const effH = raw.effectiveHeight ?? raw.height;
+    const cropLeft = raw.leftMargin ?? 0;
+    const cropTop = raw.topMargin ?? 0;
+    const size = [effW, effH];
 
     this.bayerTexture = this.device.createTexture({
       size,
       format: 'r16uint',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
+    // Sub-rect copy: the row stride is the FULL raw row width and the data
+    // starts at the crop origin, so only the effective area lands in the
+    // texture (writeTexture reads rows bytesPerRow apart from byte 0 of data).
     this.device.queue.writeTexture(
       { texture: this.bayerTexture },
-      raw.bayerData,
+      raw.bayerData.subarray(cropTop * raw.width + cropLeft),
       { bytesPerRow: raw.width * 2 },
-      { width: raw.width, height: raw.height },
+      { width: effW, height: effH },
     );
 
     this.normalizedTexture = this.device.createTexture({
@@ -188,17 +202,21 @@ export class Pipeline {
     this.opB = this.device.createTexture({ size, format: 'rgba16float', usage: workUsage });
 
     this.device.queue.writeBuffer(this.levelsBuffer, 0, new Float32Array([raw.blackLevel, raw.whiteLevel, 0, 0]));
-    this.device.queue.writeBuffer(this.cfaBuffer, 0, packCfa6(raw.cfa6));
+    this.device.queue.writeBuffer(this.cfaBuffer, 0, packCfa6(shiftCfa6(raw.cfa6, cropLeft, cropTop)));
     // Always a valid 3x3 (decode.ts fills identity when the camera has no
     // matrix). The profile op's packParams reads this via setCameraColorMatrix.
     setCameraColorMatrix(raw.colorMatrix);
+    // cam_xyz (XYZ->camera) for the WB temp/tint readout; undefined when the
+    // camera has no usable matrix (the readout then falls back to the legacy
+    // axes).
+    setCameraXyz(raw.camXyz);
     // As-Shot WB default (identity when the camera reports no cam_mul). The
     // whiteBalance op's packParams reads this when no WB op is present.
     setAsShotGains(raw.asShotGains ?? { r: 1, g: 1, b: 1 });
 
     const encoder = this.device.createCommandEncoder();
-    this.dispatchUnpack(encoder, raw.width, raw.height);
-    this.dispatchDemosaic(encoder, raw.width, raw.height);
+    this.dispatchUnpack(encoder, effW, effH);
+    this.dispatchDemosaic(encoder, effW, effH);
     this.device.queue.submit([encoder.finish()]);
 
     // Before the first render() the blit source is the raw demosaiced data

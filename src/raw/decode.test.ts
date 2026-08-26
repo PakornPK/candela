@@ -32,6 +32,16 @@ describe('decode', () => {
     }
     expect([...result.colorMatrix]).not.toEqual([1, 0, 0, 0, 1, 0, 0, 0, 1]);
 
+    // cam_xyz (XYZ->camera) rides alongside -- the WB temp/tint readout
+    // decomposes As-Shot gains through it (the LrC/DNG model), and the
+    // uniform.test.ts pins calibrate against this exact matrix. Pinned to the
+    // X100V's table entry in the vendored LibRaw (colordata.cpp:
+    // { 13426,-6334,-1177,-4244,12136,2371,580,1303,5980 }).
+    expect(result.camXyz).toBeDefined();
+    expect([...result.camXyz!]).toEqual(
+      [1.3426, -0.6334, -0.1177, -0.4244, 1.2136, 0.2371, 0.058, 0.1303, 0.598].map((v) => expect.closeTo(v, 1e-4)),
+    );
+
     // Shooting metadata: the fixture is a real X100V exposure, so EXIF fills
     // all four. A value of 0 means "not reported" (the wrapper's sentinel),
     // so a photo that lacks one field stays valid -- but a real shot must

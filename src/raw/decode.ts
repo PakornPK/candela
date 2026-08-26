@@ -37,6 +37,16 @@ export interface CameraMeta {
 export interface DecodedRaw {
   width: number;
   height: number;
+  // Effective (cropped) image area inside the raw buffer. raw_width/raw_height
+  // include sensor margins (Fuji X100V RAF reports 6384x4182 vs 6240x4160
+  // real); LrC and the camera JPEG both render the effective area, so the
+  // GPU texture / render must crop to it or dark margin pixels drag exposure
+  // down. leftMargin/topMargin are the pixel offsets of the effective area
+  // within the raw buffer (0 when raw == effective).
+  effectiveWidth: number;
+  effectiveHeight: number;
+  leftMargin: number;
+  topMargin: number;
   blackLevel: number;
   whiteLevel: number;
   cfaPattern: string;
@@ -50,6 +60,12 @@ export interface DecodedRaw {
   // camera has no usable one (hasColorMatrix false).
   colorMatrix: Float32Array;
   hasColorMatrix: boolean;
+  // The camera's XYZ->camera 3x3 (LibRaw cam_xyz), row-major -- the
+  // colorimetric matrix the LrC temp/tint readout decomposes As-Shot gains
+  // through (rgb_cam is row-normalized and destroys chromaticity, so it
+  // cannot serve). Undefined when the camera has no usable matrix
+  // (hasColorMatrix false) -- the readout then falls back to the legacy axes.
+  camXyz?: Float32Array;
   // As-shot white balance, normalized by green (g=1) from LibRaw's cam_mul
   // [R, G1, B, G2]. Absent when the camera reports no usable values. The app
   // opens files at this WB ("As Shot", like LrC) and preserves the exact
@@ -92,6 +108,10 @@ export async function decode(fileBytes: ArrayBuffer): Promise<DecodedRaw> {
 
   const width = module.ccall('decode_result_width', 'number', ['number'], [resultPtr]);
   const height = module.ccall('decode_result_height', 'number', ['number'], [resultPtr]);
+  const effectiveWidth = module.ccall('decode_result_effective_width', 'number', ['number'], [resultPtr]);
+  const effectiveHeight = module.ccall('decode_result_effective_height', 'number', ['number'], [resultPtr]);
+  const leftMargin = module.ccall('decode_result_left_margin', 'number', ['number'], [resultPtr]);
+  const topMargin = module.ccall('decode_result_top_margin', 'number', ['number'], [resultPtr]);
   const blackLevel = module.ccall('decode_result_black_level', 'number', ['number'], [resultPtr]);
   const whiteLevel = module.ccall('decode_result_white_level', 'number', ['number'], [resultPtr]);
   const cfaPacked = module.ccall('decode_result_cfa_pattern', 'number', ['number'], [resultPtr]);
@@ -115,6 +135,18 @@ export async function decode(fileBytes: ArrayBuffer): Promise<DecodedRaw> {
   // Identity fallback when the camera has no usable matrix -- downstream
   // (cameraColor pass) applies colorMatrix unconditionally.
   const colorMatrix = hasColorMatrix ? matrix : new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]);
+
+  // cam_xyz (XYZ->camera) -- same DataView read as the matrix above. Present
+  // only when the camera has a usable matrix (hasColorMatrix true); the
+  // readout falls back to the legacy axes when it's undefined.
+  let camXyz: Float32Array | undefined;
+  if (hasColorMatrix) {
+    const camXyzPtr = module.ccall('decode_result_cam_xyz', 'number', ['number'], [resultPtr]);
+    const camXyzView = new DataView(module.HEAPU8.buffer, camXyzPtr, 36);
+    const xyz = new Float32Array(9);
+    for (let i = 0; i < 9; i++) xyz[i] = camXyzView.getFloat32(i * 4, true);
+    camXyz = xyz;
+  }
 
   // Shooting metadata: 4 consecutive floats [iso, shutter, aperture, focal]
   // -- same DataView trick as color_matrix (no HEAPF32 view in the glue).
@@ -160,6 +192,10 @@ export async function decode(fileBytes: ArrayBuffer): Promise<DecodedRaw> {
   return {
     width,
     height,
+    effectiveWidth,
+    effectiveHeight,
+    leftMargin,
+    topMargin,
     blackLevel,
     whiteLevel,
     cfaPattern: unpackCfaPattern(cfaPacked),
@@ -167,6 +203,7 @@ export async function decode(fileBytes: ArrayBuffer): Promise<DecodedRaw> {
     bayerData,
     colorMatrix,
     hasColorMatrix,
+    camXyz,
     asShotGains,
     cameraMeta,
   };

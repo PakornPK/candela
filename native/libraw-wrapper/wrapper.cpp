@@ -40,6 +40,16 @@ extern "C" {
 struct DecodeResult {
     uint32_t width = 0;
     uint32_t height = 0;
+    // Effective (cropped) image area inside the raw buffer. raw_width/raw_height
+    // include sensor margins (the Fuji X100V RAF reports 6384x4182 while the
+    // real image is 6240x4160); LrC and the camera JPEG both crop to the
+    // effective area, so the renderer must too or dark margin pixels drag the
+    // exposure down. These come from imgdata.sizes.width/height and the
+    // left/top_margin offsets (0 when raw == effective, e.g. the D800 NEFs).
+    uint32_t effective_width = 0;
+    uint32_t effective_height = 0;
+    uint32_t left_margin = 0;
+    uint32_t top_margin = 0;
     uint32_t black_level = 0;
     uint32_t white_level = 0;
     // CFA pattern packed into 4 bytes of one uint32_t, most-significant byte
@@ -91,6 +101,15 @@ struct DecodeResult {
     // camera reports no usable values (all-zero cam_mul -- rare).
     float cam_mul[4] = {};
     int has_cam_mul = 0;
+    // Camera's XYZ->camera 3x3 (imgdata.color.cam_xyz), row-major: rows = X,Y,Z,
+    // cols = R,G1,B. THIS is the colorimetric matrix the LrC temp/tint readout
+    // needs -- NOT color_matrix above. rgb_cam (color_matrix) is row-normalized
+    // so a neutral input maps to white, which DESTROYS the chromaticity
+    // information the readout needs to recover the scene white point;
+    // cam_xyz keeps absolute colorimetric calibration, so inverting it on the
+    // As-Shot gains recovers the white point. All zeros when the camera has no
+    // usable matrix (see has_color_matrix -- the same cam_xyz test).
+    float cam_xyz[9] = {};
     // 0 = success, LibRaw error codes otherwise (all LibRaw codes are <= 0),
     // -1000 = implausible dimensions or missing raw_image (wrapper-detected,
     // not from LibRaw -- kept clear of LibRaw's own range, which includes
@@ -146,6 +165,14 @@ DecodeResult* decode(const uint8_t* file_bytes, uint32_t length) {
         result->data_error = static_cast<uint32_t>(processor.error_count());
         result->width = width; // set even on the garbage path so diagnostics carry dims
         result->height = height;
+        // Effective area + margins (imgdata.sizes). Guarded against zero
+        // (LibRaw may not fill them for every format) so JS can always read
+        // them, falling back to the full raw buffer when unused.
+        const auto& sz = processor.imgdata.sizes;
+        result->effective_width = sz.width > 0 ? sz.width : width;
+        result->effective_height = sz.height > 0 ? sz.height : height;
+        result->left_margin = sz.left_margin > 0 ? sz.left_margin : 0;
+        result->top_margin = sz.top_margin > 0 ? sz.top_margin : 0;
         size_t pixel_count = static_cast<size_t>(width) * height;
         if (result->data_error > pixel_count / 100) {
             result->error_code = -1004;
@@ -253,6 +280,18 @@ DecodeResult* decode(const uint8_t* file_bytes, uint32_t length) {
             result->has_color_matrix = processor.imgdata.color.cam_xyz[0][0] >= 0.01f ? 1 : 0;
         }
 
+        // Raw cam_xyz (XYZ->camera 3x3) for the LrC temp/tint readout -- the
+        // colorimetric matrix, NOT the row-normalized rgb_cam above (see the
+        // struct field comment). Read by JS via decode_result_cam_xyz() and
+        // decomposed against the As-Shot gains to recover the scene white
+        // point, exactly the LrC/DNG model.
+        {
+            const float* cam_xyz = &processor.imgdata.color.cam_xyz[0][0]; // [3][3], row-major
+            for (int i = 0; i < 9; ++i) {
+                result->cam_xyz[i] = cam_xyz[i];
+            }
+        }
+
         // As-shot white balance. Exposed so the app can open files at the
         // camera's own WB (Lightroom's "As Shot") instead of a matrix-neutral
         // daylight white point; the whiteBalance op consumes these as raw
@@ -306,6 +345,18 @@ EMSCRIPTEN_KEEPALIVE
 uint32_t decode_result_height(DecodeResult* r) { return r->height; }
 
 EMSCRIPTEN_KEEPALIVE
+uint32_t decode_result_effective_width(DecodeResult* r) { return r->effective_width; }
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t decode_result_effective_height(DecodeResult* r) { return r->effective_height; }
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t decode_result_left_margin(DecodeResult* r) { return r->left_margin; }
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t decode_result_top_margin(DecodeResult* r) { return r->top_margin; }
+
+EMSCRIPTEN_KEEPALIVE
 uint32_t decode_result_black_level(DecodeResult* r) { return r->black_level; }
 
 EMSCRIPTEN_KEEPALIVE
@@ -337,6 +388,9 @@ float* decode_result_cam_mul(DecodeResult* r) { return r->cam_mul; }
 
 EMSCRIPTEN_KEEPALIVE
 int decode_result_has_cam_mul(DecodeResult* r) { return r->has_cam_mul; }
+
+EMSCRIPTEN_KEEPALIVE
+float* decode_result_cam_xyz(DecodeResult* r) { return r->cam_xyz; }
 
 EMSCRIPTEN_KEEPALIVE
 void free_decoded(DecodeResult* r) {

@@ -6,22 +6,24 @@ import type { Op } from '../catalog/types';
 
 const NEUTRAL_TONE = { kind: 'tone', contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0 } as const;
 // Registry order: [whiteBalance, profile, exposure, tone, toneCurve, presence].
-// The first two (whiteBalance + profile) are mandatory -- they always run even
-// with no ops (fresh open), see presentOpIndices.
+// Three passes are mandatory -- they always run even with no ops (fresh open):
+// whiteBalance (As-Shot fallback), profile (camera matrix), and tone (neutral
+// tone now renders the ACR baseline curve -- the LrC import look, see tone.ts).
 const CAMERA = { kind: 'profile', profile: 'camera' } as const;
 
 describe('presentOpIndices', () => {
-  it('always includes the mandatory whiteBalance + profile passes', () => {
-    // A no-ops fresh open still applies As-Shot WB + the camera color matrix.
-    expect(presentOpIndices([])).toEqual([0, 1]);
-    expect(presentOpIndices([CAMERA])).toEqual([0, 1]);
+  it('always includes the mandatory whiteBalance + profile + tone passes', () => {
+    // A no-ops fresh open still applies As-Shot WB + the camera color matrix +
+    // the ACR baseline tone curve.
+    expect(presentOpIndices([])).toEqual([0, 1, 3]);
+    expect(presentOpIndices([CAMERA])).toEqual([0, 1, 3]);
   });
 
   it('reports an op index in registry order when a single op is present', () => {
-    expect(presentOpIndices([{ kind: 'exposure', ev: 0.5 }])).toEqual([0, 1, 2]);
-    expect(presentOpIndices([{ kind: 'whiteBalance', kelvin: 6000, tint: 0 }])).toEqual([0, 1]);
+    expect(presentOpIndices([{ kind: 'exposure', ev: 0.5 }])).toEqual([0, 1, 2, 3]);
+    expect(presentOpIndices([{ kind: 'whiteBalance', kelvin: 6000, tint: 0 }])).toEqual([0, 1, 3]);
     expect(presentOpIndices([{ ...NEUTRAL_TONE, contrast: 20 }])).toEqual([0, 1, 3]);
-    expect(presentOpIndices([{ kind: 'toneCurve', mode: 'point', points: [0, 0, 0.5, 0.6, 1, 1] }])).toEqual([0, 1, 4]);
+    expect(presentOpIndices([{ kind: 'toneCurve', mode: 'point', points: [0, 0, 0.5, 0.6, 1, 1] }])).toEqual([0, 1, 3, 4]);
   });
 
   it('reports all present ops in registry order, independent of Op[] order', () => {
@@ -29,7 +31,7 @@ describe('presentOpIndices', () => {
       CAMERA,
       { kind: 'whiteBalance', kelvin: 6000, tint: 0 },
       { kind: 'exposure', ev: -1 },
-    ])).toEqual([0, 1, 2]);
+    ])).toEqual([0, 1, 2, 3]);
   });
 });
 
@@ -92,16 +94,63 @@ describe('OP_RENDERERS packParams', () => {
     setAsShotGains({ r: 1, g: 1, b: 1 }); // restore neutral default
   });
 
-  it('tone packs a 512-entry LUT, identity when absent', () => {
+  it('tone packs 3 per-channel LUTs; the default look is the CAMERA look', () => {
     const tone = OP_RENDERERS[3];
     expect(tone.kind).toBe('tone');
     const neutral = tone.packParams([]);
-    expect(neutral.length).toBe(TONE_LUT_SIZE);
-    // Identity LUT: entry i = i/(N-1) -- index 256 is 256/511, not 0.5.
-    expect(neutral[256]).toBeCloseTo(256 / (TONE_LUT_SIZE - 1), 4);
-    // A real adjustment changes the LUT (here contrast +50 darkens shadows).
+    // Three 512-entry per-channel LUTs (R/G/B). Today all three carry the SAME
+    // shared curve -- the camera look is a neutral tone (see cameraOutput in
+    // tone.ts); the per-channel layout stays for future per-camera fits.
+    expect(neutral.length).toBe(TONE_LUT_SIZE * 3);
+    for (let ch = 1; ch < 3; ch++) {
+      for (let i = 0; i < TONE_LUT_SIZE; i++) {
+        expect(neutral[ch * TONE_LUT_SIZE + i]).toBe(neutral[i]);
+      }
+    }
+    // NOT identity -- the CAMERA look renders the ACR baseline in the midtones
+    // (index 256 sits at ~0.5475 log-norm; identity would be 256/511 = 0.501)
+    // plus the film-sim shadow lift below it.
+    expect(neutral[256]).toBeCloseTo(0.5475, 3);
+    expect(neutral[512 + 256]).toBeCloseTo(0.5475, 3);
+    expect(neutral[1024 + 256]).toBeCloseTo(0.5475, 3);
+    // The camera look diverges from the ACR baseline ONLY in the shadow toe
+    // (deep shadow index 60 lifts above standard -- the neutral black lift),
+    // not in the midtones.
+    const std = tone.packParams([{ kind: 'profile', profile: 'neutral' }]);
+    expect(neutral[60]).toBeGreaterThan(std[60]);
+    expect(neutral[256]).toBeCloseTo(std[256], 3);
+    // A real adjustment changes the LUT (contrast +50 darkens below the pivot).
     const adjusted = tone.packParams([{ ...NEUTRAL_TONE, contrast: 50 }]);
-    expect(adjusted[Math.floor(TONE_LUT_SIZE * 0.25)]).toBeLessThan(0.25);
+    expect(adjusted[128]).toBeLessThan(neutral[128]);
+  });
+
+  it('tone falls back to the ACR baseline (standard look) when profile is neutral', () => {
+    const tone = OP_RENDERERS[3];
+    const std = tone.packParams([{ kind: 'profile', profile: 'neutral' }]);
+    expect(std.length).toBe(TONE_LUT_SIZE * 3);
+    // The standard look reproduces the old ACR-baseline single curve (all three
+    // channels identical) -- the generic fallback for cameras we haven't fitted.
+    expect(std[256]).toBeCloseTo(0.5475, 3);
+    expect(std[512 + 256]).toBeCloseTo(0.5475, 3);
+    expect(std[1024 + 256]).toBeCloseTo(0.5475, 3);
+  });
+
+  it("tone builds the Portra 400 per-channel film look when profile is 'film'", () => {
+    const tone = OP_RENDERERS[3];
+    const film = tone.packParams([{ kind: 'profile', profile: 'film' }]);
+    expect(film.length).toBe(TONE_LUT_SIZE * 3);
+    // Per-channel: the film's H-D curves differ (gamma/d_min rise R<G<B), so
+    // unlike camera/standard the three LUTs are NOT identical -- that IS the
+    // stock's color character.
+    const diff = (a: Float32Array, b: Float32Array) =>
+      Array.from(a).some((v, i) => Math.abs(v - b[i]) > 1e-4);
+    expect(diff(film.subarray(0, TONE_LUT_SIZE), film.subarray(TONE_LUT_SIZE, 2 * TONE_LUT_SIZE))).toBe(true);
+    // Each channel LUT stays monotone (no tone inversion from the H-D + filmic).
+    for (let ch = 0; ch < 3; ch++) {
+      for (let i = 1; i < TONE_LUT_SIZE; i++) {
+        expect(film[ch * TONE_LUT_SIZE + i]).toBeGreaterThanOrEqual(film[ch * TONE_LUT_SIZE + i - 1]);
+      }
+    }
   });
 
   it('toneCurve packs a LUT, identity when absent or linear', () => {

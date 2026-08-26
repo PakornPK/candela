@@ -52,7 +52,7 @@ export function isValidOp(op: unknown): op is Op {
   const candidate = op as { kind?: unknown };
   if (candidate.kind === 'profile') {
     const p = (op as { profile?: unknown }).profile;
-    return p === 'camera' || p === 'neutral';
+    return p === 'camera' || p === 'neutral' || p === 'film';
   }
   if (candidate.kind === 'exposure') {
     return typeof (op as { ev?: unknown }).ev === 'number';

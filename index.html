@@ -661,12 +661,16 @@
             <select id="profile">
               <option value="camera" selected>Camera</option>
               <option value="neutral">Neutral</option>
+              <option value="film">Portra 400</option>
             </select>
           </details>
           <details class="panel-section" open>
             <summary>White Balance</summary>
             <label class="slider-label" for="wb">Temperature <output id="wb-value" for="wb">5500K</output></label>
-            <input type="range" id="wb" min="0" max="480" step="1" value="318" />
+            <!-- step="any": the mired track carries the exact readout (e.g.
+                 316.5138 for 5450K); step="1" quantized it to an integer, so a
+                 5450K As-Shot readout displayed as 5435-5465K. -->
+            <input type="range" id="wb" min="0" max="480" step="any" value="318" />
             <label class="slider-label" for="tint">Tint <output id="tint-value" for="tint">0</output></label>
             <input type="range" id="tint" min="-150" max="150" step="1" value="0" />
           </details>

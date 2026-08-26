@@ -3,6 +3,7 @@ import { Pipeline } from './gpu/pipeline';
 import { decode, DecodeError, type CameraMeta, type DecodedRaw } from './raw/decode';
 import { extractThumbnail } from './raw/thumbnail';
 import { gainsToKelvin, gainsToTint, WB_NEUTRAL_KELVIN } from './gpu/uniforms';
+import { getCameraXyz } from './gpu/ops';
 import { openCatalogDb } from './catalog/db';
 import { listFolders, listFiles } from './catalog/query';
 import { setCull } from './catalog/culling';
@@ -12,8 +13,8 @@ import { loadEditState, saveEditState } from './catalog/editsStore';
 import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
 import { commitEdit, undo, redo, currentOps } from './catalog/editHistory';
 import { getOrExtractThumbnail } from './catalog/thumbnails';
-import { isExposureOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type WbGains } from './catalog/types';
-import { buildParametricToneLut, buildToneCurveLut, isNeutralTone, parametricControlPoints, TONE_LUT_SIZE, type ToneParams } from './gpu/tone';
+import { isExposureOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type WbGains } from './catalog/types';
+import { buildParametricToneLut, buildToneCurveLut, fitRegionParams, isNeutralTone, parametricControlPoints, TONE_LUT_SIZE, type ToneParams } from './gpu/tone';
 import { isNeutralPresence, type PresenceParams } from './gpu/presence';
 import { getState, selectFile, subscribe, type ModuleId } from './app/state';
 import { registerModule, switchModule } from './app/modules';
@@ -205,12 +206,32 @@ function isNeutralRegion(r: RegionParams): boolean {
   return r.highlights === 0 && r.lights === 0 && r.darks === 0 && r.shadows === 0;
 }
 
+// The curve is "no edit" when every point sits on the diagonal -- including
+// the region mode's neutral 6-point set (once region sliders sync into
+// curvePoints), so a neutral region doesn't emit a phantom point op after a
+// mode switch.
 function isLinearCurve(): boolean {
-  return (
-    curvePoints.length === 4 &&
-    curvePoints[0] === 0 && curvePoints[1] === 0 &&
-    curvePoints[2] === 1 && curvePoints[3] === 1
-  );
+  for (let i = 0; i < curvePoints.length; i += 2) {
+    if (Math.abs(curvePoints[i + 1] - curvePoints[i]) > 1e-6) return false;
+  }
+  return true;
+}
+
+// Region <-> Point are ONE shared curve (like LrC's Tone Curve): the four
+// region sliders and the draggable points are two handles on the same value.
+// Region edits regenerate the point curve; point drags re-fit the sliders.
+function syncRegionToPoints(): void {
+  const r = readRegionParams();
+  curvePoints = parametricControlPoints(r.highlights, r.lights, r.darks, r.shadows);
+}
+
+function syncPointsToRegion(): void {
+  const r = fitRegionParams(curvePoints);
+  regionHighlightsSlider.value = String(r.highlights);
+  regionLightsSlider.value = String(r.lights);
+  regionDarksSlider.value = String(r.darks);
+  regionShadowsSlider.value = String(r.shadows);
+  paintSliders();
 }
 
 // Which LUT + control points the active mode currently produces -- shared by
@@ -335,7 +356,7 @@ function currentOpsFromSliders(): Op[] {
     ? { kind: 'whiteBalance', kelvin: wbSliderToKelvin(Number(wbSlider.value)), tint: Number(tintSlider.value) }
     : { kind: 'whiteBalance', ...asShotWB };
   const ops: Op[] = [
-    { kind: 'profile', profile: profileSelect.value === 'neutral' ? 'neutral' : 'camera' },
+    { kind: 'profile', profile: profileSelect.value as ProfileKind },
     { kind: 'exposure', ev: Number(exposureSlider.value) },
     wb,
   ];
@@ -371,8 +392,8 @@ function applyOpsToSliders(ops: Op[]): void {
   // the slider values themselves; no op at all falls back to the file's
   // As-Shot (neutral daylight when the camera reports none).
   if (wbOp?.gains) {
-    wbSlider.value = String(kelvinToWbSlider(gainsToKelvin(wbOp.gains)));
-    tintSlider.value = String(wbOp.tint ?? gainsToTint(wbOp.gains));
+    wbSlider.value = String(kelvinToWbSlider(gainsToKelvin(wbOp.gains, getCameraXyz())));
+    tintSlider.value = String(wbOp.tint ?? gainsToTint(wbOp.gains, getCameraXyz()));
     wbTouched = false;
   } else if (wbOp) {
     wbSlider.value = String(kelvinToWbSlider(wbOp.kelvin));
@@ -393,17 +414,29 @@ function applyOpsToSliders(ops: Op[]): void {
   dehazeSlider.value = String(presenceOp?.dehaze ?? 0);
   vibranceSlider.value = String(presenceOp?.vibrance ?? 0);
   saturationSlider.value = String(presenceOp?.saturation ?? 0);
-  // Tone curve: restore the stored mode. A point op (including pre-region
-  // legacy rows, which have no `mode`) sets the direct-curve points; a region
-  // op sets the four sliders; no stored curve -> LrC's default (region,
-  // neutral).
+  // Tone curve: restore the stored mode. Region and Point are one shared
+  // curve, so either op shape restores BOTH handles: a region op regenerates
+  // the point curve from its sliders; a point op (including pre-region legacy
+  // rows, which have no `mode`) sets the points and re-fits the sliders. No
+  // stored curve -> LrC's default (region, neutral).
   const curveMode = curveOp ? (curveOp.mode ?? 'point') : 'region';
   curveAdjust.value = curveMode;
-  regionHighlightsSlider.value = String(curveOp?.mode === 'region' ? curveOp.highlights : 0);
-  regionLightsSlider.value = String(curveOp?.mode === 'region' ? curveOp.lights : 0);
-  regionDarksSlider.value = String(curveOp?.mode === 'region' ? curveOp.darks : 0);
-  regionShadowsSlider.value = String(curveOp?.mode === 'region' ? curveOp.shadows : 0);
-  curvePoints = curveOp && curveOp.mode !== 'region' ? [...curveOp.points] : [0, 0, 1, 1];
+  if (curveOp && curveOp.mode === 'region') {
+    regionHighlightsSlider.value = String(curveOp.highlights);
+    regionLightsSlider.value = String(curveOp.lights);
+    regionDarksSlider.value = String(curveOp.darks);
+    regionShadowsSlider.value = String(curveOp.shadows);
+    curvePoints = parametricControlPoints(curveOp.highlights, curveOp.lights, curveOp.darks, curveOp.shadows);
+  } else if (curveOp) {
+    curvePoints = [...curveOp.points];
+    syncPointsToRegion();
+  } else {
+    regionHighlightsSlider.value = '0';
+    regionLightsSlider.value = '0';
+    regionDarksSlider.value = '0';
+    regionShadowsSlider.value = '0';
+    curvePoints = [0, 0, 1, 1];
+  }
   syncCurveMode();
   paintSliders();
   drawCurve();
@@ -433,7 +466,7 @@ function opsToLabel(ops: Op[]): string {
   if (ops.length === 0) return 'Import';
   return ops
     .map((op) => {
-      if (isProfileOp(op)) return op.profile === 'neutral' ? 'Neutral profile' : 'Camera profile';
+      if (isProfileOp(op)) return op.profile === 'neutral' ? 'Neutral profile' : op.profile === 'film' ? 'Portra 400' : 'Camera profile';
       if (isExposureOp(op)) return `Exposure ${op.ev >= 0 ? '+' : ''}${op.ev.toFixed(2)}`;
       if (isWhiteBalanceOp(op)) {
         return op.gains
@@ -813,6 +846,11 @@ async function init(): Promise<void> {
     if (meta.shutter > 0) {
       parts.push(meta.shutter < 1 ? `1/${Math.round(1 / meta.shutter)} sec` : `${meta.shutter.toFixed(1)} sec`);
     }
+    // wb-diag (temporary): surface the As-Shot WB gains the readout decomposes,
+    // so a readout-vs-LrC mismatch can be re-fit without opening DevTools.
+    if (asShotWB) {
+      parts.push(`WB R${asShotWB.gains.r.toFixed(2)} G${asShotWB.gains.g.toFixed(2)} B${asShotWB.gains.b.toFixed(2)}`);
+    }
     cameraInfoEl.textContent = parts.join(' · ');
   }
 
@@ -1022,8 +1060,8 @@ async function init(): Promise<void> {
       }
       if (requestId !== openRequestId) return false; // superseded during decode
       hidePreview();
-      canvas.width = decoded.width;
-      canvas.height = decoded.height;
+      canvas.width = decoded.effectiveWidth ?? decoded.width;
+      canvas.height = decoded.effectiveHeight ?? decoded.height;
       // Re-create the WebGPU surface at the just-set size. Chrome 151 ties the
       // drawing buffer to the canvas size at configure() time -- a configure
       // left over from a different-size file would leave the blit target
@@ -1035,14 +1073,24 @@ async function init(): Promise<void> {
       if (decoded.asShotGains) {
         asShotWB = {
           gains: decoded.asShotGains,
-          kelvin: gainsToKelvin(decoded.asShotGains),
-          tint: gainsToTint(decoded.asShotGains),
+          kelvin: gainsToKelvin(decoded.asShotGains, decoded.camXyz),
+          tint: gainsToTint(decoded.asShotGains, decoded.camXyz),
         };
+        // wb-diag: the browser's actual readout inputs at fresh open -- paste
+        // this line when the displayed temp/tint disagrees with LrC, so the
+        // calibration offsets can be re-fit against the real file (gains +
+        // camXyz -> the un-offset Robertson decomposition; readout = the
+        // displayed value through the current offsets).
+        console.log(
+          `[wb-diag] gains=${decoded.asShotGains.r.toFixed(6)}/${decoded.asShotGains.g.toFixed(6)}/${decoded.asShotGains.b.toFixed(6)}` +
+            ` camXyz=[${decoded.camXyz ? Array.from(decoded.camXyz).map((v) => v.toFixed(5)).join(',') : 'none'}]` +
+            ` readout=${asShotWB.kelvin.toFixed(1)}K/${asShotWB.tint.toFixed(1)}`,
+        );
       } else {
         asShotWB = null;
       }
       loadedFileId = record.id;
-      lastDecoded = { width: decoded.width, height: decoded.height, cameraMeta: decoded.cameraMeta };
+      lastDecoded = { width: decoded.effectiveWidth ?? decoded.width, height: decoded.effectiveHeight ?? decoded.height, cameraMeta: decoded.cameraMeta };
       // waitForGPU() is awaited only for the perf log below -- it doesn't gate
       // anything, since nothing after it touches shared state.
       await pipeline.waitForGPU();
@@ -1142,6 +1190,13 @@ async function init(): Promise<void> {
     });
   }
 
+  // Region sliders share the curve with the point editor: every region input
+  // regenerates the point curve, so switching to Point shows exactly the
+  // region shape (LrC's Tone Curve is one value, two handles).
+  for (const cfg of [regionHighlightsSlider, regionLightsSlider, regionDarksSlider, regionShadowsSlider]) {
+    cfg.addEventListener('input', syncRegionToPoints);
+  }
+
   // Profile is a discrete pick, not a drag -- one render + one history
   // commit per change.
   profileSelect.addEventListener('change', () => {
@@ -1161,6 +1216,9 @@ async function init(): Promise<void> {
   const endCurveDrag = (): void => {
     if (draggingCurveIdx === -1) return;
     draggingCurveIdx = -1;
+    // A drag is an edit of the shared curve -- re-fit the region sliders so
+    // switching back to Region shows the same shape.
+    syncPointsToRegion();
     commitCurrentEdit();
   };
   curveCanvas.addEventListener('pointerdown', (e) => {
@@ -1192,6 +1250,7 @@ async function init(): Promise<void> {
     const idx = nearestCurvePoint(p.x, p.y);
     if (idx === -1 || curvePoints.length <= 4) return; // keep at least 2 points
     curvePoints.splice(idx, 2);
+    syncPointsToRegion();
     drawCurve();
     onSliderInput();
     commitCurrentEdit();
@@ -1203,8 +1262,10 @@ async function init(): Promise<void> {
       regionLightsSlider.value = '0';
       regionDarksSlider.value = '0';
       regionShadowsSlider.value = '0';
+      syncRegionToPoints();
     } else {
       curvePoints = [0, 0, 1, 1];
+      syncPointsToRegion();
     }
     paintSliders();
     drawCurve();
@@ -1212,9 +1273,9 @@ async function init(): Promise<void> {
     commitCurrentEdit();
   });
 
-  // Switching Adjust: Region <-> Point keeps both edits stored (they're
-  // separate op shapes) but only the active one is rendered. One render + one
-  // history commit per switch, like the profile pick.
+  // Switching Adjust: Region <-> Point is a view switch, not an edit -- both
+  // handles already describe the same shared curve, so switching just shows
+  // the other representation. Commit re-emits it in the new mode's shape.
   curveAdjust.addEventListener('change', () => {
     if (currentFileId === null) return;
     syncCurveMode();

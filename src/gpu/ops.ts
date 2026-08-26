@@ -1,10 +1,11 @@
 import exposureShader from '../shaders/exposure.wgsl?raw';
 import wbShader from '../shaders/wb.wgsl?raw';
 import toneShader from '../shaders/tone.wgsl?raw';
+import tonecurveShader from '../shaders/tonecurve.wgsl?raw';
 import cameraColorShader from '../shaders/cameraColor.wgsl?raw';
 import presenceShader from '../shaders/presence.wgsl?raw';
 import { evToGain, kelvinToShift, packColorMatrix, wbShiftToGains, type WhiteBalanceGains } from './uniforms';
-import { buildParametricToneLut, buildToneCurveLut, buildToneLut, TONE_LUT_SIZE, type ToneParams } from './tone';
+import { buildParametricToneLut, buildToneCurveLut, buildToneLuts, TONE_LUT_SIZE, type ToneParams, type ToneLook } from './tone';
 import { isPresenceOp, isExposureOp, isProfileOp, isToneCurveOp, isToneOp, isWhiteBalanceOp, type Op, type WbGains } from '../catalog/types';
 import { packPresence, type PresenceParams } from './presence';
 
@@ -19,6 +20,29 @@ let cameraColorMatrix: Float32Array = new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 
 
 export function setCameraColorMatrix(m: Float32Array): void {
   cameraColorMatrix = m;
+}
+
+// Read the current camera matrix -- the WB temp/tint readout decomposes
+// As-Shot gains through the camera color matrix (the LrC/DNG model), so the
+// readout needs it where pure gains used to suffice.
+export function getCameraColorMatrix(): Float32Array {
+  return cameraColorMatrix;
+}
+
+// The loaded raw's camera XYZ->camera colorimetric matrix (LibRaw cam_xyz) --
+// what the WB temp/tint readout decomposes As-Shot gains through (the LrC/DNG
+// model). rgb_cam (cameraColorMatrix above) is row-normalized and destroys
+// chromaticity, so it cannot serve. Undefined when the file has no usable
+// matrix (the readout falls back to the legacy axes). Same per-file lifetime
+// as cameraColorMatrix.
+let cameraXyz: Float32Array | undefined;
+
+export function setCameraXyz(m: Float32Array | undefined): void {
+  cameraXyz = m;
+}
+
+export function getCameraXyz(): Float32Array | undefined {
+  return cameraXyz;
 }
 
 // The loaded file's as-shot white-balance gains (LibRaw cam_mul, normalized
@@ -92,16 +116,30 @@ export const OP_RENDERERS: OpRenderer[] = [
   {
     kind: 'tone',
     shader: toneShader,
-    uniformSize: TONE_LUT_SIZE * 4, // 2048 B = 512 f32 = array<vec4<f32>,128>
+    // 6144 B: three 512-entry per-channel LUTs (R/G/B). The default look is
+    // the CAMERA look (fitted from the embedded JPEG -- the app renders like
+    // the camera back): a single shared curve (cameraOutput in tone.ts) --
+    // ACR baseline + neutral film-sim shadow lift, no per-channel cast (the
+    // ฟ้าส้ม fix). The 3-LUT layout stays for future per-camera fits; profile
+    // 'neutral' selects the ACR baseline as the generic fallback.
+    uniformSize: TONE_LUT_SIZE * 4 * 3,
     packParams: (ops) => {
       const op = ops.find(isToneOp);
       const p: ToneParams = op ?? { contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0 };
-      return buildToneLut(p);
+      // The active profile picks the tone base: 'neutral' -> ACR baseline,
+      // 'film' -> the film stock's H-D response (per-channel), else the camera
+      // look. The tone sliders perturb whichever base is active.
+      const profile = ops.find(isProfileOp)?.profile;
+      const look: ToneLook = profile === 'neutral' ? 'standard' : profile === 'film' ? 'film' : 'camera';
+      return buildToneLuts(p, look);
     },
   },
   {
     kind: 'toneCurve',
-    shader: toneShader, // same LUT lookup; only the LUT contents differ
+    // tonecurve.wgsl: plain luma-ratio LUT. NOT tone.wgsl -- the tone op's
+    // shader now applies the ACR baseline per-channel, and re-baselining here
+    // would compress the highlights a second time.
+    shader: tonecurveShader,
     uniformSize: TONE_LUT_SIZE * 4,
     packParams: (ops) => {
       const op = ops.find(isToneCurveOp);
@@ -130,13 +168,15 @@ export const OP_RENDERERS: OpRenderer[] = [
 ];
 
 // Registry indices of the ops present in `ops`, in registry (application)
-// order -- op chain order is fixed by the registry, not by Op[] order. The
-// first two passes (whiteBalance As-Shot fallback + profile camera matrix)
-// ALWAYS run: demosaiced camera RGB is neither white-balanced nor displayable
-// without them, so even a no-ops fresh open (renderOps([])) applies both.
-const MANDATORY_PASSES = 2;
+// order -- op chain order is fixed by the registry, not by Op[] order. Three
+// passes ALWAYS run, even with no ops (fresh open): whiteBalance (As-Shot
+// fallback) + profile (camera matrix) because demosaiced camera RGB is neither
+// white-balanced nor displayable without them, and tone because neutral tone
+// params now render the ACR baseline curve -- the look LrC opens every photo
+// with (see tone.ts). exposure/toneCurve/presence stay optional.
+const MANDATORY_KINDS: ReadonlySet<Op['kind']> = new Set(['whiteBalance', 'profile', 'tone']);
 export function presentOpIndices(ops: Op[]): number[] {
-  return OP_RENDERERS.map((r, i) => (i < MANDATORY_PASSES || ops.some((o) => o.kind === r.kind) ? i : -1)).filter(
+  return OP_RENDERERS.map((r, i) => (MANDATORY_KINDS.has(r.kind) || ops.some((o) => o.kind === r.kind) ? i : -1)).filter(
     (i) => i >= 0,
   );
 }
