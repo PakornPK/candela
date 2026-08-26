@@ -61,6 +61,14 @@ export type FilmStockId =
 // camera-based -- the matrix does not change).
 export type ProfileKind = 'camera' | 'neutral' | FilmStockId;
 
+// B&W treatment (LrC's Color Mixer -> B&W): the 8 hue-band mix weights
+// (Red/Orange/Yellow/Green/Aqua/Blue/Purple/Magenta, each -100..100, 0 =
+// that hue contributes its normal luminance) plus an optional monochrome film
+// tone curve (ACROS, Tri-X 400, Double-X, Leica Monochrom -- baked into the
+// bw op's LUT).
+export type BwMix = [number, number, number, number, number, number, number, number];
+export type BwToneId = 'none' | 'acros' | 'tx400' | 'doublex' | 'leica';
+
 export type Op =
   | { kind: 'profile'; profile: ProfileKind }
   | { kind: 'exposure'; ev: number }
@@ -68,7 +76,8 @@ export type Op =
   | { kind: 'tone'; contrast: number; highlights: number; shadows: number; whites: number; blacks: number }
   | ToneCurveOp
   | { kind: 'presence'; texture: number; clarity: number; dehaze: number; vibrance: number; saturation: number }
-  | { kind: 'vignette'; amount: number; midpoint: number; roundness: number; feather: number; highlights: number };
+  | { kind: 'vignette'; amount: number; midpoint: number; roundness: number; feather: number; highlights: number }
+  | { kind: 'bw'; mix: BwMix; tone: BwToneId };
   // future op kinds (crop, ...) extend this union.
 
 export function isProfileOp(op: Op): op is { kind: 'profile'; profile: ProfileKind } {
@@ -101,6 +110,10 @@ export function isVignetteOp(
   op: Op,
 ): op is { kind: 'vignette'; amount: number; midpoint: number; roundness: number; feather: number; highlights: number } {
   return op.kind === 'vignette';
+}
+
+export function isBwOp(op: Op): op is { kind: 'bw'; mix: BwMix; tone: BwToneId } {
+  return op.kind === 'bw';
 }
 
 export interface EditState {

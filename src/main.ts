@@ -13,11 +13,12 @@ import { loadEditState, saveEditState } from './catalog/editsStore';
 import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
 import { commitEdit, undo, redo, currentOps } from './catalog/editHistory';
 import { getOrExtractThumbnail } from './catalog/thumbnails';
-import { isExposureOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type WbGains } from './catalog/types';
+import { isExposureOp, isBwOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type WbGains, type BwMix, type BwToneId } from './catalog/types';
 import { FILM_STOCKS } from './gpu/film';
 import { buildParametricToneLut, buildToneCurveLut, fitRegionParams, isNeutralTone, parametricControlPoints, TONE_LUT_SIZE, type ToneParams } from './gpu/tone';
 import { isNeutralPresence, type PresenceParams } from './gpu/presence';
 import { isNeutralVignette, type VignetteParams } from './gpu/vignette';
+import { BW_FILTERS, BW_TONES, type BwFilterId } from './gpu/bw';
 import { getState, selectFile, subscribe, type ModuleId } from './app/state';
 import { registerModule, switchModule } from './app/modules';
 import { createFilmstrip } from './app/filmstrip';
@@ -84,6 +85,30 @@ const vignetteMidpointValue = document.querySelector<HTMLOutputElement>('#vignet
 const vignetteRoundnessValue = document.querySelector<HTMLOutputElement>('#vignette-roundness-value')!;
 const vignetteFeatherValue = document.querySelector<HTMLOutputElement>('#vignette-feather-value')!;
 const vignetteHighlightsValue = document.querySelector<HTMLOutputElement>('#vignette-highlights-value')!;
+const bwTreatmentSelect = document.querySelector<HTMLSelectElement>('#bw-treatment')!;
+const bwControls = document.querySelector<HTMLDivElement>('#bw-controls')!;
+const bwFilterSelect = document.querySelector<HTMLSelectElement>('#bw-filter')!;
+const bwToneSelect = document.querySelector<HTMLSelectElement>('#bw-tone')!;
+const bwMixSliders = {
+  red: document.querySelector<HTMLInputElement>('#bw-red')!,
+  orange: document.querySelector<HTMLInputElement>('#bw-orange')!,
+  yellow: document.querySelector<HTMLInputElement>('#bw-yellow')!,
+  green: document.querySelector<HTMLInputElement>('#bw-green')!,
+  aqua: document.querySelector<HTMLInputElement>('#bw-aqua')!,
+  blue: document.querySelector<HTMLInputElement>('#bw-blue')!,
+  purple: document.querySelector<HTMLInputElement>('#bw-purple')!,
+  magenta: document.querySelector<HTMLInputElement>('#bw-magenta')!,
+};
+const bwMixValues = {
+  red: document.querySelector<HTMLOutputElement>('#bw-red-value')!,
+  orange: document.querySelector<HTMLOutputElement>('#bw-orange-value')!,
+  yellow: document.querySelector<HTMLOutputElement>('#bw-yellow-value')!,
+  green: document.querySelector<HTMLOutputElement>('#bw-green-value')!,
+  aqua: document.querySelector<HTMLOutputElement>('#bw-aqua-value')!,
+  blue: document.querySelector<HTMLOutputElement>('#bw-blue-value')!,
+  purple: document.querySelector<HTMLOutputElement>('#bw-purple-value')!,
+  magenta: document.querySelector<HTMLOutputElement>('#bw-magenta-value')!,
+};
 const canvas = document.querySelector<HTMLCanvasElement>('#canvas')!;
 const errorEl = document.querySelector<HTMLDivElement>('#error')!;
 const errorMessageEl = document.querySelector<HTMLParagraphElement>('#error-message')!;
@@ -202,6 +227,16 @@ const ALL_SLIDERS: SliderConfig[] = [
   { slider: vignetteRoundnessSlider, output: vignetteRoundnessValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: vignetteFeatherSlider, output: vignetteFeatherValue, neutral: 50, format: (v) => formatSigned(v) },
   { slider: vignetteHighlightsSlider, output: vignetteHighlightsValue, neutral: 0, format: (v) => formatSigned(v) },
+  // B&W mix sliders -- only live while Treatment is Black & White (the bw op
+  // is emitted only then), but they share the paint/commit loop like the rest.
+  { slider: bwMixSliders.red, output: bwMixValues.red, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: bwMixSliders.orange, output: bwMixValues.orange, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: bwMixSliders.yellow, output: bwMixValues.yellow, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: bwMixSliders.green, output: bwMixValues.green, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: bwMixSliders.aqua, output: bwMixValues.aqua, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: bwMixSliders.blue, output: bwMixValues.blue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: bwMixSliders.purple, output: bwMixValues.purple, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: bwMixSliders.magenta, output: bwMixValues.magenta, neutral: 0, format: (v) => formatSigned(v) },
   { slider: regionHighlightsSlider, output: regionHighlightsValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: regionLightsSlider, output: regionLightsValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: regionDarksSlider, output: regionDarksValue, neutral: 0, format: (v) => formatSigned(v) },
@@ -392,6 +427,26 @@ function readVignetteParams(): VignetteParams {
   };
 }
 
+// B&W treatment. The mix tuple is in RGB order (Red..Magenta), matching both
+// the bw op's BwMix and the shader's band array.
+function readBwMix(): BwMix {
+  const keys = ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'magenta'] as const;
+  return keys.map((k) => Number(bwMixSliders[k].value)) as unknown as BwMix;
+}
+
+function isBwEnabled(): boolean {
+  return bwTreatmentSelect.value === 'bw';
+}
+
+// Hides/grays the B&W mix + filter + tone controls unless Treatment is B&W.
+function syncBwEnabled(): void {
+  bwControls.hidden = !isBwEnabled();
+  const on = isBwEnabled();
+  bwFilterSelect.disabled = !on;
+  bwToneSelect.disabled = !on;
+  for (const k in bwMixSliders) bwMixSliders[k as keyof typeof bwMixSliders].disabled = !on;
+}
+
 function currentOpsFromSliders(): Op[] {
   // As-Shot: while the WB/tint sliders are untouched, the exact camera gains
   // are preserved (kelvin+tint can't represent an arbitrary cam_mul). Once the
@@ -422,6 +477,12 @@ function currentOpsFromSliders(): Op[] {
   // neutral state renders without an extra full-res pass, like presence.
   const vignette = readVignetteParams();
   if (!isNeutralVignette(vignette)) ops.push({ kind: 'vignette', ...vignette });
+  // B&W treatment is a mode switch, not a slider: emit the op only while
+  // Treatment = Black & White. Even a fully-neutral mix+tone is still a real
+  // edit (Color -> B&W conversion), so it always emits when enabled.
+  if (isBwEnabled()) {
+    ops.push({ kind: 'bw', mix: readBwMix(), tone: bwToneSelect.value as BwToneId });
+  }
   return ops;
 }
 
@@ -433,6 +494,7 @@ function applyOpsToSliders(ops: Op[]): void {
   const curveOp = ops.find(isToneCurveOp);
   const presenceOp = ops.find(isPresenceOp);
   const vignetteOp = ops.find(isVignetteOp);
+  const bwOp = ops.find(isBwOp);
   profileSelect.value = profileOp?.profile ?? 'camera';
   exposureSlider.value = String(exposureOp?.ev ?? 0);
   // WB slider is a kelvin track, but the applied white point may be an exact
@@ -472,6 +534,14 @@ function applyOpsToSliders(ops: Op[]): void {
   vignetteRoundnessSlider.value = String(vignetteOp?.roundness ?? 0);
   vignetteFeatherSlider.value = String(vignetteOp?.feather ?? 50);
   vignetteHighlightsSlider.value = String(vignetteOp?.highlights ?? 0);
+  // B&W: the op's presence IS the treatment (no bw op = Color). Mix sliders
+  // restore to the op's 8 weights (0 = that hue contributes normal luminance);
+  // a neutral op is a plain desaturation and restores the filter to None.
+  bwTreatmentSelect.value = bwOp ? 'bw' : 'color';
+  const keys = ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'magenta'] as const;
+  for (let i = 0; i < keys.length; i++) bwMixSliders[keys[i]].value = String(bwOp?.mix[i] ?? 0);
+  bwToneSelect.value = bwOp?.tone ?? 'none';
+  syncBwEnabled();
   // Tone curve: restore the stored mode. Region and Point are one shared
   // curve, so either op shape restores BOTH handles: a region op regenerates
   // the point curve from its sliders; a point op (including pre-region legacy
@@ -562,6 +632,10 @@ function opsToLabel(ops: Op[]): string {
       }
       if (isVignetteOp(op)) {
         return `Vignette ${formatSigned(op.amount)}`;
+      }
+      if (isBwOp(op)) {
+        const tone = op.tone !== 'none' ? ` · ${BW_TONES[op.tone].name}` : '';
+        return `B&W${tone}`;
       }
       return 'Unknown';
     })
@@ -1020,6 +1094,8 @@ async function init(): Promise<void> {
   function setAdjustEnabled(enabled: boolean): void {
     for (const cfg of ALL_SLIDERS) cfg.slider.disabled = !enabled;
     profileSelect.disabled = !enabled;
+    bwTreatmentSelect.disabled = !enabled;
+    syncBwEnabled();
     curveAdjust.disabled = !enabled;
     curveCanvas.style.pointerEvents = enabled ? 'auto' : 'none';
     curveResetButton.disabled = !enabled;
@@ -1261,6 +1337,27 @@ async function init(): Promise<void> {
   // Profile is a discrete pick, not a drag -- one render + one history
   // commit per change.
   profileSelect.addEventListener('change', () => {
+    onSliderInput();
+    commitCurrentEdit();
+  });
+
+  // B&W treatment is a discrete mode switch like profile: toggle the mix
+  // controls, render, one history commit. The Filter dropdown is a macro that
+  // seeds the 8 mix sliders (editable after), so it paints + commits too.
+  bwTreatmentSelect.addEventListener('change', () => {
+    syncBwEnabled();
+    onSliderInput();
+    commitCurrentEdit();
+  });
+  bwFilterSelect.addEventListener('change', () => {
+    const preset = BW_FILTERS[bwFilterSelect.value as BwFilterId];
+    const keys = ['red', 'orange', 'yellow', 'green', 'aqua', 'blue', 'purple', 'magenta'] as const;
+    for (let i = 0; i < keys.length; i++) bwMixSliders[keys[i]].value = String(preset[i]);
+    paintSliders();
+    onSliderInput();
+    commitCurrentEdit();
+  });
+  bwToneSelect.addEventListener('change', () => {
     onSliderInput();
     commitCurrentEdit();
   });

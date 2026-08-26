@@ -99,13 +99,13 @@ describe('clarityLogLuma (CPU mirror of presence.wgsl)', () => {
 });
 
 describe('presence registry entry', () => {
-  it('is registered last and packs via packPresence', () => {
-    expect(OP_RENDERERS[5].kind).toBe('presence');
-    expect(Array.from(OP_RENDERERS[5].packParams([{ kind: 'presence', ...NEUTRAL, clarity: 25 }]))).toEqual([
+  it('is registered before vignette and packs via packPresence', () => {
+    expect(OP_RENDERERS[6].kind).toBe('presence');
+    expect(Array.from(OP_RENDERERS[6].packParams([{ kind: 'presence', ...NEUTRAL, clarity: 25 }]))).toEqual([
       0, 25, 0, 0, 0, 0, 0, 0,
     ]);
-    expect(Array.from(OP_RENDERERS[5].packParams([]))).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+    expect(Array.from(OP_RENDERERS[6].packParams([]))).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
     // Mandatory whiteBalance + profile + tone passes always precede it.
-    expect(presentOpIndices([{ kind: 'presence', ...NEUTRAL, texture: 1 }])).toEqual([0, 1, 3, 5]);
+    expect(presentOpIndices([{ kind: 'presence', ...NEUTRAL, texture: 1 }])).toEqual([0, 1, 3, 6]);
   });
 });

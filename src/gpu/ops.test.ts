@@ -2,10 +2,11 @@ import { describe, it, expect } from 'vitest';
 import { OP_RENDERERS, presentOpIndices, setAsShotGains, setCameraColorMatrix } from './ops';
 import { WB_NEUTRAL_KELVIN } from './uniforms';
 import { TONE_LUT_SIZE } from './tone';
+import { buildBwToneLut } from './bw';
 import type { Op } from '../catalog/types';
 
 const NEUTRAL_TONE = { kind: 'tone', contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0 } as const;
-// Registry order: [whiteBalance, profile, exposure, tone, toneCurve, presence, vignette].
+// Registry order: [whiteBalance, profile, exposure, tone, bw, toneCurve, presence, vignette].
 // Three passes are mandatory -- they always run even with no ops (fresh open):
 // whiteBalance (As-Shot fallback), profile (camera matrix), and tone (neutral
 // tone now renders the ACR baseline curve -- the LrC import look, see tone.ts).
@@ -23,8 +24,9 @@ describe('presentOpIndices', () => {
     expect(presentOpIndices([{ kind: 'exposure', ev: 0.5 }])).toEqual([0, 1, 2, 3]);
     expect(presentOpIndices([{ kind: 'whiteBalance', kelvin: 6000, tint: 0 }])).toEqual([0, 1, 3]);
     expect(presentOpIndices([{ ...NEUTRAL_TONE, contrast: 20 }])).toEqual([0, 1, 3]);
-    expect(presentOpIndices([{ kind: 'toneCurve', mode: 'point', points: [0, 0, 0.5, 0.6, 1, 1] }])).toEqual([0, 1, 3, 4]);
-    expect(presentOpIndices([{ kind: 'vignette', amount: -50, midpoint: 50, roundness: 0, feather: 50, highlights: 0 }])).toEqual([0, 1, 3, 6]);
+    expect(presentOpIndices([{ kind: 'toneCurve', mode: 'point', points: [0, 0, 0.5, 0.6, 1, 1] }])).toEqual([0, 1, 3, 5]);
+    expect(presentOpIndices([{ kind: 'vignette', amount: -50, midpoint: 50, roundness: 0, feather: 50, highlights: 0 }])).toEqual([0, 1, 3, 7]);
+    expect(presentOpIndices([{ kind: 'bw', mix: [0, 0, 0, 0, 0, 0, 0, 0], tone: 'acros' }])).toEqual([0, 1, 3, 4]);
   });
 
   it('reports all present ops in registry order, independent of Op[] order', () => {
@@ -169,7 +171,7 @@ describe('OP_RENDERERS packParams', () => {
   });
 
   it('vignette packs 8 floats; neutral when absent, amount-driven when present', () => {
-    const vignette = OP_RENDERERS[6];
+    const vignette = OP_RENDERERS[7];
     expect(vignette.kind).toBe('vignette');
     const absent = vignette.packParams([]);
     expect(absent.length).toBe(8);
@@ -182,8 +184,22 @@ describe('OP_RENDERERS packParams', () => {
     expect(Array.from(dark)).toEqual([-60, 40, 20, 30, 10, 0, 0, 0]);
   });
 
+  it('bw packs mix + tone id + LUT; absent op is a neutral color no-op', () => {
+    const bw = OP_RENDERERS[4];
+    expect(bw.kind).toBe('bw');
+    const absent = bw.packParams([]);
+    expect(absent.length).toBe(8 + 4 + TONE_LUT_SIZE);
+    expect(Array.from(absent.subarray(0, 8))).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
+    expect(absent[8]).toBe(0); // 'none' id
+    const acros = bw.packParams([{ kind: 'bw', mix: [40, 100, 20, 0, 0, 0, 0, 0], tone: 'acros' }]);
+    expect(acros[0]).toBe(40);
+    expect(acros[1]).toBe(100);
+    expect(acros[8]).toBe(1); // 'acros' id
+    expect(Array.from(acros.subarray(12))).toEqual(Array.from(buildBwToneLut('acros')));
+  });
+
   it('toneCurve packs a LUT, identity when absent or linear', () => {
-    const curve = OP_RENDERERS[4];
+    const curve = OP_RENDERERS[5];
     expect(curve.kind).toBe('toneCurve');
     const absent = curve.packParams([]);
     expect(absent.length).toBe(TONE_LUT_SIZE);
@@ -198,7 +214,7 @@ describe('OP_RENDERERS packParams', () => {
 
   it('toneCurve legacy rows (no mode) are treated as point mode', () => {
     // Rows saved before the region mode existed carry `points` without `mode`.
-    const curve = OP_RENDERERS[4];
+    const curve = OP_RENDERERS[5];
     const legacy = curve.packParams([
       { kind: 'toneCurve', points: [0, 0, 0.25, 0.4, 0.75, 0.7, 1, 1] } as Op,
     ]);
@@ -207,7 +223,7 @@ describe('OP_RENDERERS packParams', () => {
   });
 
   it('toneCurve region mode packs the parametric LUT, point/legacy unchanged', () => {
-    const curve = OP_RENDERERS[4];
+    const curve = OP_RENDERERS[5];
     const region = curve.packParams([
       { kind: 'toneCurve', mode: 'region', highlights: 60, lights: 0, darks: 0, shadows: 0 },
     ]);

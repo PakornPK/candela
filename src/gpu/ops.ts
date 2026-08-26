@@ -5,11 +5,13 @@ import tonecurveShader from '../shaders/tonecurve.wgsl?raw';
 import cameraColorShader from '../shaders/cameraColor.wgsl?raw';
 import presenceShader from '../shaders/presence.wgsl?raw';
 import vignetteShader from '../shaders/vignette.wgsl?raw';
+import bwShader from '../shaders/bw.wgsl?raw';
 import { evToGain, kelvinToShift, packColorMatrix, wbShiftToGains, type WhiteBalanceGains } from './uniforms';
 import { buildParametricToneLut, buildToneCurveLut, buildToneLuts, TONE_LUT_SIZE, type ToneParams, type ToneLook } from './tone';
-import { isPresenceOp, isExposureOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type WbGains } from '../catalog/types';
+import { isPresenceOp, isBwOp, isExposureOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type WbGains } from '../catalog/types';
 import { packPresence, type PresenceParams } from './presence';
 import { packVignette, type VignetteParams } from './vignette';
+import { packBw } from './bw';
 import { FILM_STOCKS, isFilmStockId } from './film';
 import type { FilmStock } from './film';
 
@@ -142,6 +144,20 @@ export const OP_RENDERERS: OpRenderer[] = [
         stock = FILM_STOCKS[profile];
       }
       return buildToneLuts(p, look, stock);
+    },
+  },
+  {
+    kind: 'bw',
+    // AFTER `tone`: the stock's per-channel H-D tone (which differs per
+    // channel and would cast gray) shapes the pre-conversion color, then this
+    // pass drops chroma and applies the mono tone. toneCurve/presence/vignette
+    // run on the gray image after it. Absent op = Color treatment (no-op).
+    shader: bwShader,
+    uniformSize: (8 + 4 + TONE_LUT_SIZE) * 4, // struct Bw { mix, mix2, tone, lut }
+    packParams: (ops) => {
+      const op = ops.find(isBwOp);
+      const p = op ?? { mix: [0, 0, 0, 0, 0, 0, 0, 0], tone: 'none' as const };
+      return packBw(p);
     },
   },
   {

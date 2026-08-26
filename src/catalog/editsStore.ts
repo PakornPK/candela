@@ -94,6 +94,13 @@ export function isValidOp(op: unknown): op is Op {
     const v = op as { amount?: unknown; midpoint?: unknown; roundness?: unknown; feather?: unknown; highlights?: unknown };
     return [v.amount, v.midpoint, v.roundness, v.feather, v.highlights].every((x) => typeof x === 'number');
   }
+  if (candidate.kind === 'bw') {
+    const b = op as { mix?: unknown; tone?: unknown };
+    const isBwTone = (t: unknown) => t === 'none' || t === 'acros' || t === 'tx400' || t === 'doublex' || t === 'leica';
+    return (
+      Array.isArray(b.mix) && b.mix.length === 8 && b.mix.every((v) => typeof v === 'number') && isBwTone(b.tone)
+    );
+  }
   return false;
 }
 

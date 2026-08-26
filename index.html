@@ -698,6 +698,55 @@
             <label class="slider-label" for="blacks">Blacks <output id="blacks-value" for="blacks">0</output></label>
             <input type="range" id="blacks" min="-100" max="100" step="1" value="0" />
           </details>
+          <details class="panel-section">
+            <summary>Black &amp; White</summary>
+            <label class="adjust-label">Treatment
+              <select id="bw-treatment">
+                <option value="color" selected>Color</option>
+                <option value="bw">Black &amp; White</option>
+              </select>
+            </label>
+            <div id="bw-controls" class="bw-controls" hidden>
+              <div class="group-label">B&amp;W Mix</div>
+              <label class="slider-label" for="bw-red">Reds <output id="bw-red-value" for="bw-red">0</output></label>
+              <input type="range" id="bw-red" min="-100" max="100" step="1" value="0" />
+              <label class="slider-label" for="bw-orange">Orange <output id="bw-orange-value" for="bw-orange">0</output></label>
+              <input type="range" id="bw-orange" min="-100" max="100" step="1" value="0" />
+              <label class="slider-label" for="bw-yellow">Yellow <output id="bw-yellow-value" for="bw-yellow">0</output></label>
+              <input type="range" id="bw-yellow" min="-100" max="100" step="1" value="0" />
+              <label class="slider-label" for="bw-green">Green <output id="bw-green-value" for="bw-green">0</output></label>
+              <input type="range" id="bw-green" min="-100" max="100" step="1" value="0" />
+              <label class="slider-label" for="bw-aqua">Aqua <output id="bw-aqua-value" for="bw-aqua">0</output></label>
+              <input type="range" id="bw-aqua" min="-100" max="100" step="1" value="0" />
+              <label class="slider-label" for="bw-blue">Blue <output id="bw-blue-value" for="bw-blue">0</output></label>
+              <input type="range" id="bw-blue" min="-100" max="100" step="1" value="0" />
+              <label class="slider-label" for="bw-purple">Purple <output id="bw-purple-value" for="bw-purple">0</output></label>
+              <input type="range" id="bw-purple" min="-100" max="100" step="1" value="0" />
+              <label class="slider-label" for="bw-magenta">Magenta <output id="bw-magenta-value" for="bw-magenta">0</output></label>
+              <input type="range" id="bw-magenta" min="-100" max="100" step="1" value="0" />
+              <div class="group-label">Filter</div>
+              <label class="adjust-label">Filter
+                <select id="bw-filter">
+                  <option value="none" selected>None</option>
+                  <option value="red">Red</option>
+                  <option value="orange">Orange</option>
+                  <option value="yellow">Yellow</option>
+                  <option value="green">Green</option>
+                  <option value="blue">Blue</option>
+                </select>
+              </label>
+              <div class="group-label">Mono Tone</div>
+              <label class="adjust-label">Tone
+                <select id="bw-tone">
+                  <option value="none" selected>None</option>
+                  <option value="acros">ACROS</option>
+                  <option value="tx400">Tri-X 400</option>
+                  <option value="doublex">Double-X</option>
+                  <option value="leica">Leica Monochrom</option>
+                </select>
+              </label>
+            </div>
+          </details>
           <details class="panel-section" open>
             <summary>Presence</summary>
             <label class="slider-label" for="texture">Texture <output id="texture-value" for="texture">0</output></label>
