@@ -605,6 +605,108 @@
         font-size: 11px;
         color: #e0b0b0;
       }
+
+      /* Contact sheet -- a film-proofing view: one folder laid out as a roll's
+         frames, 36 per sheet (6x6, like a 35mm contact print), overflow starts
+         a new sheet. */
+      .contact-sheet {
+        padding: 12px 20px 20px;
+        overflow-y: auto;
+      }
+      .contact-header {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 14px;
+        padding: 4px 0 14px;
+      }
+      .contact-header button {
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--panel-border);
+        border-radius: 4px;
+        padding: 3px 12px;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      .contact-header button:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+      .contact-header button:not(:disabled):hover {
+        border-color: var(--accent);
+      }
+      #contact-sheet-label {
+        color: var(--text-dim);
+        font-size: 13px;
+        min-width: 150px;
+        text-align: center;
+      }
+      #contact-roll-label {
+        color: var(--text);
+        font-weight: 600;
+        font-size: 13px;
+        text-align: center;
+        padding-bottom: 10px;
+      }
+      #contact-grid {
+        display: grid;
+        grid-template-columns: repeat(6, 1fr);
+        gap: 12px;
+        max-width: 1160px;
+        margin: 0 auto;
+      }
+      .contact-frame {
+        position: relative;
+        aspect-ratio: 3 / 2;
+        background: var(--thumb-bg);
+        border: 1px solid var(--panel-border);
+        border-radius: 3px;
+        overflow: hidden;
+        cursor: pointer;
+      }
+      .contact-frame:hover {
+        border-color: var(--accent);
+      }
+      .contact-frame img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+      }
+      .contact-frame-num {
+        position: absolute;
+        left: 4px;
+        top: 3px;
+        font: 600 12px/1.2 ui-monospace, monospace;
+        color: #eee;
+        background: rgba(0, 0, 0, 0.6);
+        padding: 1px 5px;
+        border-radius: 2px;
+      }
+      .contact-empty {
+        color: var(--text-dim);
+        text-align: center;
+        padding: 40px;
+      }
+
+      .develop-footer {
+        padding: 10px 12px 14px;
+        border-top: 1px solid var(--panel-border);
+      }
+      #reset-btn {
+        width: 100%;
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--panel-border);
+        border-radius: 4px;
+        padding: 5px 0;
+        cursor: pointer;
+        font-size: 13px;
+      }
+      #reset-btn:hover {
+        border-color: var(--accent);
+      }
     </style>
   </head>
   <body>
@@ -612,6 +714,7 @@
       <header id="topbar">
         <button data-module="library" class="active">Library</button>
         <button data-module="develop">Develop</button>
+        <button data-module="contact">Contact Sheet</button>
         <span id="brand">Candela</span>
       </header>
 
@@ -809,7 +912,22 @@
               <button id="export-btn">Export</button>
             </div>
           </details>
+          <div class="develop-footer">
+            <button id="reset-btn" type="button" title="Reset this photo to its fresh-import default (undoable)">Reset</button>
+          </div>
         </aside>
+      </section>
+
+      <section id="module-contact" class="module" hidden>
+        <main class="content contact-sheet">
+          <div id="contact-roll-label"></div>
+          <div class="contact-header">
+            <button id="contact-prev" type="button" title="Previous sheet">◀</button>
+            <span id="contact-sheet-label">Sheet 1 / 1</span>
+            <button id="contact-next" type="button" title="Next sheet">▶</button>
+          </div>
+          <div id="contact-grid"></div>
+        </main>
       </section>
 
       <footer id="filmstrip">

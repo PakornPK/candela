@@ -1,4 +1,4 @@
-export type ModuleId = 'library' | 'develop';
+export type ModuleId = 'library' | 'develop' | 'contact';
 
 export interface AppState {
   module: ModuleId;

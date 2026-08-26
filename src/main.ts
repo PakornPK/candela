@@ -110,6 +110,11 @@ const bwMixValues = {
   magenta: document.querySelector<HTMLOutputElement>('#bw-magenta-value')!,
 };
 const canvas = document.querySelector<HTMLCanvasElement>('#canvas')!;
+const contactPrev = document.querySelector<HTMLButtonElement>('#contact-prev')!;
+const contactNext = document.querySelector<HTMLButtonElement>('#contact-next')!;
+const contactSheetLabel = document.querySelector<HTMLSpanElement>('#contact-sheet-label')!;
+const contactRollLabel = document.querySelector<HTMLDivElement>('#contact-roll-label')!;
+const contactGrid = document.querySelector<HTMLDivElement>('#contact-grid')!;
 const errorEl = document.querySelector<HTMLDivElement>('#error')!;
 const errorMessageEl = document.querySelector<HTMLParagraphElement>('#error-message')!;
 const errorDetailEl = document.querySelector<HTMLPreElement>('#error-detail')!;
@@ -142,6 +147,7 @@ const filterPicked = document.querySelector<HTMLInputElement>('#filter-picked')!
 const filterMinRating = document.querySelector<HTMLSelectElement>('#filter-min-rating')!;
 const exportButton = document.querySelector<HTMLButtonElement>('#export-btn')!;
 const exportFormat = document.querySelector<HTMLSelectElement>('#export-format')!;
+const resetButton = document.querySelector<HTMLButtonElement>('#reset-btn')!;
 const presetSaveButton = document.querySelector<HTMLButtonElement>('#preset-save')!;
 const presetListEl = document.querySelector<HTMLDivElement>('#preset-list')!;
 
@@ -1473,6 +1479,22 @@ async function init(): Promise<void> {
     }
   });
 
+  // Reset to the fresh-import default, LrC-style: an empty ops state (still
+  // renders via the mandatory As-Shot WB + camera profile + ACR baseline
+  // passes). Undoable -- one empty snapshot, so Ctrl+Z brings the edits back.
+  resetButton.addEventListener('click', async () => {
+    if (currentFileId === null || !currentEditState) return;
+    applyOpsToSliders([]);
+    renderOps([]);
+    currentEditState = commitEdit(currentEditState, []);
+    renderHistory();
+    try {
+      await saveEditState(db, currentFileId, currentEditState);
+    } catch (err) {
+      showError("Couldn't save the reset.", errorDetail(err));
+    }
+  });
+
   // ---- presets ----
   let presets: PresetRow[] = [];
 
@@ -1559,6 +1581,59 @@ async function init(): Promise<void> {
     }
   }
 
+  // ---- Contact sheet ----
+  // One folder = one film roll: frames lay out as 35mm-style contact sheets,
+  // 36 per sheet (fewer on the last), overflow starts a new sheet. No culling
+  // filters -- a contact sheet shows the whole roll, rejects included.
+  const CONTACT_SHEET_SIZE = 36;
+  let contactFiles: FileRecord[] = [];
+  let contactSheetIdx = 0;
+
+  function renderContactSheet(): void {
+    const sheets: FileRecord[][] = [];
+    for (let i = 0; i < contactFiles.length; i += CONTACT_SHEET_SIZE) {
+      sheets.push(contactFiles.slice(i, i + CONTACT_SHEET_SIZE));
+    }
+    contactSheetIdx = Math.min(Math.max(contactSheetIdx, 0), Math.max(sheets.length - 1, 0));
+    contactSheetLabel.textContent = sheets.length ? `Sheet ${contactSheetIdx + 1} / ${sheets.length}` : 'No frames';
+    contactPrev.disabled = contactSheetIdx === 0;
+    contactNext.disabled = contactSheetIdx >= sheets.length - 1;
+    contactGrid.textContent = '';
+    if (sheets.length === 0) {
+      const empty = document.createElement('div');
+      empty.className = 'contact-empty';
+      empty.textContent = 'Add a folder in Library to build a contact sheet.';
+      contactGrid.appendChild(empty);
+      return;
+    }
+    const frames = sheets[contactSheetIdx];
+    frames.forEach((file, i) => {
+      const cell = document.createElement('div');
+      cell.className = 'contact-frame';
+      cell.title = file.path;
+      cell.addEventListener('click', () => {
+        openFile(file);
+        switchModule('develop'); // proofing: click a frame, see it full
+      });
+      const num = document.createElement('span');
+      num.className = 'contact-frame-num';
+      num.textContent = String(contactSheetIdx * CONTACT_SHEET_SIZE + i + 1).padStart(2, '0');
+      cell.appendChild(num);
+      contactGrid.appendChild(cell);
+      getThumbnail(file).then((blob) => {
+        if (!blob) return;
+        const img = document.createElement('img');
+        img.src = URL.createObjectURL(blob);
+        img.addEventListener('load', () => URL.revokeObjectURL(img.src), { once: true });
+        img.addEventListener('error', () => {
+          URL.revokeObjectURL(img.src);
+          img.remove();
+        }, { once: true });
+        cell.appendChild(img);
+      });
+    });
+  }
+
   // ---- module wiring ----
   registerModule({
     id: 'library',
@@ -1602,6 +1677,32 @@ async function init(): Promise<void> {
       });
     },
     onHide: () => {},
+  });
+  registerModule({
+    id: 'contact',
+    root: document.querySelector('#module-contact')!,
+    onShow: () => {
+      // The current folder is the roll; with no folder selected, all files
+      // chunk across sheets. Rebuilt on entry so a folder change shows up
+      // next time the sheet is opened.
+      contactFiles = folderFilter !== null ? allFiles.filter((f) => f.folderId === folderFilter) : [...allFiles];
+      contactRollLabel.textContent = folderFilter !== null
+        ? (folders.find((f) => f.id === folderFilter)?.name ?? 'Roll')
+        : 'All folders';
+      contactSheetIdx = 0;
+      renderContactSheet();
+    },
+    onHide: () => {},
+  });
+  contactPrev.addEventListener('click', () => {
+    if (contactSheetIdx > 0) {
+      contactSheetIdx--;
+      renderContactSheet();
+    }
+  });
+  contactNext.addEventListener('click', () => {
+    contactSheetIdx++;
+    renderContactSheet();
   });
 
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-module]')) {
