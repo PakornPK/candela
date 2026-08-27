@@ -1573,12 +1573,13 @@ async function init(): Promise<void> {
 
   // Reset to the fresh-import default, LrC-style: an empty ops state (still
   // renders via the mandatory As-Shot WB + camera profile + ACR baseline
-  // passes). Undoable -- one empty snapshot, so Ctrl+Z brings the edits back.
+  // passes). Unlike a plain "set sliders to 0", Reset also clears the edit
+  // history -- the photo goes back to a fresh-import state with no undo trail.
   resetButton.addEventListener('click', async () => {
     if (currentFileId === null || !currentEditState) return;
     applyOpsToSliders([]);
     renderOps([]);
-    currentEditState = commitEdit(currentEditState, []);
+    currentEditState = createEditState();
     renderHistory();
     try {
       await saveEditState(db, currentFileId, currentEditState);
