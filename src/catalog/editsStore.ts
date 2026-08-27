@@ -101,6 +101,10 @@ export function isValidOp(op: unknown): op is Op {
       Array.isArray(b.mix) && b.mix.length === 8 && b.mix.every((v) => typeof v === 'number') && isBwTone(b.tone)
     );
   }
+  if (candidate.kind === 'grain') {
+    const g = op as { amount?: unknown; size?: unknown; roughness?: unknown };
+    return [g.amount, g.size, g.roughness].every((v) => typeof v === 'number');
+  }
   return false;
 }
 

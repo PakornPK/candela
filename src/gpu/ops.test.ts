@@ -1,12 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import { OP_RENDERERS, presentOpIndices, setAsShotGains, setCameraColorMatrix } from './ops';
+import { setGrainSeed } from './grain';
 import { WB_NEUTRAL_KELVIN } from './uniforms';
 import { TONE_LUT_SIZE } from './tone';
 import { buildBwToneLut } from './bw';
 import type { Op } from '../catalog/types';
 
 const NEUTRAL_TONE = { kind: 'tone', contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0 } as const;
-// Registry order: [whiteBalance, profile, exposure, tone, bw, toneCurve, presence, vignette].
+// Registry order: [whiteBalance, profile, exposure, tone, bw, toneCurve, presence, vignette, grain].
 // Three passes are mandatory -- they always run even with no ops (fresh open):
 // whiteBalance (As-Shot fallback), profile (camera matrix), and tone (neutral
 // tone now renders the ACR baseline curve -- the LrC import look, see tone.ts).
@@ -27,6 +28,7 @@ describe('presentOpIndices', () => {
     expect(presentOpIndices([{ kind: 'toneCurve', mode: 'point', points: [0, 0, 0.5, 0.6, 1, 1] }])).toEqual([0, 1, 3, 5]);
     expect(presentOpIndices([{ kind: 'vignette', amount: -50, midpoint: 50, roundness: 0, feather: 50, highlights: 0 }])).toEqual([0, 1, 3, 7]);
     expect(presentOpIndices([{ kind: 'bw', mix: [0, 0, 0, 0, 0, 0, 0, 0], tone: 'acros' }])).toEqual([0, 1, 3, 4]);
+    expect(presentOpIndices([{ kind: 'grain', amount: 40, size: 25, roughness: 50 }])).toEqual([0, 1, 3, 8]);
   });
 
   it('reports all present ops in registry order, independent of Op[] order', () => {
@@ -196,6 +198,17 @@ describe('OP_RENDERERS packParams', () => {
     expect(acros[1]).toBe(100);
     expect(acros[8]).toBe(1); // 'acros' id
     expect(Array.from(acros.subarray(12))).toEqual(Array.from(buildBwToneLut('acros')));
+  });
+
+  it('grain packs amount/size/roughness + the current photo seed; absent op is neutral', () => {
+    const grain = OP_RENDERERS[8];
+    expect(grain.kind).toBe('grain');
+    setGrainSeed(0.5);
+    const absent = grain.packParams([]);
+    expect(Array.from(absent)).toEqual([0, 25, 50, 0.5, 0, 0, 0, 0]);
+    setGrainSeed(0.25);
+    const strong = grain.packParams([{ kind: 'grain', amount: 60, size: 40, roughness: 80 }]);
+    expect(Array.from(strong)).toEqual([60, 40, 80, 0.25, 0, 0, 0, 0]);
   });
 
   it('toneCurve packs a LUT, identity when absent or linear', () => {

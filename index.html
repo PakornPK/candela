@@ -986,6 +986,13 @@
           </details>
           <details class="panel-section">
             <summary>Effects</summary>
+            <div class="group-label">Grain</div>
+            <label class="slider-label" for="grain-amount">Amount <output id="grain-amount-value" for="grain-amount">0</output></label>
+            <input type="range" id="grain-amount" min="0" max="100" step="1" value="0" />
+            <label class="slider-label" for="grain-size">Size <output id="grain-size-value" for="grain-size">25</output></label>
+            <input type="range" id="grain-size" min="0" max="100" step="1" value="25" />
+            <label class="slider-label" for="grain-roughness">Roughness <output id="grain-roughness-value" for="grain-roughness">50</output></label>
+            <input type="range" id="grain-roughness" min="0" max="100" step="1" value="50" />
             <div class="group-label">Post-Crop Vignetting</div>
             <label class="slider-label" for="vignette-amount">Amount <output id="vignette-amount-value" for="vignette-amount">0</output></label>
             <input type="range" id="vignette-amount" min="-100" max="100" step="1" value="0" />

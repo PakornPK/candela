@@ -77,6 +77,7 @@ export type Op =
   | ToneCurveOp
   | { kind: 'presence'; texture: number; clarity: number; dehaze: number; vibrance: number; saturation: number }
   | { kind: 'vignette'; amount: number; midpoint: number; roundness: number; feather: number; highlights: number }
+  | { kind: 'grain'; amount: number; size: number; roughness: number }
   | { kind: 'bw'; mix: BwMix; tone: BwToneId };
   // future op kinds (crop, ...) extend this union.
 
@@ -114,6 +115,10 @@ export function isVignetteOp(
 
 export function isBwOp(op: Op): op is { kind: 'bw'; mix: BwMix; tone: BwToneId } {
   return op.kind === 'bw';
+}
+
+export function isGrainOp(op: Op): op is { kind: 'grain'; amount: number; size: number; roughness: number } {
+  return op.kind === 'grain';
 }
 
 export interface EditState {

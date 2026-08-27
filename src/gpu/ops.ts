@@ -5,12 +5,14 @@ import tonecurveShader from '../shaders/tonecurve.wgsl?raw';
 import cameraColorShader from '../shaders/cameraColor.wgsl?raw';
 import presenceShader from '../shaders/presence.wgsl?raw';
 import vignetteShader from '../shaders/vignette.wgsl?raw';
+import grainShader from '../shaders/grain.wgsl?raw';
 import bwShader from '../shaders/bw.wgsl?raw';
 import { evToGain, kelvinToShift, packColorMatrix, wbShiftToGains, type WhiteBalanceGains } from './uniforms';
 import { buildParametricToneLut, buildToneCurveLut, buildToneLuts, TONE_LUT_SIZE, type ToneParams, type ToneLook } from './tone';
-import { isPresenceOp, isBwOp, isExposureOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type WbGains } from '../catalog/types';
+import { isPresenceOp, isBwOp, isExposureOp, isGrainOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type WbGains } from '../catalog/types';
 import { packPresence, type PresenceParams } from './presence';
 import { packVignette, type VignetteParams } from './vignette';
+import { packGrain, getGrainSeed, type GrainParams } from './grain';
 import { packBw } from './bw';
 import { FILM_STOCKS, isFilmStockId } from './film';
 import type { FilmStock } from './film';
@@ -193,8 +195,8 @@ export const OP_RENDERERS: OpRenderer[] = [
   },
   {
     kind: 'vignette',
-    // LAST -- a display-level effect (LrC's Effects panel applies it after
-    // the color/tone chain). Absent op packs the neutral defaults (amount 0,
+    // LAST-but-one -- a display-level effect (LrC's Effects panel applies it
+    // after the color/tone chain). Absent op packs the neutral defaults (amount 0,
     // midpoint/feather 50) so a no-op pass renders as identity.
     shader: vignetteShader,
     uniformSize: 32, // struct Vignette { 5 f32 + 3 pad }
@@ -202,6 +204,20 @@ export const OP_RENDERERS: OpRenderer[] = [
       const op = ops.find(isVignetteOp);
       const p: VignetteParams = op ?? { amount: 0, midpoint: 50, roundness: 0, feather: 50, highlights: 0 };
       return packVignette(p);
+    },
+  },
+  {
+    kind: 'grain',
+    // LAST -- LrC's Effects panel applies grain on top of the vignette.
+    // Display-referred seeded luminance noise, seeded per-photo so the pattern
+    // is deterministic. Absent op packs the neutral defaults (amount 0) so a
+    // no-op pass renders as identity.
+    shader: grainShader,
+    uniformSize: 32, // struct Grain { 4 f32 + 4 pad }
+    packParams: (ops) => {
+      const op = ops.find(isGrainOp);
+      const p: GrainParams = op ?? { amount: 0, size: 25, roughness: 50 };
+      return packGrain(p, getGrainSeed());
     },
   },
 ];
