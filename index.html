@@ -921,44 +921,6 @@
           <div id="camera-info" class="camera-info"></div>
           <canvas id="histogram" width="256" height="110"></canvas>
           <details class="panel-section" open>
-            <summary>Transform</summary>
-            <label class="slider-label" for="geometry-vertical">Vertical <output id="geometry-vertical-value" for="geometry-vertical">0</output></label>
-            <input type="range" id="geometry-vertical" min="-100" max="100" step="1" value="0" />
-            <label class="slider-label" for="geometry-horizontal">Horizontal <output id="geometry-horizontal-value" for="geometry-horizontal">0</output></label>
-            <input type="range" id="geometry-horizontal" min="-100" max="100" step="1" value="0" />
-            <label class="slider-label" for="geometry-rotate">Rotate <output id="geometry-rotate-value" for="geometry-rotate">0</output></label>
-            <input type="range" id="geometry-rotate" min="-45" max="45" step="0.1" value="0" />
-            <label class="slider-label" for="geometry-aspect">Aspect <output id="geometry-aspect-value" for="geometry-aspect">0</output></label>
-            <input type="range" id="geometry-aspect" min="-100" max="100" step="1" value="0" />
-            <label class="slider-label" for="geometry-scale">Scale <output id="geometry-scale-value" for="geometry-scale">100</output></label>
-            <input type="range" id="geometry-scale" min="0" max="200" step="1" value="100" />
-            <label class="slider-label" for="geometry-offsetx">Offset X <output id="geometry-offsetx-value" for="geometry-offsetx">0</output></label>
-            <input type="range" id="geometry-offsetx" min="-100" max="100" step="1" value="0" />
-            <label class="slider-label" for="geometry-offsety">Offset Y <output id="geometry-offsety-value" for="geometry-offsety">0</output></label>
-            <input type="range" id="geometry-offsety" min="-100" max="100" step="1" value="0" />
-          </details>
-          <details class="panel-section" open>
-            <summary>Crop</summary>
-            <label class="adjust-label" for="crop-aspect">Aspect
-              <select id="crop-aspect">
-                <option value="original" selected>Original</option>
-                <option value="1:1">1:1</option>
-                <option value="3:2">3:2</option>
-                <option value="4:3">4:3</option>
-                <option value="5:4">5:4</option>
-                <option value="16:9">16:9</option>
-                <option value="2:3">2:3</option>
-                <option value="4:5">4:5</option>
-              </select>
-            </label>
-            <div class="crop-rotate-row">
-              <button id="rotate-ccw">⟲ 90°</button>
-              <button id="rotate-cw">⟳ 90°</button>
-            </div>
-            <label class="slider-label" for="straighten">Straighten <output id="straighten-value" for="straighten">0.0°</output></label>
-            <input type="range" id="straighten" min="-45" max="45" step="0.1" value="0" />
-          </details>
-          <details class="panel-section" open>
             <summary>Profile</summary>
             <select id="profile">
               <!-- Camera + Neutral + every film stock, built from the FILM_STOCKS
@@ -1128,6 +1090,44 @@
             <input type="range" id="dodge-size" min="1" max="100" step="1" value="20" />
             <label class="slider-label" for="dodge-opacity">Opacity <output id="dodge-opacity-value" for="dodge-opacity">50</output></label>
             <input type="range" id="dodge-opacity" min="1" max="100" step="1" value="50" />
+          </details>
+          <details class="panel-section" open>
+            <summary>Transform</summary>
+            <label class="slider-label" for="geometry-vertical">Vertical <output id="geometry-vertical-value" for="geometry-vertical">0</output></label>
+            <input type="range" id="geometry-vertical" min="-100" max="100" step="1" value="0" />
+            <label class="slider-label" for="geometry-horizontal">Horizontal <output id="geometry-horizontal-value" for="geometry-horizontal">0</output></label>
+            <input type="range" id="geometry-horizontal" min="-100" max="100" step="1" value="0" />
+            <label class="slider-label" for="geometry-rotate">Rotate <output id="geometry-rotate-value" for="geometry-rotate">0</output></label>
+            <input type="range" id="geometry-rotate" min="-45" max="45" step="0.1" value="0" />
+            <label class="slider-label" for="geometry-aspect">Aspect <output id="geometry-aspect-value" for="geometry-aspect">0</output></label>
+            <input type="range" id="geometry-aspect" min="-100" max="100" step="1" value="0" />
+            <label class="slider-label" for="geometry-scale">Scale <output id="geometry-scale-value" for="geometry-scale">100</output></label>
+            <input type="range" id="geometry-scale" min="0" max="200" step="1" value="100" />
+            <label class="slider-label" for="geometry-offsetx">Offset X <output id="geometry-offsetx-value" for="geometry-offsetx">0</output></label>
+            <input type="range" id="geometry-offsetx" min="-100" max="100" step="1" value="0" />
+            <label class="slider-label" for="geometry-offsety">Offset Y <output id="geometry-offsety-value" for="geometry-offsety">0</output></label>
+            <input type="range" id="geometry-offsety" min="-100" max="100" step="1" value="0" />
+          </details>
+          <details class="panel-section" open>
+            <summary>Crop</summary>
+            <label class="adjust-label" for="crop-aspect">Aspect
+              <select id="crop-aspect">
+                <option value="original" selected>Original</option>
+                <option value="1:1">1:1</option>
+                <option value="3:2">3:2</option>
+                <option value="4:3">4:3</option>
+                <option value="5:4">5:4</option>
+                <option value="16:9">16:9</option>
+                <option value="2:3">2:3</option>
+                <option value="4:5">4:5</option>
+              </select>
+            </label>
+            <div class="crop-rotate-row">
+              <button id="rotate-ccw">⟲ 90°</button>
+              <button id="rotate-cw">⟳ 90°</button>
+            </div>
+            <label class="slider-label" for="straighten">Straighten <output id="straighten-value" for="straighten">0.0°</output></label>
+            <input type="range" id="straighten" min="-45" max="45" step="0.1" value="0" />
           </details>
           <details class="panel-section">
             <summary>Export</summary>
