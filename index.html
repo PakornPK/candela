@@ -751,6 +751,25 @@
       #beforeafter-btn.active, #beforeafter-btn:hover {
         border-color: var(--accent);
       }
+      .beforeafter-labels {
+        position: absolute;
+        inset: 0;
+        pointer-events: none;
+        z-index: 2;
+      }
+      .ba-label {
+        position: absolute;
+        top: 10px;
+        padding: 2px 8px;
+        font-size: 11px;
+        letter-spacing: 1px;
+        color: #fff;
+        background: rgba(0, 0, 0, 0.55);
+        border-radius: 3px;
+        text-transform: uppercase;
+      }
+      .ba-before { left: 10px; }
+      .ba-after { right: 10px; }
 
       .library-footer {
         display: flex;
@@ -861,6 +880,10 @@
         </aside>
         <main class="content">
           <canvas id="canvas"></canvas>
+          <div id="beforeafter-labels" class="beforeafter-labels" hidden>
+            <span class="ba-label ba-before">Before</span>
+            <span class="ba-label ba-after">After</span>
+          </div>
         </main>
         <aside class="panel right">
           <div id="camera-info" class="camera-info"></div>
