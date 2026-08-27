@@ -49,6 +49,34 @@ describe('grain', () => {
     }
   });
 
+  it('is a multiplicative density mask — a single grain particle never brightens a mid-tone >25%', () => {
+    // Film sim + grain glows (메듦 glowing specks): the old additive display-space
+    // model could push one pixel to +59% (1σ) / +139% (2σ) linear at mid-gray
+    // (d=0.5, damp=1.0). Film grain modulates density (log-symmetric), so the
+    // worst single-particle brightening must stay a small multiplier.
+    const p = MID; // amount 100, roughness 50
+    const lum = 0.214; // d~0.5, damp~1.0 = strongest grain zone
+    let worstRatio = 0;
+    for (let y = 0; y < 64; y++) {
+      for (let x = 0; x < 64; x++) {
+        worstRatio = Math.max(worstRatio, grainResponse(lum, p, 0.5, x, y) / lum);
+      }
+    }
+    expect(worstRatio).toBeLessThan(1.25);
+  });
+
+  it('never produces a pure-white speck, even at roughness 100 near highlights', () => {
+    // The old model clamped d2 to 1.0 on gaussian-tail pixels at bright tones
+    // (d~0.93), leaving isolated white dots on a film-sim look.
+    const p = { amount: 100, size: 25, roughness: 100 } satisfies GrainParams;
+    const lum = 0.848; // d~0.93, damp~0.26
+    for (let y = 0; y < 256; y++) {
+      for (let x = 0; x < 256; x++) {
+        expect(grainResponse(lum, p, 0.5, x, y)).toBeLessThan(1.0);
+      }
+    }
+  });
+
   it('seeds from the file path: stable per path, distinct between paths', () => {
     expect(seedFromPath('day1/img001.raf')).toBe(seedFromPath('day1/img001.raf'));
     expect(seedFromPath('day1/img001.raf')).not.toBe(seedFromPath('day1/img002.raf'));

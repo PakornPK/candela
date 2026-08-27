@@ -9,11 +9,12 @@
 //   - noise = mix(coarse value-noise clumps, fine per-pixel gaussian, roughness)
 //     `size` sets the value-noise cell size (grain particle scale), `roughness`
 //     blends between smooth clumps and sharp speckle.
-//   - The noise is added to the sRGB-encoded luma, gated by a mid-gray damp
-//     `max(4d(1-d), 0)` -- film grain is strongest mid-tone, invisible in the
-//     compressed shadows and blown highlights.
-//   - The noised display luma is un-encoded and the LINEAR color is scaled by
-//     the luma ratio, so grain is monochrome and chroma is preserved.
+//   - The noise is a multiplicative MASK on the linear color -- exp2(noise*A*damp),
+//     log-symmetric like real film density (no brightening bias, no white-clip),
+//     gated by a mid-gray damp `max(4d(1-d), 0)` (strongest mid-tone, invisible
+//     in crushed shadows and blown highlights). Tail capped at 2 sigma so a
+//     single gaussian-tail pixel can't light up as a glowing speck.
+//   - Monochrome: RGB scaled together by the mask, chroma preserved.
 //   - Per-image seed (from the file path) keeps the pattern stable across
 //     frames and different between photos -- stateless in the shader, so it's
 //     deterministic across GPUs.
@@ -125,17 +126,20 @@ export function grainNoise(x: number, y: number, p: GrainParams, seed: number): 
   return mix01(coarse * 0.5, fine * 0.7, clamp01(p.roughness / 100));
 }
 
-// The full response: LINEAR luma in -> LINEAR luma out, noised in the display
-// domain and gated to the mid-tones (the shader's exact path, sans clamp on
-// the final [0,1] -- d2 here stays in range for the test values). `seed` is
-// the [0,1) uniform value, converted to the u32 key like the shader does.
+// The full response: LINEAR luma in -> LINEAR luma out. Density-domain grain
+// (log-symmetric, like real film density): the zero-mean noise is a
+// multiplicative MASK exp2(noise*A*damp) on the linear value, gated to the
+// mid-tones by damp, tail capped at 2 sigma so an isolated particle can't
+// light up as a glowing speck on a film-sim look. `seed` is the [0,1) uniform
+// value, converted to the u32 key like the shader does.
 export function grainResponse(lum: number, p: GrainParams, seed: number, x: number, y: number): number {
   if (p.amount === 0) return lum;
   const s = seedU32(seed);
   const A = clamp01(p.amount / 100) * 0.12;
   const d = linearToSrgb(lum);
   const damp = Math.max(4 * d * (1 - d), 0);
-  return srgbToLinear(d + grainNoise(x, y, p, s) * A * damp);
+  const noise = Math.min(Math.max(grainNoise(x, y, p, s), -2), 2);
+  return lum * 2 ** (noise * A * damp);
 }
 
 // ---- helpers shared with the shader -----------------------------------------
@@ -143,10 +147,6 @@ export function grainResponse(lum: number, p: GrainParams, seed: number, x: numb
 export function linearToSrgb(x: number): number {
   const c = Math.max(x, 0);
   return c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055;
-}
-
-function srgbToLinear(v: number): number {
-  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
 }
 
 function mix01(a: number, b: number, t: number): number {

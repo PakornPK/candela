@@ -8,11 +8,13 @@
 //     static on a still image too.
 //   - noise = mix(coarse value-noise, fine gaussian, roughness). `size` sets
 //     the value-noise cell in px (1..24), `roughness` blends smooth clumps to
-//     sharp per-pixel speckle. Zero-mean, so the mean brightness survives.
-//   - Applied to the sRGB-encoded luma, damped by max(4d(1-d), 0) -- strongest
-//     mid-gray, invisible in crushed shadows and blown highlights (film
-//     behavior). The noised luma is un-encoded and the linear color scaled by
-//     the ratio: monochrome grain, chroma preserved.
+//     sharp per-pixel speckle. Zero-mean, so the mean brightness survives. The
+//     combined field is capped at 2 sigma -- a gaussian-tail pixel must not
+//     light up as an isolated glowing speck.
+//   - The noise is a multiplicative MASK on the linear color -- exp2(noise*A*damp),
+//     log-symmetric like real film density (no brightening bias, no white-clip),
+//     gated by a mid-gray damp max(4d(1-d), 0) (strongest mid-tone, invisible
+//     in crushed shadows and blown highlights). Monochrome, chroma preserved.
 //
 // ponytail: value-noise grain approximates LrC's real film-grain samples --
 // recalibrate strength / cell scale against screenshots if the user flags it.
@@ -75,10 +77,6 @@ fn linearToSrgb(x: f32) -> f32 {
   return select(1.055 * pow(c, 1.0 / 2.4) - 0.055, 12.92 * c, c <= 0.0031308);
 }
 
-fn srgbToLinear(x: f32) -> f32 {
-  return select(12.92 * x, pow((x + 0.055) / 1.055, 2.4), x > 0.04045);
-}
-
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let dims = textureDimensions(inTex);
@@ -90,20 +88,23 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   // and makes the conversion undefined. 24 bits of seed = 16M patterns, plenty.
   let seedU = u32(p.seed * 16777215.0);
 
-  // Combined noise field (zero-mean).
+  // Combined noise field (zero-mean). Tail capped at 2 sigma: a gaussian-tail
+  // pixel must not light up as an isolated glowing speck.
   let sizePx = 1.0 + 23.0 * clamp(p.size * 0.01, 0.0, 1.0);
   let coarse = valueNoise(f32(id.x) / sizePx, f32(id.y) / sizePx, seedU) * 2.0 - 1.0;
   let fine = gauss(id.x, id.y, seedU);
   let roughN = clamp(p.roughness * 0.01, 0.0, 1.0);
-  let noise = mix(coarse * 0.5, fine * 0.7, roughN);
+  let noise = clamp(mix(coarse * 0.5, fine * 0.7, roughN), -2.0, 2.0);
 
-  // Display-domain additive, mid-tone damped, then luma-ratio back to linear.
+  // Density-domain grain (log-symmetric, like real film density): the noise is
+  // a multiplicative MASK on the linear color, exp2(noise*A*damp), gated to the
+  // mid-tones by damp. Not an additive display offset -- no brightening bias,
+  // no white-clip by construction, monochrome (RGB scaled together), chroma
+  // preserved.
   let A = clamp(p.amount * 0.01, 0.0, 1.0) * 0.12;
   let d = linearToSrgb(lum);
   let damp = max(4.0 * d * (1.0 - d), 0.0);
-  let d2 = clamp(d + noise * A * damp, 0.0, 1.0);
-  let lum2 = srgbToLinear(d2);
-  let ratio = select(1.0, lum2 / lum, lum > 1e-6);
+  let ratio = exp2(noise * A * damp);
 
   textureStore(outTex, vec2<i32>(id.xy), vec4<f32>(c.rgb * ratio, 1.0));
 }
