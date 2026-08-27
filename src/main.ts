@@ -171,6 +171,7 @@ const exportButton = document.querySelector<HTMLButtonElement>('#export-btn')!;
 const exportFormat = document.querySelector<HTMLSelectElement>('#export-format')!;
 const exportBitDepth = document.querySelector<HTMLSelectElement>('#export-bitdepth')!;
 const exportSize = document.querySelector<HTMLSelectElement>('#export-size')!;
+const exportPreset = document.querySelector<HTMLSelectElement>('#export-preset')!;
 const resetButton = document.querySelector<HTMLButtonElement>('#reset-btn')!;
 const beforeAfterBtn = document.querySelector<HTMLButtonElement>('#beforeafter-btn')!;
 const presetSaveButton = document.querySelector<HTMLButtonElement>('#preset-save')!;
@@ -1700,15 +1701,37 @@ async function init(): Promise<void> {
   // Export current Develop state -> JPEG/PNG download. The one allowed
   // GPU->CPU readback. A preview (HE*/undecodable file) can't be exported --
   // there's no full-res image behind it, only the embedded JPEG.
-  // JPEG is 8-bit only (LrC disables 16-bit for it too) -- force + gray the
-  // bit-depth control when the format switches to JPEG.
-  const syncExportBitDepth = () => {
-    const isJpeg = exportFormat.value === 'jpeg';
-    if (isJpeg) exportBitDepth.value = '8';
-    exportBitDepth.disabled = isJpeg;
+  // Social presets are format/bit/long-edge combos (LrC publish services);
+  // they don't force a crop aspect -- the user's own crop stands, IG accepts
+  // any aspect within the 1080px limit. Selecting one locks the controls;
+  // tweaking any of them drops back to Custom.
+  // ponytail: no aspect-crop presets (IG story 1080x1920) -- long-edge only.
+  const EXPORT_PRESETS: Record<string, { format: string; bitDepth: string; size: string }> = {
+    instagram: { format: 'jpeg', bitDepth: '8', size: '1080' },
+    facebook: { format: 'jpeg', bitDepth: '8', size: '2048' },
   };
-  exportFormat.addEventListener('change', syncExportBitDepth);
-  syncExportBitDepth();
+  const applyExportPreset = () => {
+    const p = EXPORT_PRESETS[exportPreset.value];
+    if (p) {
+      exportFormat.value = p.format;
+      exportBitDepth.value = p.bitDepth;
+      exportSize.value = p.size;
+    }
+    const custom = !p;
+    // JPEG is 8-bit only (LrC disables 16-bit for it too).
+    const isJpeg = exportFormat.value === 'jpeg';
+    exportFormat.disabled = !custom;
+    exportBitDepth.disabled = !custom || isJpeg;
+    exportSize.disabled = !custom;
+  };
+  exportPreset.addEventListener('change', applyExportPreset);
+  for (const sel of [exportFormat, exportBitDepth, exportSize]) {
+    sel.addEventListener('change', () => {
+      if (exportPreset.value !== 'custom') exportPreset.value = 'custom';
+      applyExportPreset();
+    });
+  }
+  applyExportPreset();
 
   exportButton.addEventListener('click', async () => {
     if (currentFileId === null) return;
