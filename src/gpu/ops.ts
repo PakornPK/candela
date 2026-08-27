@@ -11,9 +11,10 @@ import frameShader from '../shaders/frame.wgsl?raw';
 import bwShader from '../shaders/bw.wgsl?raw';
 import cropShader from '../shaders/crop.wgsl?raw';
 import geometryShader from '../shaders/geometry.wgsl?raw';
+import dodgeBurnShader from '../shaders/dodge.wgsl?raw';
 import { evToGain, kelvinToShift, packColorMatrix, wbShiftToGains, type WhiteBalanceGains } from './uniforms';
 import { buildParametricToneLut, buildToneCurveLut, buildToneLuts, TONE_LUT_SIZE, type ToneParams, type ToneLook } from './tone';
-import { isPresenceOp, isBwOp, isCropOp, isExposureOp, isFrameOp, isGeometryOp, isGrainOp, isLightleakOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type WbGains } from '../catalog/types';
+import { isPresenceOp, isBwOp, isCropOp, isDodgeBurnOp, isExposureOp, isFrameOp, isGeometryOp, isGrainOp, isLightleakOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type WbGains } from '../catalog/types';
 import { packPresence, type PresenceParams } from './presence';
 import { packVignette, type VignetteParams } from './vignette';
 import { packGrain, getGrainSeed, type GrainParams } from './grain';
@@ -22,6 +23,7 @@ import { packFrame } from './frame';
 import { packBw } from './bw';
 import { cropFracFromOps, packCrop, type CropParams } from './crop';
 import { packGeometry, type GeometryParams } from './geometry';
+import { packDodgeBurn, type DodgeBurnParams } from './dodge';
 import { FILM_STOCKS, isFilmStockId } from './film';
 import type { FilmStock } from './film';
 
@@ -267,6 +269,23 @@ export const OP_RENDERERS: OpRenderer[] = [
       const op = ops.find(isVignetteOp);
       const p: VignetteParams = op ?? { amount: 0, midpoint: 50, roundness: 0, feather: 50, highlights: 0 };
       return packVignette(p, cropFracFromOps(ops, imageSize[0], imageSize[1]));
+    },
+  },
+  {
+    kind: 'dodgeBurn',
+    // Local exposure: the painted signed mask (dodge.wgsl binding 3/4) scales
+    // each pixel by exp2(ev*density). Runs AFTER crop/vignette so the mask is
+    // display-space (painted on what the user sees) and BEFORE grain/frame.
+    // The pipeline uploads the mask texture separately (setDodgeMask) and
+    // adds the extra bindings in dispatchOps -- the uniform here only carries
+    // the strength. Absent op packs the neutral defaults (amount 0) so a
+    // no-op pass renders as identity.
+    shader: dodgeBurnShader,
+    uniformSize: 16, // struct DodgeBurn { ev + 3 pad }
+    packParams: (ops) => {
+      const op = ops.find(isDodgeBurnOp);
+      const p: DodgeBurnParams = op ?? { amount: 0, size: 20, opacity: 50 };
+      return packDodgeBurn(p);
     },
   },
   {

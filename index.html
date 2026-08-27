@@ -435,6 +435,30 @@
       .crop-rotate-row button:hover {
         background: #2f2f34;
       }
+      .brush-row {
+        display: flex;
+        gap: 6px;
+        margin: 6px 0;
+      }
+      .brush-row button {
+        flex: 1;
+        background: none;
+        border: 1px solid var(--panel-border);
+        color: var(--text);
+        border-radius: 4px;
+        padding: 3px 8px;
+        cursor: pointer;
+        font: inherit;
+        font-size: 12px;
+      }
+      .brush-row button:hover {
+        background: #2f2f34;
+      }
+      .brush-row button.active {
+        background: var(--accent);
+        color: #111;
+        border-color: var(--accent);
+      }
       #preset-list {
         display: flex;
         flex-direction: column;
@@ -1078,6 +1102,25 @@
             <input type="range" id="vignette-feather" min="0" max="100" step="1" value="50" />
             <label class="slider-label" for="vignette-highlights">Highlights <output id="vignette-highlights-value" for="vignette-highlights">0</output></label>
             <input type="range" id="vignette-highlights" min="0" max="100" step="1" value="0" />
+          </details>
+          <details class="panel-section" id="dodge-section">
+            <summary>Dodge &amp; Burn</summary>
+            <div class="brush-row">
+              <button id="dodge-brush" type="button">Brush</button>
+              <button id="dodge-clear" type="button">Clear mask</button>
+            </div>
+            <label class="adjust-label">Mode
+              <select id="dodge-mode">
+                <option value="dodge" selected>Dodge</option>
+                <option value="burn">Burn</option>
+              </select>
+            </label>
+            <label class="slider-label" for="dodge-amount">Amount <output id="dodge-amount-value" for="dodge-amount">0</output></label>
+            <input type="range" id="dodge-amount" min="0" max="100" step="1" value="0" />
+            <label class="slider-label" for="dodge-size">Size <output id="dodge-size-value" for="dodge-size">20</output></label>
+            <input type="range" id="dodge-size" min="1" max="100" step="1" value="20" />
+            <label class="slider-label" for="dodge-opacity">Opacity <output id="dodge-opacity-value" for="dodge-opacity">50</output></label>
+            <input type="range" id="dodge-opacity" min="1" max="100" step="1" value="50" />
           </details>
           <details class="panel-section">
             <summary>Export</summary>

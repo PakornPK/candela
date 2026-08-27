@@ -125,6 +125,19 @@ export function isValidOp(op: unknown): op is Op {
     const g = op as { vertical?: unknown; horizontal?: unknown; rotate?: unknown; aspect?: unknown; scale?: unknown; offsetX?: unknown; offsetY?: unknown };
     return [g.vertical, g.horizontal, g.rotate, g.aspect, g.scale, g.offsetX, g.offsetY].every((v) => typeof v === 'number');
   }
+  if (candidate.kind === 'dodgeBurn') {
+    const d = op as { amount?: unknown; size?: unknown; opacity?: unknown; mask?: unknown; maskW?: unknown; maskH?: unknown };
+    return (
+      typeof d.amount === 'number' &&
+      typeof d.size === 'number' &&
+      typeof d.opacity === 'number' &&
+      d.mask instanceof Int8Array &&
+      d.mask.length > 0 &&
+      Number.isInteger(d.maskW) && (d.maskW as number) > 0 &&
+      Number.isInteger(d.maskH) && (d.maskH as number) > 0 &&
+      d.mask.length === (d.maskW as number) * (d.maskH as number)
+    );
+  }
   return false;
 }
 

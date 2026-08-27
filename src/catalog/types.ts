@@ -89,7 +89,16 @@ export type Op =
   | { kind: 'crop'; aspect: AspectPreset; rotate90: number; angle: number }
   | { kind: 'frame'; style: FrameStyle }
   | { kind: 'bw'; mix: BwMix; tone: BwToneId }
-  | { kind: 'geometry'; vertical: number; horizontal: number; rotate: number; aspect: number; scale: number; offsetX: number; offsetY: number };
+  | { kind: 'geometry'; vertical: number; horizontal: number; rotate: number; aspect: number; scale: number; offsetX: number; offsetY: number }
+  | {
+      kind: 'dodgeBurn';
+      amount: number;    // 0..100 brush strength magnitude -> 0..4 EV
+      size: number;      // 1..100 brush radius % (UI restore)
+      opacity: number;   // 1..100 stroke opacity (UI restore)
+      mask: Int8Array;   // signed density, maskW*maskH, /127 (see gpu/dodge.ts)
+      maskW: number;
+      maskH: number;
+    };
   // future op kinds (dodgeBurn, ...) extend this union.
 
 export function isProfileOp(op: Op): op is { kind: 'profile'; profile: ProfileKind } {
@@ -148,6 +157,12 @@ export function isGeometryOp(
   op: Op,
 ): op is { kind: 'geometry'; vertical: number; horizontal: number; rotate: number; aspect: number; scale: number; offsetX: number; offsetY: number } {
   return op.kind === 'geometry';
+}
+
+export function isDodgeBurnOp(
+  op: Op,
+): op is { kind: 'dodgeBurn'; amount: number; size: number; opacity: number; mask: Int8Array; maskW: number; maskH: number } {
+  return op.kind === 'dodgeBurn';
 }
 
 export interface EditState {

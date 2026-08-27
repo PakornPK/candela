@@ -5,6 +5,7 @@ import export16Shader from '../shaders/export16.wgsl?raw';
 import { packCfa6, shiftCfa6 } from './uniforms';
 import { OP_RENDERERS, presentOpIndices, setAsShotGains, setCameraColorMatrix, setCameraXyz, setImageSize } from './ops';
 import { cropFracFromOps } from './crop';
+import { maskDims } from './dodge';
 import { encodePng16, encodeTiff16 } from './exportEncode';
 import type { Op } from '../catalog/types';
 import type { DecodedRaw } from '../raw/decode';
@@ -67,6 +68,16 @@ export class Pipeline {
   private readonly histogramReadBuffer: GPUBuffer;
   private histogramInFlight = false;
   private histogramListener: ((data: Uint8Array) => void) | null = null;
+
+  // Dodge & Burn brush mask: a capped-resolution r8unorm texture (128 =
+  // neutral) sampled by dodge.wgsl at the output's fractional uv. The mask is
+  // display-space and dims are proportional to the loaded image (see dodge.ts
+  // maskDims), so the same uv lands on the same content in both textures.
+  // Uploaded via setDodgeMask whenever the CPU-side paint mask changes (the
+  // single GPU->CPU readback rule: the mask is CPU-authoritative, GPU is a
+  // render-only copy).
+  private dodgeMaskTexture: GPUTexture | null = null;
+  private readonly dodgeMaskSampler: GPUSampler;
 
   private constructor(
     private readonly device: GPUDevice,
@@ -134,6 +145,7 @@ export class Pipeline {
       size: 512 * 256 * 4,
       usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
     });
+    this.dodgeMaskSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
   }
 
   static async create(canvas: HTMLCanvasElement): Promise<Pipeline> {
@@ -182,6 +194,8 @@ export class Pipeline {
     this.demosaicedTexture?.destroy();
     this.opA?.destroy();
     this.opB?.destroy();
+    this.dodgeMaskTexture?.destroy();
+    this.dodgeMaskTexture = null;
     this.displayTexture = null;
 
     // Crop the raw buffer to the effective (sensor-cropped) image area. LibRaw's
@@ -229,6 +243,18 @@ export class Pipeline {
     const workUsage = GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC;
     this.opA = this.device.createTexture({ size, format: 'rgba16float', usage: workUsage });
     this.opB = this.device.createTexture({ size, format: 'rgba16float', usage: workUsage });
+
+    // The dodge/burn mask texture is created (empty) per file so its dims track
+    // the loaded image; main.ts uploads the painted bytes via setDodgeMask.
+    // The neutral fill is 128 (density 0) -- byte 0 would sample to density -1
+    // (full burn).
+    const [maskW, maskH] = maskDims(effW, effH);
+    this.dodgeMaskTexture = this.device.createTexture({
+      size: [maskW, maskH],
+      format: 'r8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    this.setDodgeMask(new Uint8Array(maskW * maskH).fill(128));
 
     this.device.queue.writeBuffer(this.levelsBuffer, 0, new Float32Array([raw.blackLevel, raw.whiteLevel, 0, 0]));
     this.device.queue.writeBuffer(this.cfaBuffer, 0, packCfa6(shiftCfa6(raw.cfa6, cropLeft, cropTop)));
@@ -312,13 +338,22 @@ export class Pipeline {
       const target = i % 2 === 0 ? this.opA! : this.opB!;
       const renderer = OP_RENDERERS[index];
       this.device.queue.writeBuffer(this.opUniformBuffers[index], 0, renderer.packParams(ops));
+      const entries: GPUBindGroupEntry[] = [
+        { binding: 0, resource: source.createView() },
+        { binding: 1, resource: target.createView() },
+        { binding: 2, resource: { buffer: this.opUniformBuffers[index] } },
+      ];
+      // Dodge & Burn carries two extra bindings: the painted mask texture and
+      // its linear sampler (dodge.wgsl binding 3/4).
+      if (renderer.kind === 'dodgeBurn') {
+        entries.push(
+          { binding: 3, resource: this.dodgeMaskTexture!.createView() },
+          { binding: 4, resource: this.dodgeMaskSampler },
+        );
+      }
       const bindGroup = this.device.createBindGroup({
         layout: this.opPipelines[index].getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: source.createView() },
-          { binding: 1, resource: target.createView() },
-          { binding: 2, resource: { buffer: this.opUniformBuffers[index] } },
-        ],
+        entries,
       });
       const pass = encoder.beginComputePass();
       pass.setPipeline(this.opPipelines[index]);
@@ -413,6 +448,32 @@ export class Pipeline {
 
     this.device.queue.submit([encoder.finish()]);
     if (wantHistogram) void this.readHistogram();
+  }
+
+  // Uploads the dodge/burn brush mask (128-neutral display bytes, see
+  // dodge.ts maskToBytes) into the GPU mask texture. Called by main.ts when
+  // the CPU-side paint mask changes (each stroke + after a restore), before
+  // the next render/export. writeTexture requires 256-aligned row strides, so
+  // the unpadded bytes are copied into padded rows first.
+  setDodgeMask(bytes: Uint8Array): void {
+    if (!this.dodgeMaskTexture) return;
+    const w = this.dodgeMaskTexture.width;
+    const h = this.dodgeMaskTexture.height;
+    if (bytes.length !== w * h) return;
+    const bytesPerRow = Math.ceil(w / 256) * 256;
+    const padded = bytesPerRow === w ? bytes : (() => {
+      const out = new Uint8Array(bytesPerRow * h);
+      for (let y = 0; y < h; y++) {
+        out.set(bytes.subarray(y * w, y * w + w), y * bytesPerRow);
+      }
+      return out;
+    })();
+    this.device.queue.writeTexture(
+      { texture: this.dodgeMaskTexture },
+      padded,
+      { bytesPerRow },
+      { width: w, height: h },
+    );
   }
 
   // Subscribes the caller to each completed histogram readback. A 512x256
@@ -639,5 +700,8 @@ export class Pipeline {
     this.histogramReadBuffer.destroy();
     this.canvasBlitUniform.destroy();
     this.cropBlitUniform.destroy();
+    this.dodgeMaskTexture?.destroy();
+    // Samplers have no destroy() (device-lifetime objects) -- the texture owns
+    // the memory.
   }
 }

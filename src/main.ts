@@ -13,7 +13,7 @@ import { loadEditState, saveEditState } from './catalog/editsStore';
 import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
 import { commitEdit, undo, redo, currentOps, createEditState } from './catalog/editHistory';
 import { getOrExtractThumbnail } from './catalog/thumbnails';
-import { isExposureOp, isBwOp, isCropOp, isFrameOp, isGeometryOp, isGrainOp, isLightleakOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type FrameStyle, type AspectPreset, type WbGains, type BwMix, type BwToneId } from './catalog/types';
+import { isExposureOp, isBwOp, isCropOp, isDodgeBurnOp, isFrameOp, isGeometryOp, isGrainOp, isLightleakOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type FrameStyle, type AspectPreset, type WbGains, type BwMix, type BwToneId } from './catalog/types';
 import { FILM_STOCKS } from './gpu/film';
 import { buildParametricToneLut, buildToneCurveLut, fitRegionParams, isNeutralTone, parametricControlPoints, TONE_LUT_SIZE, type ToneParams } from './gpu/tone';
 import { isNeutralPresence, type PresenceParams } from './gpu/presence';
@@ -22,6 +22,7 @@ import { isNeutralGrain, seedFromPath, setGrainSeed, type GrainParams } from './
 import { isNeutralLightleak, type LightleakParams } from './gpu/lightleak';
 import { isNeutralCrop, type CropParams } from './gpu/crop';
 import { isNeutralGeometry, type GeometryParams } from './gpu/geometry';
+import { maskDims, maskHasPaint, maskToBytes, maskToOp, opToMask, paintStroke, type DodgeBurnParams } from './gpu/dodge';
 import { BW_FILTERS, BW_TONES, type BwFilterId } from './gpu/bw';
 import { getState, selectFile, setSelection, subscribe, type ModuleId } from './app/state';
 import { registerModule, switchModule } from './app/modules';
@@ -197,6 +198,15 @@ const footerCounts = document.querySelector<HTMLSpanElement>('#footer-counts')!;
 const selectionInfo = document.querySelector<HTMLSpanElement>('#selection-info')!;
 const footerFilterButtons = document.querySelectorAll<HTMLButtonElement>('#footer-filters [data-minrating]');
 const bwSection = document.querySelector<HTMLDetailsElement>('#bw-section')!;
+const dodgeBrushBtn = document.querySelector<HTMLButtonElement>('#dodge-brush')!;
+const dodgeClearBtn = document.querySelector<HTMLButtonElement>('#dodge-clear')!;
+const dodgeModeSelect = document.querySelector<HTMLSelectElement>('#dodge-mode')!;
+const dodgeAmountSlider = document.querySelector<HTMLInputElement>('#dodge-amount')!;
+const dodgeSizeSlider = document.querySelector<HTMLInputElement>('#dodge-size')!;
+const dodgeOpacitySlider = document.querySelector<HTMLInputElement>('#dodge-opacity')!;
+const dodgeAmountValue = document.querySelector<HTMLOutputElement>('#dodge-amount-value')!;
+const dodgeSizeValue = document.querySelector<HTMLOutputElement>('#dodge-size-value')!;
+const dodgeOpacityValue = document.querySelector<HTMLOutputElement>('#dodge-opacity-value')!;
 
 function showError(message: string, detail?: string): void {
   errorMessageEl.textContent = message;
@@ -312,6 +322,11 @@ const ALL_SLIDERS: SliderConfig[] = [
   { slider: geometryScaleSlider, output: geometryScaleValue, neutral: 100, format: (v) => `${v}%` },
   { slider: geometryOffsetXSlider, output: geometryOffsetXValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: geometryOffsetYSlider, output: geometryOffsetYValue, neutral: 0, format: (v) => formatSigned(v) },
+  // Dodge & Burn brush -- amount 0 (off) / size 20 / opacity 50. The dodgeBurn
+  // op is emitted only when the painted mask has content, not by these sliders.
+  { slider: dodgeAmountSlider, output: dodgeAmountValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: dodgeSizeSlider, output: dodgeSizeValue, neutral: 20, format: (v) => `${v}%` },
+  { slider: dodgeOpacitySlider, output: dodgeOpacityValue, neutral: 50, format: (v) => `${v}%` },
 ];
 
 function paintSliders(): void {
@@ -533,6 +548,70 @@ function readGeometryParams(): GeometryParams {
   };
 }
 
+// ---- Dodge & Burn brush state ----
+// paintMask is the CPU-authoritative signed density field (Float32, -1..1):
+// positive = dodge, negative = burn. History stores an Int8 quantization in
+// the dodgeBurn op; the GPU renders from a copy uploaded via setDodgeMask.
+let paintMask: Float32Array | null = null;
+let paintMaskW = 0;
+let paintMaskH = 0;
+let dodgeMaskDirty = false; // set whenever paintMask changes; drained by renderOps
+let brushActive = false;
+let brushPainting = false;
+let lastBrushPt: [number, number] | null = null;
+
+// The WebGPU pipeline. Module scope (not init-local) so the dodge brush helpers
+// (syncDodgeMaskToGPU) can reach it; init runs once.
+let pipeline: Pipeline;
+
+function resizePaintMask(w: number, h: number): void {
+  const [mw, mh] = maskDims(w, h);
+  if (!paintMask || paintMask.length !== mw * mh) {
+    paintMask = new Float32Array(mw * mh);
+  } else {
+    paintMask.fill(0);
+  }
+  paintMaskW = mw;
+  paintMaskH = mh;
+  dodgeMaskDirty = true;
+}
+
+function readDodgeParams(): DodgeBurnParams {
+  return {
+    amount: Number(dodgeAmountSlider.value),
+    size: Number(dodgeSizeSlider.value),
+    opacity: Number(dodgeOpacitySlider.value),
+  };
+}
+
+// Uploads the current paint mask to the GPU when it changed since the last
+// render/export. Called from renderOps (the single render gate) and the export
+// handler (which dispatches ops directly without a render first).
+function syncDodgeMaskToGPU(): void {
+  if (!dodgeMaskDirty || !paintMask) return;
+  pipeline.setDodgeMask(maskToBytes(paintMask));
+  dodgeMaskDirty = false;
+}
+
+// Maps a pointer event on #canvas to mask pixel coordinates, accounting for
+// the CSS `object-fit: contain` letterbox (the canvas buffer is aspect-fitted
+// inside its box). Returns null outside the visible image.
+function eventToMaskPt(e: PointerEvent): [number, number] | null {
+  const rect = canvas.getBoundingClientRect();
+  const cw = canvas.width;
+  const ch = canvas.height;
+  if (cw === 0 || ch === 0) return null;
+  const scale = Math.min(rect.width / cw, rect.height / ch);
+  const dispW = cw * scale;
+  const dispH = ch * scale;
+  const offX = (rect.width - dispW) / 2;
+  const offY = (rect.height - dispH) / 2;
+  const x = (e.clientX - rect.left - offX) / scale;
+  const y = (e.clientY - rect.top - offY) / scale;
+  if (x < 0 || x > cw || y < 0 || y > ch) return null;
+  return [(x / cw) * paintMaskW, (y / ch) * paintMaskH];
+}
+
 // B&W treatment. The mix tuple is in RGB order (Red..Magenta), matching both
 // the bw op's BwMix and the shader's band array.
 function readBwMix(): BwMix {
@@ -611,6 +690,20 @@ function currentOpsFromSliders(): Op[] {
   // rotate/aspect/offset, scale 100 = no pass) -- same rule as crop.
   const geometry = readGeometryParams();
   if (!isNeutralGeometry(geometry)) ops.push({ kind: 'geometry', ...geometry });
+  // Dodge & Burn is emitted only when the painted mask has content (the
+  // amount/size/opacity sliders alone don't create a pass) -- a painted mask
+  // with amount 0 still carries the brush state for history. The mask is
+  // embedded compactly as Int8 (see dodge.ts).
+  if (paintMask && maskHasPaint(paintMask)) {
+    const p = readDodgeParams();
+    ops.push({
+      kind: 'dodgeBurn',
+      ...p,
+      mask: maskToOp(paintMask),
+      maskW: paintMaskW,
+      maskH: paintMaskH,
+    });
+  }
   // Film frame is a mode switch (style select): 'none' emits nothing.
   const frameStyle = frameStyleSelect.value as FrameStyle;
   if (frameStyle !== 'none') ops.push({ kind: 'frame', style: frameStyle });
@@ -694,6 +787,23 @@ function applyOpsToSliders(ops: Op[]): void {
   geometryScaleSlider.value = String(geometryOp?.scale ?? 100);
   geometryOffsetXSlider.value = String(geometryOp?.offsetX ?? 0);
   geometryOffsetYSlider.value = String(geometryOp?.offsetY ?? 0);
+  // Dodge & Burn: the op's mask IS the brush state. Restore it into the CPU
+  // paint buffer (flagged dirty so the next render uploads it); no op clears.
+  const dodgeOp = ops.find(isDodgeBurnOp);
+  if (dodgeOp) {
+    const target = dodgeOp.maskW * dodgeOp.maskH;
+    if (!paintMask || paintMask.length !== target) paintMask = new Float32Array(target);
+    paintMask.set(opToMask(dodgeOp));
+    paintMaskW = dodgeOp.maskW;
+    paintMaskH = dodgeOp.maskH;
+    dodgeMaskDirty = true;
+  } else if (paintMask) {
+    paintMask.fill(0);
+    dodgeMaskDirty = true;
+  }
+  dodgeAmountSlider.value = String(dodgeOp?.amount ?? 0);
+  dodgeSizeSlider.value = String(dodgeOp?.size ?? 20);
+  dodgeOpacitySlider.value = String(dodgeOp?.opacity ?? 50);
   frameStyleSelect.value = frameOp?.style ?? 'none';
   // B&W: the op's presence IS the treatment (no bw op = Color). Mix sliders
   // restore to the op's 8 weights (0 = that hue contributes normal luminance);
@@ -820,6 +930,9 @@ function opsToLabel(ops: Op[]): string {
         if (op.offsetX !== 0 || op.offsetY !== 0) parts.push(`Offset ${formatSigned(op.offsetX)},${formatSigned(op.offsetY)}`);
         return `Transform ${parts.join(' · ')}`;
       }
+      if (isDodgeBurnOp(op)) {
+        return `Dodge & Burn ${formatSigned(op.amount)}`;
+      }
       if (isBwOp(op)) {
         const tone = op.tone !== 'none' ? ` · ${BW_TONES[op.tone].name}` : '';
         return `B&W${tone}`;
@@ -893,7 +1006,6 @@ async function init(): Promise<void> {
     return;
   }
 
-  let pipeline: Pipeline;
   try {
     pipeline = await Pipeline.create(canvas);
   } catch (err) {
@@ -1043,6 +1155,9 @@ async function init(): Promise<void> {
   }
 
   function renderOps(ops: Op[]): void {
+    // The brush mask lives CPU-side (authoritative); push any change to the GPU
+    // before the render dispatches the dodgeBurn pass (which samples it).
+    syncDodgeMaskToGPU();
     pipeline.render(ops);
   }
 
@@ -1374,6 +1489,11 @@ async function init(): Promise<void> {
     curveAdjust.disabled = !enabled;
     curveCanvas.style.pointerEvents = enabled ? 'auto' : 'none';
     curveResetButton.disabled = !enabled;
+    // Dodge & Burn: the brush can't paint on a preview (no decoded texture),
+    // so the whole tool (toggle + clear + mode + sliders) locks with the rest.
+    dodgeBrushBtn.disabled = !enabled;
+    dodgeClearBtn.disabled = !enabled;
+    dodgeModeSelect.disabled = !enabled;
   }
 
   function hidePreview(): void {
@@ -1480,6 +1600,10 @@ async function init(): Promise<void> {
       // mismatched with the loaded image.
       pipeline.show();
       pipeline.load(decoded);
+      // Fresh CPU brush mask at this file's capped dims (the GPU mask texture
+      // was just created empty in load()). applyOpsToSliders repopulates it
+      // from the loaded edit if this photo has a dodgeBurn op.
+      resizePaintMask(decoded.effectiveWidth ?? decoded.width, decoded.effectiveHeight ?? decoded.height);
       // Per-photo grain seed -- deterministic per file, different between
       // photos (two takes get different grain; a re-open gets the same).
       setGrainSeed(seedFromPath(record.path));
@@ -1803,6 +1927,7 @@ async function init(): Promise<void> {
     const longEdge = exportSize.value === 'original' ? null : Number(exportSize.value);
     exportButton.disabled = true;
     try {
+      syncDodgeMaskToGPU();
       const blob = await pipeline.exportImage(currentOpsFromSliders(), { format, bitDepth, longEdge });
       const record = allFiles.find((f) => f.id === currentFileId);
       const base = record?.name.replace(/\.[^.]+$/, '') ?? 'export';
@@ -1836,6 +1961,64 @@ async function init(): Promise<void> {
       showError("Couldn't save the reset.", errorDetail(err));
     }
   });
+
+  // ---- Dodge & Burn brush ----
+  // Paints a signed density mask in display space (positive=dodge,
+  // negative=burn). The mask is CPU-authoritative Float32 (the GPU texture is a
+  // r8unorm mirror); history stores a compact Int8 quantization. Amount is a
+  // magnitude (0..100 -> 0..4 EV); the mode select sets the stroke sign.
+  function paintAt(pt: [number, number]): void {
+    if (!paintMask) return;
+    const p = readDodgeParams();
+    const sign = dodgeModeSelect.value === 'dodge' ? 1 : -1;
+    const radius = (p.size / 100) * (Math.max(paintMaskW, paintMaskH) / 2);
+    const from = lastBrushPt ?? pt;
+    paintStroke(paintMask, paintMaskW, paintMaskH, from[0], from[1], pt[0], pt[1], radius, p.opacity / 100, sign);
+    lastBrushPt = pt;
+    dodgeMaskDirty = true;
+  }
+
+  function endStroke(): void {
+    if (!brushPainting) return;
+    brushPainting = false;
+    lastBrushPt = null;
+    commitCurrentEdit();
+  }
+
+  dodgeBrushBtn.addEventListener('click', () => {
+    brushActive = !brushActive;
+    dodgeBrushBtn.classList.toggle('active', brushActive);
+    dodgeBrushBtn.textContent = brushActive ? 'Brush: on' : 'Brush';
+    canvas.style.cursor = brushActive ? 'crosshair' : 'default';
+  });
+
+  dodgeClearBtn.addEventListener('click', () => {
+    if (!paintMask) return;
+    paintMask.fill(0);
+    dodgeMaskDirty = true;
+    renderOps(currentOpsFromSliders());
+    commitCurrentEdit();
+  });
+
+  canvas.addEventListener('pointerdown', (e) => {
+    if (!brushActive || !adjustEnabled || !paintMask || e.button !== 0) return;
+    const pt = eventToMaskPt(e);
+    if (!pt) return;
+    brushPainting = true;
+    lastBrushPt = null;
+    paintAt(pt);
+    renderOps(currentOpsFromSliders());
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!brushPainting) return;
+    const pt = eventToMaskPt(e);
+    if (!pt) return;
+    paintAt(pt);
+    renderOps(currentOpsFromSliders());
+  });
+  canvas.addEventListener('pointerup', endStroke);
+  canvas.addEventListener('pointercancel', endStroke);
+  canvas.addEventListener('pointerleave', endStroke);
 
   // ---- before / after (Develop) ----
   // LrC's \ key holds the original as-imported look; the footer button makes it
