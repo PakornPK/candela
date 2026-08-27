@@ -11,6 +11,7 @@ import { importFolder } from './catalog/import';
 import { ensureReadPermission } from './catalog/permissions';
 import { loadEditState, saveEditState } from './catalog/editsStore';
 import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
+import { parsePreset, serializePreset, PRESET_FILE_EXT } from './catalog/presetFiles';
 import { commitEdit, undo, redo, currentOps, createEditState } from './catalog/editHistory';
 import { getOrExtractThumbnail } from './catalog/thumbnails';
 import { isExposureOp, isBwOp, isCropOp, isDodgeBurnOp, isFrameOp, isGeometryOp, isGrainOp, isLightleakOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type FrameStyle, type AspectPreset, type WbGains, type BwMix, type BwToneId } from './catalog/types';
@@ -192,6 +193,7 @@ const exportPreset = document.querySelector<HTMLSelectElement>('#export-preset')
 const resetButton = document.querySelector<HTMLButtonElement>('#reset-btn')!;
 const beforeAfterBtn = document.querySelector<HTMLButtonElement>('#beforeafter-btn')!;
 const presetSaveButton = document.querySelector<HTMLButtonElement>('#preset-save')!;
+const presetImportButton = document.querySelector<HTMLButtonElement>('#preset-import')!;
 const presetListEl = document.querySelector<HTMLDivElement>('#preset-list')!;
 const syncBtn = document.querySelector<HTMLButtonElement>('#sync-btn')!;
 const footerCounts = document.querySelector<HTMLSpanElement>('#footer-counts')!;
@@ -2073,6 +2075,23 @@ async function init(): Promise<void> {
       const name = document.createElement('span');
       name.textContent = preset.name;
       name.title = opsToLabel(preset.ops);
+      // Export this preset to a shareable data file (a .candela-preset.json
+      // of the op chain) -- presets are data, not code, so a preset survives
+      // as a plain text file you can hand to someone or back up.
+      const exportBtn = document.createElement('button');
+      exportBtn.textContent = '⤓';
+      exportBtn.title = 'Export preset';
+      exportBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const slug = preset.name.replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-') || 'preset';
+        const blob = new Blob([serializePreset(preset.name, preset.ops)], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${slug}${PRESET_FILE_EXT}`;
+        a.click();
+        URL.revokeObjectURL(url);
+      });
       const del = document.createElement('button');
       del.textContent = '✕';
       del.title = 'Delete preset';
@@ -2085,7 +2104,7 @@ async function init(): Promise<void> {
           })
           .catch((err) => showError("Couldn't delete the preset.", errorDetail(err)));
       });
-      row.append(name, del);
+      row.append(name, exportBtn, del);
       presetListEl.appendChild(row);
     }
   }
@@ -2102,6 +2121,31 @@ async function init(): Promise<void> {
       renderPresets();
     } catch (err) {
       showError("Couldn't save the preset.", errorDetail(err));
+    }
+  });
+
+  // Import a preset from a data file: read + validate (parsePreset throws on
+  // anything unrecognizable -- bad JSON, wrong version, ops that fail
+  // validation), then save it into the library like a locally-saved preset.
+  const presetFileInput = document.createElement('input');
+  presetFileInput.type = 'file';
+  presetFileInput.accept = '.json';
+  presetFileInput.hidden = true;
+  document.body.appendChild(presetFileInput);
+  presetImportButton.addEventListener('click', () => presetFileInput.click());
+  presetFileInput.addEventListener('change', async () => {
+    const file = presetFileInput.files?.[0];
+    presetFileInput.value = ''; // allow re-importing the same file
+    if (!file) return;
+    try {
+      // fallback name = the file's own name minus its extension, for files
+      // hand-edited without a `name` field.
+      const parsed = parsePreset(await file.text(), file.name.replace(/\.[^.]*$/, ''));
+      await savePreset(db, parsed.name, parsed.ops);
+      presets = await listPresets(db);
+      renderPresets();
+    } catch (err) {
+      showError("Couldn't import the preset — it isn't a valid preset file.", errorDetail(err));
     }
   });
 

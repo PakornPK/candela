@@ -401,9 +401,13 @@
       .history-buttons button:hover {
         background: #2f2f34;
       }
-      #preset-save {
-        width: 100%;
+      .preset-actions {
+        display: flex;
+        gap: 6px;
         margin: 6px 0;
+      }
+      .preset-actions button {
+        flex: 1;
         background: none;
         border: 1px solid var(--panel-border);
         color: var(--text);
@@ -413,7 +417,7 @@
         font: inherit;
         font-size: 12px;
       }
-      #preset-save:hover {
+      .preset-actions button:hover {
         background: #2f2f34;
       }
       .crop-rotate-row {
@@ -904,7 +908,10 @@
             <button id="redo-btn">Redo</button>
           </div>
           <h2 class="panel-title">Presets</h2>
-          <button id="preset-save">Save current…</button>
+          <div class="preset-actions">
+            <button id="preset-save">Save current…</button>
+            <button id="preset-import">Import…</button>
+          </div>
           <div id="preset-list"></div>
         </aside>
         <main class="content">
