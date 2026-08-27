@@ -60,12 +60,28 @@ const CROSS: [number, number][] = [
   [0, -2], [0, 2], [-2, 0], [2, 0],
 ];
 
+// The distance-2 cross with the shader's empty-cross fix: when no same-color
+// tap exists (X-Trans's sparse R/B lattice), the shader returns the CENTER
+// value so lap = center - center = 0 -- the correction must vanish, not
+// inject the raw center. (The old `: 0` fallback turned lap into `center`,
+// which overshot flat fields into the pink grid; see the regression test.)
+function crossAvg(patch: number[][], cx: number, cy: number, color: number, fallback: number): number {
+  let sum = 0;
+  let n = 0;
+  for (const [dx, dy] of CROSS) {
+    if (colorAt(cx + dx, cy + dy) !== color) continue;
+    sum += patch[cx + dx][cy + dy];
+    n++;
+  }
+  return n ? sum / n : fallback;
+}
+
 // The shader's exact formula at (cx,cy): the interpolated r/g/b.
 function shaderAt(patch: number[][], cx: number, cy: number): { r: number; g: number; b: number } {
   const center = patch[cx][cy];
   const k = colorAt(cx, cy);
   const ring = (c: number) => avg(patch, cx, cy, c, RING);
-  const cross = (c: number) => avg(patch, cx, cy, c, CROSS);
+  const cross = (c: number) => crossAvg(patch, cx, cy, c, center);
   if (k === 0) {
     const lap = center - cross(0);
     return { r: center, g: ring(1) + 0.5 * lap, b: ring(2) + 0.25 * lap };
@@ -95,6 +111,48 @@ function patch(size: number, seed: number): number[][] {
   const rand = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 0xffffffff);
   return Array.from({ length: size }, () => Array.from({ length: size }, () => rand()));
 }
+
+describe('X-Trans empty-cross fix (the pink-grid regression)', () => {
+  it('a flat magenta field stays flat where the distance-2 cross has no same-color taps', () => {
+    // sample.raf's real 6x6 X-Trans CFA, 0=R 1=G 2=B. At the R in (row0,col2)
+    // all four distance-2 taps are G/B, so the old `: 0` fallback gave
+    // lap = center - 0 = center and G = 0.45 + 0.5*0.55 = 0.725 -- a period-3
+    // G spike on a flat field (the "pink specks in a grid" the user saw on a
+    // bright magenta sky). The fix returns the center value when the cross is
+    // empty, so lap = 0 and the field stays flat.
+    const xtrans: number[] = [
+      1, 1, 0, 1, 1, 2, 1, 1, 2, 1, 1, 0, 2, 0, 1, 0, 2, 1, 1, 1, 2, 1, 1, 0,
+      1, 1, 0, 1, 1, 2, 0, 2, 1, 2, 0, 1,
+    ];
+    const inBounds = (x: number, y: number) => x >= 0 && y >= 0;
+    const cfa = (x: number, y: number) => xtrans[(((y % 6) + 6) % 6) * 6 + (((x % 6) + 6) % 6)];
+    const flat = (x: number, y: number) => (cfa(x, y) === 1 ? 0.45 : 0.55);
+    // Taps mirror the shader: out-of-bounds are skipped BEFORE colorAt.
+    const ringOf = (cx: number, cy: number, c: number, fallback: number): number => {
+      let sum = 0, n = 0;
+      for (const [dx, dy] of [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]]) {
+        if (!inBounds(cx + dx, cy + dy) || cfa(cx + dx, cy + dy) !== c) continue;
+        sum += flat(cx + dx, cy + dy); n++;
+      }
+      return n ? sum / n : fallback;
+    };
+    const crossOf = (cx: number, cy: number, c: number, fallback: number): number => {
+      let sum = 0, n = 0;
+      for (const [dx, dy] of [[0, -2], [0, 2], [-2, 0], [2, 0]]) {
+        if (!inBounds(cx + dx, cy + dy) || cfa(cx + dx, cy + dy) !== c) continue;
+        sum += flat(cx + dx, cy + dy); n++;
+      }
+      return n ? sum / n : fallback;
+    };
+    const center = flat(2, 0);
+    // Old behavior (fallback 0): G overshoots to 0.725 on a flat field.
+    const oldG = ringOf(2, 0, 1, 0) + 0.5 * (center - crossOf(2, 0, 0, 0));
+    // Fixed behavior (fallback = center): lap = 0, G stays flat at 0.45.
+    const newG = ringOf(2, 0, 1, 0) + 0.5 * (center - crossOf(2, 0, 0, center));
+    expect(oldG).toBeCloseTo(0.725, 10);
+    expect(newG).toBeCloseTo(0.45, 10);
+  });
+});
 
 describe('demosaic.wgsl is Malvar-He-Cutler for non-green Bayer pixels', () => {
   for (const seed of [1, 7, 20260826]) {

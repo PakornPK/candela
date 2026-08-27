@@ -64,7 +64,7 @@ fn averageColor(center: vec2<i32>, dims: vec2<u32>, color: u32) -> f32 {
 // MHC; the same shape extends CFA-agnostically to X-Trans. The correction
 // couples the channels' high-frequency content, which is what kills the
 // false color a pure same-color average produces at edges.
-fn averageColorCross(center: vec2<i32>, dims: vec2<u32>, color: u32) -> f32 {
+fn averageColorCross(center: vec2<i32>, dims: vec2<u32>, color: u32, centerValue: f32) -> f32 {
   var sum = 0.0;
   var count = 0.0;
   let taps = array<vec2<i32>, 4>(
@@ -83,7 +83,14 @@ fn averageColorCross(center: vec2<i32>, dims: vec2<u32>, color: u32) -> f32 {
       count += 1.0;
     }
   }
-  return select(0.0, sum / count, count > 0.0);
+  // The Laplacian correction is center - avg(same-color at distance 2). On a
+  // Bayer CFA every position has all four taps, but X-Trans's sparse R/B
+  // lattice can leave the cross EMPTY (e.g. the R at row0 of the 6x6 has G/B
+  // at all four distance-2 taps). Returning 0 there made lap = center - 0 =
+  // center, injecting the raw center value into the estimate: on a flat field
+  // a period-3 G spike (the pink grid the user saw). When the Laplacian is
+  // unmeasurable the correction must vanish -- return centerValue so lap = 0.
+  return select(centerValue, sum / count, count > 0.0);
 }
 
 @compute @workgroup_size(8, 8)
@@ -106,17 +113,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   // correction's undershoot at hard edges; the high side is left open for
   // the linear highlight headroom downstream.
   if (thisColor == 0u) { // R pixel
-    let lap = center - averageColorCross(centerPos, dims, 0u);
+    let lap = center - averageColorCross(centerPos, dims, 0u, center);
     r = center;
     g = max(0.0, averageColor(centerPos, dims, 1u) + 0.5 * lap);
     b = max(0.0, averageColor(centerPos, dims, 2u) + 0.25 * lap);
   } else if (thisColor == 2u) { // B pixel
-    let lap = center - averageColorCross(centerPos, dims, 2u);
+    let lap = center - averageColorCross(centerPos, dims, 2u, center);
     b = center;
     g = max(0.0, averageColor(centerPos, dims, 1u) + 0.5 * lap);
     r = max(0.0, averageColor(centerPos, dims, 0u) + 0.25 * lap);
   } else { // G pixel
-    let lap = center - averageColorCross(centerPos, dims, 1u);
+    let lap = center - averageColorCross(centerPos, dims, 1u, center);
     g = center;
     r = max(0.0, averageColor(centerPos, dims, 0u) + 0.25 * lap);
     b = max(0.0, averageColor(centerPos, dims, 2u) + 0.25 * lap);
