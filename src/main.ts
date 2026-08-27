@@ -23,7 +23,7 @@ import { isNeutralGrain, seedFromPath, setGrainSeed, type GrainParams } from './
 import { isNeutralLightleak, type LightleakParams } from './gpu/lightleak';
 import { isNeutralCrop, type CropParams } from './gpu/crop';
 import { isNeutralGeometry, type GeometryParams } from './gpu/geometry';
-import { maskDims, maskHasPaint, maskToBytes, maskToOp, opToMask, paintStroke, type DodgeBurnParams } from './gpu/dodge';
+import { maskDims, maskHasPaint, maskToBytes, maskToOp, maskToOverlay, opToMask, paintStroke, type DodgeBurnParams } from './gpu/dodge';
 import { BW_FILTERS, BW_TONES, type BwFilterId } from './gpu/bw';
 import { getState, selectFile, setSelection, subscribe, type ModuleId } from './app/state';
 import { registerModule, switchModule } from './app/modules';
@@ -209,6 +209,8 @@ const dodgeOpacitySlider = document.querySelector<HTMLInputElement>('#dodge-opac
 const dodgeAmountValue = document.querySelector<HTMLOutputElement>('#dodge-amount-value')!;
 const dodgeSizeValue = document.querySelector<HTMLOutputElement>('#dodge-size-value')!;
 const dodgeOpacityValue = document.querySelector<HTMLOutputElement>('#dodge-opacity-value')!;
+const maskOverlay = document.querySelector<HTMLCanvasElement>('#mask-overlay')!;
+const maskOverlayCtx = maskOverlay.getContext('2d')!;
 
 function showError(message: string, detail?: string): void {
   errorMessageEl.textContent = message;
@@ -576,6 +578,25 @@ function resizePaintMask(w: number, h: number): void {
   paintMaskW = mw;
   paintMaskH = mh;
   dodgeMaskDirty = true;
+  // The overlay canvas buffer tracks the mask (same aspect -> the CSS
+  // object-fit:contain letterbox aligns it with #canvas).
+  if (maskOverlay.width !== mw || maskOverlay.height !== mh) {
+    maskOverlay.width = mw;
+    maskOverlay.height = mh;
+  }
+  drawDodgeOverlay();
+}
+
+// Draws the brush red-mask overlay from the CPU-authoritative paintMask (the
+// GPU texture is its mirror; drawing from the mask keeps overlay and render
+// in sync with no readback). Shown only while the brush is active.
+function drawDodgeOverlay(): void {
+  if (!brushActive || !paintMask) {
+    maskOverlay.hidden = true;
+    return;
+  }
+  maskOverlayCtx.putImageData(new ImageData(maskToOverlay(paintMask), paintMaskW, paintMaskH), 0, 0);
+  maskOverlay.hidden = false;
 }
 
 function readDodgeParams(): DodgeBurnParams {
@@ -1990,6 +2011,7 @@ async function init(): Promise<void> {
     paintStroke(paintMask, paintMaskW, paintMaskH, from[0], from[1], pt[0], pt[1], radius, p.opacity / 100, sign);
     lastBrushPt = pt;
     dodgeMaskDirty = true;
+    drawDodgeOverlay();
   }
 
   function endStroke(): void {
@@ -2004,12 +2026,14 @@ async function init(): Promise<void> {
     dodgeBrushBtn.classList.toggle('active', brushActive);
     dodgeBrushBtn.textContent = brushActive ? 'Brush: on' : 'Brush';
     canvas.style.cursor = brushActive ? 'crosshair' : 'default';
+    drawDodgeOverlay();
   });
 
   dodgeClearBtn.addEventListener('click', () => {
     if (!paintMask) return;
     paintMask.fill(0);
     dodgeMaskDirty = true;
+    drawDodgeOverlay();
     renderOps(currentOpsFromSliders());
     commitCurrentEdit();
   });

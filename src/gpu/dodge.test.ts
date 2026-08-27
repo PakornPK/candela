@@ -6,6 +6,7 @@ import {
   maskHasPaint,
   maskToBytes,
   maskToOp,
+  maskToOverlay,
   opToMask,
   packDodgeBurn,
   paintStroke,
@@ -55,6 +56,36 @@ describe('paintStroke', () => {
     paintStroke(m, 10, 10, 0, 5, 9, 5, 1.5, 0.4, 1);
     expect(m[5 * 10 + 4]).toBeGreaterThan(0); // mid-drag stamped
     expect(m[5 * 10 + 9]).toBeGreaterThan(0); // end stamped
+  });
+});
+
+describe('maskToOverlay (the brush red-mask overlay)', () => {
+  it('painted density -> red pixels, neutral -> transparent', () => {
+    // A 2x2 mask: dodge +1, burn -0.5, faint +0.2, neutral 0.
+    const rgba = maskToOverlay(new Float32Array([1, -0.5, 0.2, 0]));
+    expect(Array.from(rgba.slice(0, 4))).toEqual([255, 0, 60, 255]);   // dodge full red
+    expect(Array.from(rgba.slice(4, 8))).toEqual([255, 0, 60, 128]);   // burn same red, half alpha
+    expect(Array.from(rgba.slice(8, 12))).toEqual([255, 0, 60, 51]);   // faint stroke, low alpha
+    expect(Array.from(rgba.slice(12, 16))).toEqual([255, 0, 60, 0]);   // neutral transparent
+  });
+
+  it('every painted pixel is red (filter scan: no gray leaks into the overlay)', () => {
+    const m = new Float32Array(100);
+    paintStroke(m, 10, 10, 4, 5, 4, 5, 2, 0.5, 1);
+    paintStroke(m, 10, 10, 6, 5, 6, 5, 2, 0.5, -1);
+    const rgba = maskToOverlay(m);
+    for (let i = 0; i < m.length; i++) {
+      const o = i * 4;
+      // Any pixel with density has exactly red (255,0,60); alpha = |d|.
+      if (m[i] !== 0) {
+        expect(rgba[o]).toBe(255);
+        expect(rgba[o + 1]).toBe(0);
+        expect(rgba[o + 2]).toBe(60);
+        expect(rgba[o + 3]).toBe(Math.round(Math.min(1, Math.abs(m[i])) * 255));
+      } else {
+        expect(rgba[o + 3]).toBe(0); // neutral stays fully transparent
+      }
+    }
   });
 });
 

@@ -332,6 +332,22 @@
         object-fit: contain;
         display: block;
       }
+      /* Dodge & Burn brush mask overlay: an LrC-style red mask above #canvas
+         while brushing. Buffer = mask dims (same aspect as the image), so the
+         same object-fit:contain letterboxes it in step with #canvas; pointer-
+         events:none keeps brush events hitting #canvas below. */
+      #mask-overlay {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        pointer-events: none;
+        z-index: 1;
+      }
+      #mask-overlay[hidden] {
+        display: none;
+      }
       /* Embedded-JPEG preview fallback: an <img> layered over #canvas (which
          owns the WebGPU surface -- a canvas can't host 2D and WebGPU at
          once). `.content` is position:relative, so absolute inset:0 fills the
@@ -916,6 +932,7 @@
         </aside>
         <main class="content">
           <canvas id="canvas"></canvas>
+          <canvas id="mask-overlay" hidden></canvas>
         </main>
         <aside class="panel right">
           <div id="camera-info" class="camera-info"></div>
