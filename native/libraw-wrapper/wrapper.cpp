@@ -165,9 +165,14 @@ DecodeResult* decode(const uint8_t* file_bytes, uint32_t length) {
         // that happens to return success", so surface a large error count as
         // a failure instead of handing ~24M corrupted samples up to the GPU.
         // Threshold: >1% of the frame corrupted. Clean files (verified
-        // fixtures: D800 NEF all variants, Fuji RAF) report 0; the Z f HE*
-        // files report ~54%. Checked here, BEFORE the bayer copy, so an
-        // unsupported file never wastes the 48MB+ WASM-heap copy below.
+        // fixtures: D800 NEF all variants, Fuji RAF) report 0. NOTE: since
+        // the LibRaw 0.22.2 bump this specific HE* case no longer reaches
+        // this check -- 0.22.2's identify() selects nikon_he_load_raw for
+        // JpegXS-stream NEFs and its stub throws UNSUPPORTED_FORMAT, so
+        // unpack() returns -2 above and we never get here. This check still
+        // guards any future unpack-succeeds-but-garbage camera. Checked
+        // here, BEFORE the bayer copy, so an unsupported file never wastes
+        // the 48MB+ WASM-heap copy below.
         result->data_error = static_cast<uint32_t>(processor.error_count());
         result->width = width; // set even on the garbage path so diagnostics carry dims
         result->height = height;

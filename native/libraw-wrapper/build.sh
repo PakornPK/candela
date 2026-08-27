@@ -5,6 +5,20 @@ cd "$(dirname "$0")"
 LIBRAW_DIR="third_party/libraw"
 LIBRAW_LIB="$LIBRAW_DIR/lib/.libs/libraw_r.a"
 
+# Re-apply the read_utils.cpp fread fix if a `git submodule update` reset it.
+# Upstream checks `fread() < count` BEFORE libraw_swab(); on a short read it
+# throws (derror) before the byte swap runs, which leaves half-swapped
+# predictor bytes for big-endian NEFs. The patched order swabs first, then
+# checks. Must match LIBRAW_OWN_SWAB above (the swab it runs first is
+# LibRaw's own loop). Idempotent: `git apply` on an already-patched file
+# fails, which set -e turns into a loud build abort rather than a silent
+# wasm built from an unpatched tree.
+PATCH_FILE="$(pwd)/patches/read_utils-fread.patch"
+if ! grep -q 'size_t rn = (unsigned)fread(pixel, 2, count, ifp);' "$LIBRAW_DIR/src/utils/read_utils.cpp"; then
+  echo "Applying read_utils.cpp fread fix..."
+  (cd "$LIBRAW_DIR" && git apply "$PATCH_FILE")
+fi
+
 if [ ! -f "$LIBRAW_DIR/configure" ]; then
   echo "Generating LibRaw's configure script..."
   (cd "$LIBRAW_DIR" && autoreconf --install)

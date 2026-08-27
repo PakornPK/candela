@@ -1,0 +1,13 @@
+--- a/src/utils/read_utils.cpp
++++ b/src/utils/read_utils.cpp
+@@ -170,7 +170,8 @@ void LibRaw::read_shorts(ushort *pixel, unsigned count)
+ void LibRaw::read_shorts(ushort *pixel, unsigned count)
+ {
+-  if ((unsigned)fread(pixel, 2, count, ifp) < count)
+-    derror();
++  size_t rn = (unsigned)fread(pixel, 2, count, ifp);
+   if ((order == 0x4949) == (ntohs(0x1234) == 0x1234))
+     libraw_swab(pixel, count * 2);
++  if ((unsigned)rn < count)
++    derror();
+ }
