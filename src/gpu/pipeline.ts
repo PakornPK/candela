@@ -1,11 +1,19 @@
 import unpackShader from '../shaders/unpack.wgsl?raw';
 import demosaicShader from '../shaders/demosaic.wgsl?raw';
 import blitShader from '../shaders/blit.wgsl?raw';
+import export16Shader from '../shaders/export16.wgsl?raw';
 import { packCfa6, shiftCfa6 } from './uniforms';
 import { OP_RENDERERS, presentOpIndices, setAsShotGains, setCameraColorMatrix, setCameraXyz, setImageSize } from './ops';
 import { cropFracFromOps } from './crop';
+import { encodePng16, encodeTiff16 } from './exportEncode';
 import type { Op } from '../catalog/types';
 import type { DecodedRaw } from '../raw/decode';
+
+export interface ExportOptions {
+  format: 'jpeg' | 'png' | 'tiff';
+  bitDepth: 8 | 16; // JPEG is 8-bit only; the caller disables 16 for it.
+  longEdge: number | null; // null = original resolution.
+}
 
 export class Pipeline {
   private bayerTexture: GPUTexture | null = null;
@@ -26,6 +34,10 @@ export class Pipeline {
   // target format is fixed at pipeline creation, so it can't share the canvas
   // pipeline.
   private readonly exportBlitPipeline: GPURenderPipeline;
+  // 16-bit export readback (export16.wgsl): linear displayTexture -> sRGB
+  // OETF'd rgba16uint storage texture. The 8-bit path uses exportBlitPipeline
+  // + canvas; 16-bit needs a u16 source the canvas can't produce.
+  private readonly export16Pipeline: GPUComputePipeline;
 
   private readonly levelsBuffer: GPUBuffer;
   private readonly cfaBuffer: GPUBuffer;
@@ -92,6 +104,10 @@ export class Pipeline {
         targets: [{ format: 'rgba8unorm' }],
       },
       primitive: { topology: 'triangle-list' },
+    });
+    this.export16Pipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: device.createShaderModule({ code: export16Shader }), entryPoint: 'main' },
     });
 
     this.levelsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -420,12 +436,14 @@ export class Pipeline {
     }
   }
 
-  // Renders the current ops to an offscreen srgb8 texture (same blit shader,
-  // same OETF) and returns it as a JPEG/PNG Blob. The readback is the one
-  // allowed GPU->CPU path. `maxDim` caps the long edge so a 60MP raw doesn't
-  // OOM on a single ~240MB readback (6000 keeps it ~96MB); native-resolution
-  // export would need tiled readback -- deferred.
-  async exportImage(ops: Op[], format: 'jpeg' | 'png', maxDim = 6000): Promise<Blob> {
+  // Renders the current ops to an offscreen texture and returns it as a
+  // JPEG/PNG/TIFF Blob. 8-bit stages through the canvas encoder (JPEG/PNG);
+  // 16-bit (PNG/TIFF) reads back a true u16 source via export16.wgsl and
+  // hand-encodes, since the canvas cannot produce 16-bit output. The readback
+  // is the one allowed GPU->CPU path. `longEdge` caps the long edge so a 60MP
+  // raw doesn't OOM on a single ~240MB readback; Original would need tiled
+  // readback at that size -- the user's explicit choice.
+  async exportImage(ops: Op[], opts: ExportOptions): Promise<Blob> {
     if (!this.demosaicedTexture || !this.opA || !this.opB) {
       throw new Error('No image loaded to export.');
     }
@@ -436,20 +454,69 @@ export class Pipeline {
     const cropFrac = cropFracFromOps(ops, srcW, srcH);
     const maskW = srcW * cropFrac[0];
     const maskH = srcH * cropFrac[1];
-    const scale = Math.min(1, maxDim / Math.max(maskW, maskH));
+    const scale = opts.longEdge === null ? 1 : Math.min(1, opts.longEdge / Math.max(maskW, maskH));
     const tw = Math.max(1, Math.round(maskW * scale));
     const th = Math.max(1, Math.round(maskH * scale));
 
     const encoder = this.device.createCommandEncoder();
     const source = this.dispatchOps(encoder, ops);
     this.displayTexture = source;
+    this.device.queue.writeBuffer(this.cropBlitUniform, 0, new Float32Array([cropFrac[0], cropFrac[1], 0, 0]));
 
+    // 16-bit path: compute pass applies the OETF and writes u16 to a storage
+    // texture; the encoders wrap it into a real 16-bit PNG/TIFF.
+    if (opts.bitDepth === 16 && opts.format !== 'jpeg') {
+      const target = this.device.createTexture({
+        size: [tw, th],
+        format: 'rgba16uint',
+        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_SRC,
+      });
+      const bindGroup = this.device.createBindGroup({
+        layout: this.export16Pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: source.createView() },
+          { binding: 1, resource: this.blitSampler },
+          { binding: 2, resource: { buffer: this.cropBlitUniform } },
+          { binding: 3, resource: target.createView() },
+        ],
+      });
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(this.export16Pipeline);
+      pass.setBindGroup(0, bindGroup);
+      pass.dispatchWorkgroups(Math.ceil(tw / 8), Math.ceil(th / 8));
+      pass.end();
+      const bytesPerRow = Math.ceil((tw * 8) / 256) * 256; // 8 bytes/texel
+      const readBuffer = this.device.createBuffer({
+        size: bytesPerRow * th,
+        usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+      });
+      encoder.copyTextureToBuffer(
+        { texture: target },
+        { buffer: readBuffer, bytesPerRow },
+        { width: tw, height: th },
+      );
+      this.device.queue.submit([encoder.finish()]);
+      await readBuffer.mapAsync(GPUMapMode.READ);
+      const mapped = new Uint16Array(readBuffer.getMappedRange());
+      // Rows are padded to bytesPerRow; unpack back to tight RGBA u16 rows.
+      const out = new Uint16Array(tw * th * 4);
+      for (let y = 0; y < th; y++) {
+        const row = (y * bytesPerRow) / 2;
+        out.set(mapped.subarray(row, row + tw * 4), y * tw * 4);
+      }
+      readBuffer.unmap();
+      target.destroy();
+      readBuffer.destroy();
+      const bytes = opts.format === 'tiff' ? encodeTiff16(out, tw, th) : await encodePng16(out, tw, th);
+      return new Blob([bytes], { type: opts.format === 'tiff' ? 'image/tiff' : 'image/png' });
+    }
+
+    // 8-bit path: rgba8unorm blit -> canvas -> the browser's JPEG/PNG encoder.
     const target = this.device.createTexture({
       size: [tw, th],
       format: 'rgba8unorm',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
     });
-    this.device.queue.writeBuffer(this.cropBlitUniform, 0, new Float32Array([cropFrac[0], cropFrac[1], 0, 0]));
     const blitBindGroup = this.device.createBindGroup({
       layout: this.exportBlitPipeline.getBindGroupLayout(0),
       entries: [
@@ -500,12 +567,12 @@ export class Pipeline {
     const image = ctx.createImageData(tw, th);
     image.data.set(out);
     ctx.putImageData(image, 0, 0);
-    const mime = format === 'png' ? 'image/png' : 'image/jpeg';
+    const mime = opts.format === 'png' ? 'image/png' : 'image/jpeg';
     const blob = await new Promise<Blob>((resolve, reject) =>
       scratch.toBlob(
         (b) => (b ? resolve(b) : reject(new Error(`toBlob(${mime}) returned null`))),
         mime,
-        format === 'jpeg' ? 0.92 : undefined,
+        opts.format === 'jpeg' ? 0.92 : undefined,
       ),
     );
     target.destroy();

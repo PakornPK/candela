@@ -169,6 +169,8 @@ const filterPicked = document.querySelector<HTMLInputElement>('#filter-picked')!
 const filterMinRating = document.querySelector<HTMLSelectElement>('#filter-min-rating')!;
 const exportButton = document.querySelector<HTMLButtonElement>('#export-btn')!;
 const exportFormat = document.querySelector<HTMLSelectElement>('#export-format')!;
+const exportBitDepth = document.querySelector<HTMLSelectElement>('#export-bitdepth')!;
+const exportSize = document.querySelector<HTMLSelectElement>('#export-size')!;
 const resetButton = document.querySelector<HTMLButtonElement>('#reset-btn')!;
 const beforeAfterBtn = document.querySelector<HTMLButtonElement>('#beforeafter-btn')!;
 const presetSaveButton = document.querySelector<HTMLButtonElement>('#preset-save')!;
@@ -1698,22 +1700,35 @@ async function init(): Promise<void> {
   // Export current Develop state -> JPEG/PNG download. The one allowed
   // GPU->CPU readback. A preview (HE*/undecodable file) can't be exported --
   // there's no full-res image behind it, only the embedded JPEG.
+  // JPEG is 8-bit only (LrC disables 16-bit for it too) -- force + gray the
+  // bit-depth control when the format switches to JPEG.
+  const syncExportBitDepth = () => {
+    const isJpeg = exportFormat.value === 'jpeg';
+    if (isJpeg) exportBitDepth.value = '8';
+    exportBitDepth.disabled = isJpeg;
+  };
+  exportFormat.addEventListener('change', syncExportBitDepth);
+  syncExportBitDepth();
+
   exportButton.addEventListener('click', async () => {
     if (currentFileId === null) return;
     if (loadedFileId !== currentFileId) {
       showError("Nothing to export — a preview can't be exported.");
       return;
     }
-    const format = exportFormat.value === 'png' ? 'png' : 'jpeg';
+    const format = exportFormat.value as 'jpeg' | 'png' | 'tiff';
+    const bitDepth = exportBitDepth.value === '16' ? 16 : 8;
+    const longEdge = exportSize.value === 'original' ? null : Number(exportSize.value);
     exportButton.disabled = true;
     try {
-      const blob = await pipeline.exportImage(currentOpsFromSliders(), format);
+      const blob = await pipeline.exportImage(currentOpsFromSliders(), { format, bitDepth, longEdge });
       const record = allFiles.find((f) => f.id === currentFileId);
       const base = record?.name.replace(/\.[^.]+$/, '') ?? 'export';
+      const ext = format === 'jpeg' ? 'jpg' : format;
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${base}.${format}`;
+      a.download = `${base}.${ext}`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
