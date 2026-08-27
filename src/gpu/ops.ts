@@ -10,9 +10,10 @@ import lightleakShader from '../shaders/lightleak.wgsl?raw';
 import frameShader from '../shaders/frame.wgsl?raw';
 import bwShader from '../shaders/bw.wgsl?raw';
 import cropShader from '../shaders/crop.wgsl?raw';
+import geometryShader from '../shaders/geometry.wgsl?raw';
 import { evToGain, kelvinToShift, packColorMatrix, wbShiftToGains, type WhiteBalanceGains } from './uniforms';
 import { buildParametricToneLut, buildToneCurveLut, buildToneLuts, TONE_LUT_SIZE, type ToneParams, type ToneLook } from './tone';
-import { isPresenceOp, isBwOp, isCropOp, isExposureOp, isFrameOp, isGrainOp, isLightleakOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type WbGains } from '../catalog/types';
+import { isPresenceOp, isBwOp, isCropOp, isExposureOp, isFrameOp, isGeometryOp, isGrainOp, isLightleakOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type WbGains } from '../catalog/types';
 import { packPresence, type PresenceParams } from './presence';
 import { packVignette, type VignetteParams } from './vignette';
 import { packGrain, getGrainSeed, type GrainParams } from './grain';
@@ -20,6 +21,7 @@ import { packLightleak, type LightleakParams } from './lightleak';
 import { packFrame } from './frame';
 import { packBw } from './bw';
 import { cropFracFromOps, packCrop, type CropParams } from './crop';
+import { packGeometry, type GeometryParams } from './geometry';
 import { FILM_STOCKS, isFilmStockId } from './film';
 import type { FilmStock } from './film';
 
@@ -206,6 +208,20 @@ export const OP_RENDERERS: OpRenderer[] = [
       const op = ops.find(isPresenceOp);
       const p: PresenceParams = op ?? { texture: 0, clarity: 0, dehaze: 0, vibrance: 0, saturation: 0 };
       return packPresence(p);
+    },
+  },
+  {
+    kind: 'geometry',
+    // BEFORE lightleak/crop/vignette: LrC's Transform is a geometry correction
+    // that applies to the image before the Effects panel (and before the crop
+    // tool crops the transformed frame). Absent op packs the neutral defaults
+    // (all zero, scale 100) so a no-op pass renders as identity.
+    shader: geometryShader,
+    uniformSize: 32, // struct Geometry { 7 f32 + pad }
+    packParams: (ops) => {
+      const op = ops.find(isGeometryOp);
+      const p: GeometryParams = op ?? { vertical: 0, horizontal: 0, rotate: 0, aspect: 0, scale: 100, offsetX: 0, offsetY: 0 };
+      return packGeometry(p);
     },
   },
   {

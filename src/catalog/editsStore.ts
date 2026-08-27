@@ -121,6 +121,10 @@ export function isValidOp(op: unknown): op is Op {
       aspect === '5:4' || aspect === '16:9' || aspect === '2:3' || aspect === '4:5';
     return aspectOk && Number.isInteger(c.rotate90) && Number(c.rotate90) >= 0 && Number(c.rotate90) <= 3 && typeof c.angle === 'number';
   }
+  if (candidate.kind === 'geometry') {
+    const g = op as { vertical?: unknown; horizontal?: unknown; rotate?: unknown; aspect?: unknown; scale?: unknown; offsetX?: unknown; offsetY?: unknown };
+    return [g.vertical, g.horizontal, g.rotate, g.aspect, g.scale, g.offsetX, g.offsetY].every((v) => typeof v === 'number');
+  }
   return false;
 }
 

@@ -7,7 +7,7 @@ import { buildBwToneLut } from './bw';
 import type { Op } from '../catalog/types';
 
 const NEUTRAL_TONE = { kind: 'tone', contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0 } as const;
-// Registry order: [whiteBalance, profile, exposure, tone, bw, toneCurve, presence, lightleak, crop, vignette, grain, frame].
+// Registry order: [whiteBalance, profile, exposure, tone, bw, toneCurve, presence, geometry, lightleak, crop, vignette, grain, frame].
 // Three passes are mandatory -- they always run even with no ops (fresh open):
 // whiteBalance (As-Shot fallback), profile (camera matrix), and tone (neutral
 // tone now renders the ACR baseline curve -- the LrC import look, see tone.ts).
@@ -26,12 +26,13 @@ describe('presentOpIndices', () => {
     expect(presentOpIndices([{ kind: 'whiteBalance', kelvin: 6000, tint: 0 }])).toEqual([0, 1, 3]);
     expect(presentOpIndices([{ ...NEUTRAL_TONE, contrast: 20 }])).toEqual([0, 1, 3]);
     expect(presentOpIndices([{ kind: 'toneCurve', mode: 'point', points: [0, 0, 0.5, 0.6, 1, 1] }])).toEqual([0, 1, 3, 5]);
-    expect(presentOpIndices([{ kind: 'vignette', amount: -50, midpoint: 50, roundness: 0, feather: 50, highlights: 0 }])).toEqual([0, 1, 3, 9]);
+    expect(presentOpIndices([{ kind: 'vignette', amount: -50, midpoint: 50, roundness: 0, feather: 50, highlights: 0 }])).toEqual([0, 1, 3, 10]);
     expect(presentOpIndices([{ kind: 'bw', mix: [0, 0, 0, 0, 0, 0, 0, 0], tone: 'acros' }])).toEqual([0, 1, 3, 4]);
-    expect(presentOpIndices([{ kind: 'grain', amount: 40, size: 25, roughness: 50 }])).toEqual([0, 1, 3, 10]);
-    expect(presentOpIndices([{ kind: 'lightleak', amount: 60, hue: 20 }])).toEqual([0, 1, 3, 7]);
-    expect(presentOpIndices([{ kind: 'crop', aspect: '1:1', rotate90: 0, angle: 0 }])).toEqual([0, 1, 3, 8]);
-    expect(presentOpIndices([{ kind: 'frame', style: '135' }])).toEqual([0, 1, 3, 11]);
+    expect(presentOpIndices([{ kind: 'grain', amount: 40, size: 25, roughness: 50 }])).toEqual([0, 1, 3, 11]);
+    expect(presentOpIndices([{ kind: 'lightleak', amount: 60, hue: 20 }])).toEqual([0, 1, 3, 8]);
+    expect(presentOpIndices([{ kind: 'crop', aspect: '1:1', rotate90: 0, angle: 0 }])).toEqual([0, 1, 3, 9]);
+    expect(presentOpIndices([{ kind: 'frame', style: '135' }])).toEqual([0, 1, 3, 12]);
+    expect(presentOpIndices([{ kind: 'geometry', vertical: 10, horizontal: 0, rotate: 0, aspect: 0, scale: 100, offsetX: 0, offsetY: 0 }])).toEqual([0, 1, 3, 7]);
   });
 
   it('reports all present ops in registry order, independent of Op[] order', () => {
@@ -176,7 +177,7 @@ describe('OP_RENDERERS packParams', () => {
   });
 
   it('vignette packs 8 floats; neutral when absent, amount-driven when present', () => {
-    const vignette = OP_RENDERERS[9];
+    const vignette = OP_RENDERERS[10];
     expect(vignette.kind).toBe('vignette');
     const absent = vignette.packParams([]);
     expect(absent.length).toBe(8);
@@ -205,7 +206,7 @@ describe('OP_RENDERERS packParams', () => {
   });
 
   it('grain packs amount/size/roughness + the current photo seed; absent op is neutral', () => {
-    const grain = OP_RENDERERS[10];
+    const grain = OP_RENDERERS[11];
     expect(grain.kind).toBe('grain');
     setGrainSeed(0.5);
     const absent = grain.packParams([]);
@@ -216,7 +217,7 @@ describe('OP_RENDERERS packParams', () => {
   });
 
   it('lightleak packs amount/hue + the shared photo seed; absent op is neutral', () => {
-    const lightleak = OP_RENDERERS[7];
+    const lightleak = OP_RENDERERS[8];
     expect(lightleak.kind).toBe('lightleak');
     setGrainSeed(0.5);
     const absent = lightleak.packParams([]);
@@ -227,7 +228,7 @@ describe('OP_RENDERERS packParams', () => {
   });
 
   it('frame packs the style id + cropFrac; absent op is the none identity', () => {
-    const frame = OP_RENDERERS[11];
+    const frame = OP_RENDERERS[12];
     expect(frame.kind).toBe('frame');
     // imageSize is unloaded in tests -> cropFrac defaults to (1,1).
     expect(Array.from(frame.packParams([]))).toEqual([3, 1, 1, 0]); // none = identity
@@ -236,7 +237,7 @@ describe('OP_RENDERERS packParams', () => {
   });
 
   it('crop packs geometry for a 1:1 crop (fits the source dims)', () => {
-    const crop = OP_RENDERERS[8];
+    const crop = OP_RENDERERS[9];
     expect(crop.kind).toBe('crop');
     setImageSize(6000, 4000);
     const packed = crop.packParams([{ kind: 'crop', aspect: '1:1', rotate90: 0, angle: 0 }]);
@@ -245,6 +246,28 @@ describe('OP_RENDERERS packParams', () => {
     expect(packed[2]).toBe(2000); // halfW
     expect(packed[3]).toBe(2000); // halfH
     setImageSize(0, 0);
+  });
+
+  it('geometry packs the homography uniform; absent op is identity', () => {
+    const geometry = OP_RENDERERS[7];
+    expect(geometry.kind).toBe('geometry');
+    // Absent -> neutral defaults (all zero, scale 100 = 1.0), no-op pass.
+    expect(Array.from(geometry.packParams([]))).toEqual([0, 1, 0, 0, 0, 0, 0, 0]);
+    // vertical 10 -> radians angle 0, scale 1, aspect 0, hp 0, vp 0.1, offset 0.
+    const packed = Array.from(
+      geometry.packParams([
+        { kind: 'geometry', vertical: 10, horizontal: 0, rotate: 0, aspect: 0, scale: 100, offsetX: 0, offsetY: 0 },
+      ]),
+    );
+    expect(packed[0]).toBeCloseTo(0, 9);
+    expect(packed[1]).toBeCloseTo(1, 9);
+    expect(packed[4]).toBeCloseTo(0.1, 6);
+    expect(packed[5]).toBeCloseTo(0, 9);
+    // rotate 30 -> 30° in radians.
+    const rotated = geometry.packParams([
+      { kind: 'geometry', vertical: 0, horizontal: 0, rotate: 30, aspect: 0, scale: 100, offsetX: 0, offsetY: 0 },
+    ]);
+    expect(rotated[0]).toBeCloseTo(Math.PI / 6, 6);
   });
 
   it('toneCurve packs a LUT, identity when absent or linear', () => {

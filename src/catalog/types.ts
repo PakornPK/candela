@@ -88,8 +88,9 @@ export type Op =
   | { kind: 'lightleak'; amount: number; hue: number }
   | { kind: 'crop'; aspect: AspectPreset; rotate90: number; angle: number }
   | { kind: 'frame'; style: FrameStyle }
-  | { kind: 'bw'; mix: BwMix; tone: BwToneId };
-  // future op kinds (perspective, dodgeBurn, ...) extend this union.
+  | { kind: 'bw'; mix: BwMix; tone: BwToneId }
+  | { kind: 'geometry'; vertical: number; horizontal: number; rotate: number; aspect: number; scale: number; offsetX: number; offsetY: number };
+  // future op kinds (dodgeBurn, ...) extend this union.
 
 export function isProfileOp(op: Op): op is { kind: 'profile'; profile: ProfileKind } {
   return op.kind === 'profile';
@@ -141,6 +142,12 @@ export function isCropOp(op: Op): op is { kind: 'crop'; aspect: AspectPreset; ro
 
 export function isFrameOp(op: Op): op is { kind: 'frame'; style: FrameStyle } {
   return op.kind === 'frame';
+}
+
+export function isGeometryOp(
+  op: Op,
+): op is { kind: 'geometry'; vertical: number; horizontal: number; rotate: number; aspect: number; scale: number; offsetX: number; offsetY: number } {
+  return op.kind === 'geometry';
 }
 
 export interface EditState {

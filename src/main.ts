@@ -13,7 +13,7 @@ import { loadEditState, saveEditState } from './catalog/editsStore';
 import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
 import { commitEdit, undo, redo, currentOps, createEditState } from './catalog/editHistory';
 import { getOrExtractThumbnail } from './catalog/thumbnails';
-import { isExposureOp, isBwOp, isCropOp, isFrameOp, isGrainOp, isLightleakOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type FrameStyle, type AspectPreset, type WbGains, type BwMix, type BwToneId } from './catalog/types';
+import { isExposureOp, isBwOp, isCropOp, isFrameOp, isGeometryOp, isGrainOp, isLightleakOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type FrameStyle, type AspectPreset, type WbGains, type BwMix, type BwToneId } from './catalog/types';
 import { FILM_STOCKS } from './gpu/film';
 import { buildParametricToneLut, buildToneCurveLut, fitRegionParams, isNeutralTone, parametricControlPoints, TONE_LUT_SIZE, type ToneParams } from './gpu/tone';
 import { isNeutralPresence, type PresenceParams } from './gpu/presence';
@@ -21,6 +21,7 @@ import { isNeutralVignette, type VignetteParams } from './gpu/vignette';
 import { isNeutralGrain, seedFromPath, setGrainSeed, type GrainParams } from './gpu/grain';
 import { isNeutralLightleak, type LightleakParams } from './gpu/lightleak';
 import { isNeutralCrop, type CropParams } from './gpu/crop';
+import { isNeutralGeometry, type GeometryParams } from './gpu/geometry';
 import { BW_FILTERS, BW_TONES, type BwFilterId } from './gpu/bw';
 import { getState, selectFile, setSelection, subscribe, type ModuleId } from './app/state';
 import { registerModule, switchModule } from './app/modules';
@@ -104,6 +105,21 @@ const rotateCcwBtn = document.querySelector<HTMLButtonElement>('#rotate-ccw')!;
 const rotateCwBtn = document.querySelector<HTMLButtonElement>('#rotate-cw')!;
 const straightenSlider = document.querySelector<HTMLInputElement>('#straighten')!;
 const straightenValue = document.querySelector<HTMLOutputElement>('#straighten-value')!;
+// Transform (geometry) sliders -- LrC's Transform panel.
+const geometryVerticalSlider = document.querySelector<HTMLInputElement>('#geometry-vertical')!;
+const geometryVerticalValue = document.querySelector<HTMLOutputElement>('#geometry-vertical-value')!;
+const geometryHorizontalSlider = document.querySelector<HTMLInputElement>('#geometry-horizontal')!;
+const geometryHorizontalValue = document.querySelector<HTMLOutputElement>('#geometry-horizontal-value')!;
+const geometryRotateSlider = document.querySelector<HTMLInputElement>('#geometry-rotate')!;
+const geometryRotateValue = document.querySelector<HTMLOutputElement>('#geometry-rotate-value')!;
+const geometryAspectSlider = document.querySelector<HTMLInputElement>('#geometry-aspect')!;
+const geometryAspectValue = document.querySelector<HTMLOutputElement>('#geometry-aspect-value')!;
+const geometryScaleSlider = document.querySelector<HTMLInputElement>('#geometry-scale')!;
+const geometryScaleValue = document.querySelector<HTMLOutputElement>('#geometry-scale-value')!;
+const geometryOffsetXSlider = document.querySelector<HTMLInputElement>('#geometry-offsetx')!;
+const geometryOffsetXValue = document.querySelector<HTMLOutputElement>('#geometry-offsetx-value')!;
+const geometryOffsetYSlider = document.querySelector<HTMLInputElement>('#geometry-offsety')!;
+const geometryOffsetYValue = document.querySelector<HTMLOutputElement>('#geometry-offsety-value')!;
 // Cumulative clockwise quarter-turns (0..3) of the crop tool. Not a slider --
 // step state advanced by the rotate buttons, restored by applyOpsToSliders.
 let cropRotate90 = 0;
@@ -288,6 +304,14 @@ const ALL_SLIDERS: SliderConfig[] = [
   // Crop straighten -- the aspect select + rotate buttons are separate (mode
   // switches, not sliders); only the angle is a slider.
   { slider: straightenSlider, output: straightenValue, neutral: 0, format: (v) => `${formatSigned(v, 1)}°` },
+  // Transform (geometry) -- scale's neutral is 100 (1:1), the rest are 0.
+  { slider: geometryVerticalSlider, output: geometryVerticalValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: geometryHorizontalSlider, output: geometryHorizontalValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: geometryRotateSlider, output: geometryRotateValue, neutral: 0, format: (v) => `${formatSigned(v, 1)}°` },
+  { slider: geometryAspectSlider, output: geometryAspectValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: geometryScaleSlider, output: geometryScaleValue, neutral: 100, format: (v) => `${v}%` },
+  { slider: geometryOffsetXSlider, output: geometryOffsetXValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: geometryOffsetYSlider, output: geometryOffsetYValue, neutral: 0, format: (v) => formatSigned(v) },
 ];
 
 function paintSliders(): void {
@@ -497,6 +521,18 @@ function readCropParams(): CropParams {
   };
 }
 
+function readGeometryParams(): GeometryParams {
+  return {
+    vertical: Number(geometryVerticalSlider.value),
+    horizontal: Number(geometryHorizontalSlider.value),
+    rotate: Number(geometryRotateSlider.value),
+    aspect: Number(geometryAspectSlider.value),
+    scale: Number(geometryScaleSlider.value),
+    offsetX: Number(geometryOffsetXSlider.value),
+    offsetY: Number(geometryOffsetYSlider.value),
+  };
+}
+
 // B&W treatment. The mix tuple is in RGB order (Red..Magenta), matching both
 // the bw op's BwMix and the shader's band array.
 function readBwMix(): BwMix {
@@ -571,6 +607,10 @@ function currentOpsFromSliders(): Op[] {
   // 0° straighten = no pass) -- same rule as vignette/grain.
   const crop = readCropParams();
   if (!isNeutralCrop(crop)) ops.push({ kind: 'crop', ...crop });
+  // Transform (geometry) is emitted only when non-neutral (all-zero keystone/
+  // rotate/aspect/offset, scale 100 = no pass) -- same rule as crop.
+  const geometry = readGeometryParams();
+  if (!isNeutralGeometry(geometry)) ops.push({ kind: 'geometry', ...geometry });
   // Film frame is a mode switch (style select): 'none' emits nothing.
   const frameStyle = frameStyleSelect.value as FrameStyle;
   if (frameStyle !== 'none') ops.push({ kind: 'frame', style: frameStyle });
@@ -594,6 +634,7 @@ function applyOpsToSliders(ops: Op[]): void {
   const grainOp = ops.find(isGrainOp);
   const lightleakOp = ops.find(isLightleakOp);
   const cropOp = ops.find(isCropOp);
+  const geometryOp = ops.find(isGeometryOp);
   const frameOp = ops.find(isFrameOp);
   const bwOp = ops.find(isBwOp);
   profileSelect.value = profileOp?.profile ?? 'camera';
@@ -645,6 +686,14 @@ function applyOpsToSliders(ops: Op[]): void {
   cropAspectSelect.value = cropOp?.aspect ?? 'original';
   cropRotate90 = cropOp?.rotate90 ?? 0;
   straightenSlider.value = String(cropOp?.angle ?? 0);
+  // Transform: an absent op restores the neutral sliders (scale 100).
+  geometryVerticalSlider.value = String(geometryOp?.vertical ?? 0);
+  geometryHorizontalSlider.value = String(geometryOp?.horizontal ?? 0);
+  geometryRotateSlider.value = String(geometryOp?.rotate ?? 0);
+  geometryAspectSlider.value = String(geometryOp?.aspect ?? 0);
+  geometryScaleSlider.value = String(geometryOp?.scale ?? 100);
+  geometryOffsetXSlider.value = String(geometryOp?.offsetX ?? 0);
+  geometryOffsetYSlider.value = String(geometryOp?.offsetY ?? 0);
   frameStyleSelect.value = frameOp?.style ?? 'none';
   // B&W: the op's presence IS the treatment (no bw op = Color). Mix sliders
   // restore to the op's 8 weights (0 = that hue contributes normal luminance);
@@ -760,6 +809,16 @@ function opsToLabel(ops: Op[]): string {
         if (op.rotate90 !== 0) parts.push(`${op.rotate90 * 90}°`);
         if (op.angle !== 0) parts.push(`Straighten ${formatSigned(op.angle, 1)}°`);
         return `Crop ${parts.join(' · ')}`;
+      }
+      if (isGeometryOp(op)) {
+        const parts: string[] = [];
+        if (op.vertical !== 0) parts.push(`V ${formatSigned(op.vertical)}`);
+        if (op.horizontal !== 0) parts.push(`H ${formatSigned(op.horizontal)}`);
+        if (op.rotate !== 0) parts.push(`Rotate ${formatSigned(op.rotate, 1)}°`);
+        if (op.aspect !== 0) parts.push(`Aspect ${formatSigned(op.aspect)}`);
+        if (op.scale !== 100) parts.push(`Scale ${op.scale}%`);
+        if (op.offsetX !== 0 || op.offsetY !== 0) parts.push(`Offset ${formatSigned(op.offsetX)},${formatSigned(op.offsetY)}`);
+        return `Transform ${parts.join(' · ')}`;
       }
       if (isBwOp(op)) {
         const tone = op.tone !== 'none' ? ` · ${BW_TONES[op.tone].name}` : '';
