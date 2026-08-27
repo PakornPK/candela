@@ -13,7 +13,7 @@ import { loadEditState, saveEditState } from './catalog/editsStore';
 import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
 import { commitEdit, undo, redo, currentOps, createEditState } from './catalog/editHistory';
 import { getOrExtractThumbnail } from './catalog/thumbnails';
-import { isExposureOp, isBwOp, isGrainOp, isLightleakOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type WbGains, type BwMix, type BwToneId } from './catalog/types';
+import { isExposureOp, isBwOp, isFrameOp, isGrainOp, isLightleakOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type FrameStyle, type WbGains, type BwMix, type BwToneId } from './catalog/types';
 import { FILM_STOCKS } from './gpu/film';
 import { buildParametricToneLut, buildToneCurveLut, fitRegionParams, isNeutralTone, parametricControlPoints, TONE_LUT_SIZE, type ToneParams } from './gpu/tone';
 import { isNeutralPresence, type PresenceParams } from './gpu/presence';
@@ -97,6 +97,7 @@ const lightleakAmountSlider = document.querySelector<HTMLInputElement>('#lightle
 const lightleakHueSlider = document.querySelector<HTMLInputElement>('#lightleak-hue')!;
 const lightleakAmountValue = document.querySelector<HTMLOutputElement>('#lightleak-amount-value')!;
 const lightleakHueValue = document.querySelector<HTMLOutputElement>('#lightleak-hue-value')!;
+const frameStyleSelect = document.querySelector<HTMLSelectElement>('#frame-style')!;
 const bwTreatmentSelect = document.querySelector<HTMLSelectElement>('#bw-treatment')!;
 const bwControls = document.querySelector<HTMLDivElement>('#bw-controls')!;
 const bwFilterSelect = document.querySelector<HTMLSelectElement>('#bw-filter')!;
@@ -543,6 +544,9 @@ function currentOpsFromSliders(): Op[] {
   // on its own) -- same rule as vignette/grain.
   const lightleak = readLightleakParams();
   if (!isNeutralLightleak(lightleak)) ops.push({ kind: 'lightleak', ...lightleak });
+  // Film frame is a mode switch (style select): 'none' emits nothing.
+  const frameStyle = frameStyleSelect.value as FrameStyle;
+  if (frameStyle !== 'none') ops.push({ kind: 'frame', style: frameStyle });
   // B&W treatment is a mode switch, not a slider: emit the op only while
   // Treatment = Black & White. Even a fully-neutral mix+tone is still a real
   // edit (Color -> B&W conversion), so it always emits when enabled.
@@ -562,6 +566,7 @@ function applyOpsToSliders(ops: Op[]): void {
   const vignetteOp = ops.find(isVignetteOp);
   const grainOp = ops.find(isGrainOp);
   const lightleakOp = ops.find(isLightleakOp);
+  const frameOp = ops.find(isFrameOp);
   const bwOp = ops.find(isBwOp);
   profileSelect.value = profileOp?.profile ?? 'camera';
   exposureSlider.value = String(exposureOp?.ev ?? 0);
@@ -609,6 +614,7 @@ function applyOpsToSliders(ops: Op[]): void {
   grainRoughnessSlider.value = String(grainOp?.roughness ?? 50);
   lightleakAmountSlider.value = String(lightleakOp?.amount ?? 0);
   lightleakHueSlider.value = String(lightleakOp?.hue ?? 0);
+  frameStyleSelect.value = frameOp?.style ?? 'none';
   // B&W: the op's presence IS the treatment (no bw op = Color). Mix sliders
   // restore to the op's 8 weights (0 = that hue contributes normal luminance);
   // a neutral op is a plain desaturation and restores the filter to None.
@@ -713,6 +719,9 @@ function opsToLabel(ops: Op[]): string {
       }
       if (isLightleakOp(op)) {
         return `Light leak ${formatSigned(op.amount)}${op.hue !== 0 ? ` · Color ${op.hue}` : ''}`;
+      }
+      if (isFrameOp(op)) {
+        return `Frame ${op.style === '135' ? '135' : op.style === '120' ? '120' : 'Print'}`;
       }
       if (isBwOp(op)) {
         const tone = op.tone !== 'none' ? ` · ${BW_TONES[op.tone].name}` : '';
@@ -1260,6 +1269,7 @@ async function init(): Promise<void> {
     for (const cfg of ALL_SLIDERS) cfg.slider.disabled = !enabled;
     profileSelect.disabled = !enabled;
     bwTreatmentSelect.disabled = !enabled;
+    frameStyleSelect.disabled = !enabled;
     syncBwEnabled();
     curveAdjust.disabled = !enabled;
     curveCanvas.style.pointerEvents = enabled ? 'auto' : 'none';
@@ -1535,6 +1545,12 @@ async function init(): Promise<void> {
     commitCurrentEdit();
   });
   bwToneSelect.addEventListener('change', () => {
+    onSliderInput();
+    commitCurrentEdit();
+  });
+
+  // Film frame is a discrete mode switch like B&W treatment.
+  frameStyleSelect.addEventListener('change', () => {
     onSliderInput();
     commitCurrentEdit();
   });

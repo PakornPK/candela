@@ -69,6 +69,9 @@ export type ProfileKind = 'camera' | 'neutral' | FilmStockId;
 export type BwMix = [number, number, number, number, number, number, number, number];
 export type BwToneId = 'none' | 'acros' | 'tx400' | 'doublex' | 'leica';
 
+// Film-frame style (Effects panel). 'none' = no frame.
+export type FrameStyle = 'none' | '135' | '120' | 'print';
+
 export type Op =
   | { kind: 'profile'; profile: ProfileKind }
   | { kind: 'exposure'; ev: number }
@@ -79,6 +82,7 @@ export type Op =
   | { kind: 'vignette'; amount: number; midpoint: number; roundness: number; feather: number; highlights: number }
   | { kind: 'grain'; amount: number; size: number; roughness: number }
   | { kind: 'lightleak'; amount: number; hue: number }
+  | { kind: 'frame'; style: FrameStyle }
   | { kind: 'bw'; mix: BwMix; tone: BwToneId };
   // future op kinds (crop, ...) extend this union.
 
@@ -124,6 +128,10 @@ export function isGrainOp(op: Op): op is { kind: 'grain'; amount: number; size: 
 
 export function isLightleakOp(op: Op): op is { kind: 'lightleak'; amount: number; hue: number } {
   return op.kind === 'lightleak';
+}
+
+export function isFrameOp(op: Op): op is { kind: 'frame'; style: FrameStyle } {
+  return op.kind === 'frame';
 }
 
 export interface EditState {

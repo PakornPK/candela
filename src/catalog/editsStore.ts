@@ -109,6 +109,10 @@ export function isValidOp(op: unknown): op is Op {
     const l = op as { amount?: unknown; hue?: unknown };
     return [l.amount, l.hue].every((v) => typeof v === 'number');
   }
+  if (candidate.kind === 'frame') {
+    const s = (op as { style?: unknown }).style;
+    return s === 'none' || s === '135' || s === '120' || s === 'print';
+  }
   return false;
 }
 

@@ -7,7 +7,7 @@ import { buildBwToneLut } from './bw';
 import type { Op } from '../catalog/types';
 
 const NEUTRAL_TONE = { kind: 'tone', contrast: 0, highlights: 0, shadows: 0, whites: 0, blacks: 0 } as const;
-// Registry order: [whiteBalance, profile, exposure, tone, bw, toneCurve, presence, vignette, grain, lightleak].
+// Registry order: [whiteBalance, profile, exposure, tone, bw, toneCurve, presence, vignette, grain, lightleak, frame].
 // Three passes are mandatory -- they always run even with no ops (fresh open):
 // whiteBalance (As-Shot fallback), profile (camera matrix), and tone (neutral
 // tone now renders the ACR baseline curve -- the LrC import look, see tone.ts).
@@ -30,6 +30,7 @@ describe('presentOpIndices', () => {
     expect(presentOpIndices([{ kind: 'bw', mix: [0, 0, 0, 0, 0, 0, 0, 0], tone: 'acros' }])).toEqual([0, 1, 3, 4]);
     expect(presentOpIndices([{ kind: 'grain', amount: 40, size: 25, roughness: 50 }])).toEqual([0, 1, 3, 8]);
     expect(presentOpIndices([{ kind: 'lightleak', amount: 60, hue: 20 }])).toEqual([0, 1, 3, 9]);
+    expect(presentOpIndices([{ kind: 'frame', style: '135' }])).toEqual([0, 1, 3, 10]);
   });
 
   it('reports all present ops in registry order, independent of Op[] order', () => {
@@ -221,6 +222,14 @@ describe('OP_RENDERERS packParams', () => {
     setGrainSeed(0.75);
     const warm = lightleak.packParams([{ kind: 'lightleak', amount: 70, hue: 0 }]);
     expect(Array.from(warm)).toEqual([70, 0, 0.75, 0, 0, 0, 0, 0]);
+  });
+
+  it('frame packs the style id; absent op is the none identity', () => {
+    const frame = OP_RENDERERS[10];
+    expect(frame.kind).toBe('frame');
+    expect(Array.from(frame.packParams([]))).toEqual([3, 0, 0, 0]); // none = identity
+    expect(Array.from(frame.packParams([{ kind: 'frame', style: '135' }]))).toEqual([0, 0, 0, 0]);
+    expect(Array.from(frame.packParams([{ kind: 'frame', style: 'print' }]))).toEqual([2, 0, 0, 0]);
   });
 
   it('toneCurve packs a LUT, identity when absent or linear', () => {
