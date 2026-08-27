@@ -1381,14 +1381,23 @@ async function init(): Promise<void> {
       return;
     }
     liveRenderInFlight = true;
-    do {
-      liveRenderPending = false;
-      const start = performance.now();
-      renderOps(currentOpsFromSliders());
-      await pipeline.waitForGPU();
-      console.log(`slider->frame: ${(performance.now() - start).toFixed(1)}ms`);
-    } while (liveRenderPending);
-    liveRenderInFlight = false;
+    try {
+      do {
+        liveRenderPending = false;
+        const start = performance.now();
+        renderOps(currentOpsFromSliders());
+        await pipeline.waitForGPU();
+        console.log(`slider->frame: ${(performance.now() - start).toFixed(1)}ms`);
+      } while (liveRenderPending);
+    } catch (err) {
+      // One failed render must not brick the live loop forever: without the
+      // finally below, liveRenderInFlight stays true and every later drag is
+      // swallowed as "pending" -- image frozen, no error anywhere (the bug
+      // that looked like "bw mix doesn't change anything"). Log and move on.
+      console.error('[live render failed]', err);
+    } finally {
+      liveRenderInFlight = false;
+    }
   }
 
   // Fires on slider release (the 'change' event), not on every 'input'
