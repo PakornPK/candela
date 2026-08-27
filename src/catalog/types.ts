@@ -78,6 +78,7 @@ export type Op =
   | { kind: 'presence'; texture: number; clarity: number; dehaze: number; vibrance: number; saturation: number }
   | { kind: 'vignette'; amount: number; midpoint: number; roundness: number; feather: number; highlights: number }
   | { kind: 'grain'; amount: number; size: number; roughness: number }
+  | { kind: 'lightleak'; amount: number; hue: number }
   | { kind: 'bw'; mix: BwMix; tone: BwToneId };
   // future op kinds (crop, ...) extend this union.
 
@@ -119,6 +120,10 @@ export function isBwOp(op: Op): op is { kind: 'bw'; mix: BwMix; tone: BwToneId }
 
 export function isGrainOp(op: Op): op is { kind: 'grain'; amount: number; size: number; roughness: number } {
   return op.kind === 'grain';
+}
+
+export function isLightleakOp(op: Op): op is { kind: 'lightleak'; amount: number; hue: number } {
+  return op.kind === 'lightleak';
 }
 
 export interface EditState {

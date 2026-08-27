@@ -13,12 +13,13 @@ import { loadEditState, saveEditState } from './catalog/editsStore';
 import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
 import { commitEdit, undo, redo, currentOps, createEditState } from './catalog/editHistory';
 import { getOrExtractThumbnail } from './catalog/thumbnails';
-import { isExposureOp, isBwOp, isGrainOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type WbGains, type BwMix, type BwToneId } from './catalog/types';
+import { isExposureOp, isBwOp, isGrainOp, isLightleakOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type WbGains, type BwMix, type BwToneId } from './catalog/types';
 import { FILM_STOCKS } from './gpu/film';
 import { buildParametricToneLut, buildToneCurveLut, fitRegionParams, isNeutralTone, parametricControlPoints, TONE_LUT_SIZE, type ToneParams } from './gpu/tone';
 import { isNeutralPresence, type PresenceParams } from './gpu/presence';
 import { isNeutralVignette, type VignetteParams } from './gpu/vignette';
 import { isNeutralGrain, seedFromPath, setGrainSeed, type GrainParams } from './gpu/grain';
+import { isNeutralLightleak, type LightleakParams } from './gpu/lightleak';
 import { BW_FILTERS, BW_TONES, type BwFilterId } from './gpu/bw';
 import { getState, selectFile, setSelection, subscribe, type ModuleId } from './app/state';
 import { registerModule, switchModule } from './app/modules';
@@ -92,6 +93,10 @@ const grainRoughnessSlider = document.querySelector<HTMLInputElement>('#grain-ro
 const grainAmountValue = document.querySelector<HTMLOutputElement>('#grain-amount-value')!;
 const grainSizeValue = document.querySelector<HTMLOutputElement>('#grain-size-value')!;
 const grainRoughnessValue = document.querySelector<HTMLOutputElement>('#grain-roughness-value')!;
+const lightleakAmountSlider = document.querySelector<HTMLInputElement>('#lightleak-amount')!;
+const lightleakHueSlider = document.querySelector<HTMLInputElement>('#lightleak-hue')!;
+const lightleakAmountValue = document.querySelector<HTMLOutputElement>('#lightleak-amount-value')!;
+const lightleakHueValue = document.querySelector<HTMLOutputElement>('#lightleak-hue-value')!;
 const bwTreatmentSelect = document.querySelector<HTMLSelectElement>('#bw-treatment')!;
 const bwControls = document.querySelector<HTMLDivElement>('#bw-controls')!;
 const bwFilterSelect = document.querySelector<HTMLSelectElement>('#bw-filter')!;
@@ -250,6 +255,9 @@ const ALL_SLIDERS: SliderConfig[] = [
   { slider: grainAmountSlider, output: grainAmountValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: grainSizeSlider, output: grainSizeValue, neutral: 25, format: (v) => formatSigned(v) },
   { slider: grainRoughnessSlider, output: grainRoughnessValue, neutral: 50, format: (v) => formatSigned(v) },
+  // Light leak -- 0..100 sliders, amount 0 off, color 0 = warm (classic).
+  { slider: lightleakAmountSlider, output: lightleakAmountValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: lightleakHueSlider, output: lightleakHueValue, neutral: 0, format: (v) => formatSigned(v) },
   // B&W mix sliders -- only live while Treatment is Black & White (the bw op
   // is emitted only then), but they share the paint/commit loop like the rest.
   { slider: bwMixSliders.red, output: bwMixValues.red, neutral: 0, format: (v) => formatSigned(v) },
@@ -458,6 +466,13 @@ function readGrainParams(): GrainParams {
   };
 }
 
+function readLightleakParams(): LightleakParams {
+  return {
+    amount: Number(lightleakAmountSlider.value),
+    hue: Number(lightleakHueSlider.value),
+  };
+}
+
 // B&W treatment. The mix tuple is in RGB order (Red..Magenta), matching both
 // the bw op's BwMix and the shader's band array.
 function readBwMix(): BwMix {
@@ -524,6 +539,10 @@ function currentOpsFromSliders(): Op[] {
   // like vignette.
   const grain = readGrainParams();
   if (!isNeutralGrain(grain)) ops.push({ kind: 'grain', ...grain });
+  // Light leak is emitted only when the amount is non-zero (hue does nothing
+  // on its own) -- same rule as vignette/grain.
+  const lightleak = readLightleakParams();
+  if (!isNeutralLightleak(lightleak)) ops.push({ kind: 'lightleak', ...lightleak });
   // B&W treatment is a mode switch, not a slider: emit the op only while
   // Treatment = Black & White. Even a fully-neutral mix+tone is still a real
   // edit (Color -> B&W conversion), so it always emits when enabled.
@@ -542,6 +561,7 @@ function applyOpsToSliders(ops: Op[]): void {
   const presenceOp = ops.find(isPresenceOp);
   const vignetteOp = ops.find(isVignetteOp);
   const grainOp = ops.find(isGrainOp);
+  const lightleakOp = ops.find(isLightleakOp);
   const bwOp = ops.find(isBwOp);
   profileSelect.value = profileOp?.profile ?? 'camera';
   exposureSlider.value = String(exposureOp?.ev ?? 0);
@@ -587,6 +607,8 @@ function applyOpsToSliders(ops: Op[]): void {
   grainAmountSlider.value = String(grainOp?.amount ?? 0);
   grainSizeSlider.value = String(grainOp?.size ?? 25);
   grainRoughnessSlider.value = String(grainOp?.roughness ?? 50);
+  lightleakAmountSlider.value = String(lightleakOp?.amount ?? 0);
+  lightleakHueSlider.value = String(lightleakOp?.hue ?? 0);
   // B&W: the op's presence IS the treatment (no bw op = Color). Mix sliders
   // restore to the op's 8 weights (0 = that hue contributes normal luminance);
   // a neutral op is a plain desaturation and restores the filter to None.
@@ -688,6 +710,9 @@ function opsToLabel(ops: Op[]): string {
       }
       if (isGrainOp(op)) {
         return `Grain ${formatSigned(op.amount)}`;
+      }
+      if (isLightleakOp(op)) {
+        return `Light leak ${formatSigned(op.amount)}${op.hue !== 0 ? ` · Color ${op.hue}` : ''}`;
       }
       if (isBwOp(op)) {
         const tone = op.tone !== 'none' ? ` · ${BW_TONES[op.tone].name}` : '';

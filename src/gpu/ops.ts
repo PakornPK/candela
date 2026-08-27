@@ -6,13 +6,15 @@ import cameraColorShader from '../shaders/cameraColor.wgsl?raw';
 import presenceShader from '../shaders/presence.wgsl?raw';
 import vignetteShader from '../shaders/vignette.wgsl?raw';
 import grainShader from '../shaders/grain.wgsl?raw';
+import lightleakShader from '../shaders/lightleak.wgsl?raw';
 import bwShader from '../shaders/bw.wgsl?raw';
 import { evToGain, kelvinToShift, packColorMatrix, wbShiftToGains, type WhiteBalanceGains } from './uniforms';
 import { buildParametricToneLut, buildToneCurveLut, buildToneLuts, TONE_LUT_SIZE, type ToneParams, type ToneLook } from './tone';
-import { isPresenceOp, isBwOp, isExposureOp, isGrainOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type WbGains } from '../catalog/types';
+import { isPresenceOp, isBwOp, isExposureOp, isGrainOp, isLightleakOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type WbGains } from '../catalog/types';
 import { packPresence, type PresenceParams } from './presence';
 import { packVignette, type VignetteParams } from './vignette';
 import { packGrain, getGrainSeed, type GrainParams } from './grain';
+import { packLightleak, type LightleakParams } from './lightleak';
 import { packBw } from './bw';
 import { FILM_STOCKS, isFilmStockId } from './film';
 import type { FilmStock } from './film';
@@ -208,9 +210,9 @@ export const OP_RENDERERS: OpRenderer[] = [
   },
   {
     kind: 'grain',
-    // LAST -- LrC's Effects panel applies grain on top of the vignette.
-    // Display-referred seeded luminance noise, seeded per-photo so the pattern
-    // is deterministic. Absent op packs the neutral defaults (amount 0) so a
+    // LrC's Effects panel applies grain on top of the vignette. Display-
+    // referred seeded luminance noise, seeded per-photo so the pattern is
+    // deterministic. Absent op packs the neutral defaults (amount 0) so a
     // no-op pass renders as identity.
     shader: grainShader,
     uniformSize: 32, // struct Grain { 4 f32 + 4 pad }
@@ -218,6 +220,19 @@ export const OP_RENDERERS: OpRenderer[] = [
       const op = ops.find(isGrainOp);
       const p: GrainParams = op ?? { amount: 0, size: 25, roughness: 50 };
       return packGrain(p, getGrainSeed());
+    },
+  },
+  {
+    kind: 'lightleak',
+    // LAST -- a creative display-level effect (not in LrC). Seed shared with
+    // grain (same film-roll character). Absent op packs the neutral defaults
+    // (amount 0) so a no-op pass renders as identity.
+    shader: lightleakShader,
+    uniformSize: 32, // struct Lightleak { 3 f32 + 5 pad }
+    packParams: (ops) => {
+      const op = ops.find(isLightleakOp);
+      const p: LightleakParams = op ?? { amount: 0, hue: 0 };
+      return packLightleak(p, getGrainSeed());
     },
   },
 ];

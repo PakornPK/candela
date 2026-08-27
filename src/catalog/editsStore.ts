@@ -105,6 +105,10 @@ export function isValidOp(op: unknown): op is Op {
     const g = op as { amount?: unknown; size?: unknown; roughness?: unknown };
     return [g.amount, g.size, g.roughness].every((v) => typeof v === 'number');
   }
+  if (candidate.kind === 'lightleak') {
+    const l = op as { amount?: unknown; hue?: unknown };
+    return [l.amount, l.hue].every((v) => typeof v === 'number');
+  }
   return false;
 }
 
