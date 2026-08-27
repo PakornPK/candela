@@ -416,6 +416,25 @@
       #preset-save:hover {
         background: #2f2f34;
       }
+      .crop-rotate-row {
+        display: flex;
+        gap: 6px;
+        margin: 6px 0;
+      }
+      .crop-rotate-row button {
+        flex: 1;
+        background: none;
+        border: 1px solid var(--panel-border);
+        color: var(--text);
+        border-radius: 4px;
+        padding: 3px 8px;
+        cursor: pointer;
+        font: inherit;
+        font-size: 12px;
+      }
+      .crop-rotate-row button:hover {
+        background: #2f2f34;
+      }
       #preset-list {
         display: flex;
         flex-direction: column;
@@ -865,6 +884,27 @@
         <aside class="panel right">
           <div id="camera-info" class="camera-info"></div>
           <canvas id="histogram" width="256" height="110"></canvas>
+          <details class="panel-section" open>
+            <summary>Crop</summary>
+            <label class="adjust-label" for="crop-aspect">Aspect
+              <select id="crop-aspect">
+                <option value="original" selected>Original</option>
+                <option value="1:1">1:1</option>
+                <option value="3:2">3:2</option>
+                <option value="4:3">4:3</option>
+                <option value="5:4">5:4</option>
+                <option value="16:9">16:9</option>
+                <option value="2:3">2:3</option>
+                <option value="4:5">4:5</option>
+              </select>
+            </label>
+            <div class="crop-rotate-row">
+              <button id="rotate-ccw">⟲ 90°</button>
+              <button id="rotate-cw">⟳ 90°</button>
+            </div>
+            <label class="slider-label" for="straighten">Straighten <output id="straighten-value" for="straighten">0.0°</output></label>
+            <input type="range" id="straighten" min="-45" max="45" step="0.1" value="0" />
+          </details>
           <details class="panel-section" open>
             <summary>Profile</summary>
             <select id="profile">

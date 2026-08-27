@@ -15,9 +15,9 @@
 
 struct Frame {
   style: f32,      // 0/1/2/3
+  cropFracX: f32,  // crop mask / texture (see crop.ts); 1 = no crop
+  cropFracY: f32,
   _pad0: f32,
-  _pad1: f32,
-  _pad2: f32,
 };
 
 // Border band as a fraction of the frame (matches FRAME_BORDER in frame.ts).
@@ -52,13 +52,37 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= dims.x || id.y >= dims.y) { return; }
   let style = u32(p.style);
   let b = borderF(style);
+  let cfx = max(p.cropFracX, 1e-3);
+  let cfy = max(p.cropFracY, 1e-3);
   let nx = (f32(id.x) + 0.5) / f32(dims.x);
   let ny = (f32(id.y) + 0.5) / f32(dims.y);
 
-  // Inside the image rect -> sample the scaled-down source (nearest).
-  if (nx > b && nx < 1.0 - b && ny > b && ny < 1.0 - b) {
-    let sx = clamp((nx - b) / (1.0 - 2.0 * b), 0.0, 1.0);
-    let sy = clamp((ny - b) / (1.0 - 2.0 * b), 0.0, 1.0);
+  // The crop op leaves its content centered in the texture, black outside
+  // (cropFrac = 1,1 when there's no crop -> the crop region IS the texture,
+  // so every formula below reduces to the no-crop geometry). The frame wraps
+  // the CROP rect: rebate of border b around it, image = the crop rect
+  // shrunk by b -- exactly the no-crop layout applied inside the crop.
+  let cropL = (1.0 - cfx) * 0.5;
+  let cropT = (1.0 - cfy) * 0.5;
+  let bx = b * cfx; // border thickness in texture space
+  let by = b * cfy;
+  let imgL = cropL + bx;
+  let imgR = cropL + cfx - bx;
+  let imgT = cropT + by;
+  let imgB = cropT + cfy - by;
+
+  // Beyond the rebate -> letterbox black (only exists with a crop).
+  if (nx < cropL || nx > cropL + cfx || ny < cropT || ny > cropT + cfy) {
+    textureStore(outTex, vec2<i32>(id.xy), vec4<f32>(0.0, 0.0, 0.0, 1.0));
+    return;
+  }
+
+  // Inside the image rect -> sample the crop region, scaled down (nearest).
+  if (nx > imgL && nx < imgR && ny > imgT && ny < imgB) {
+    let fx = (nx - cropL) / cfx; // 0..1 across the crop content
+    let fy = (ny - cropT) / cfy;
+    let sx = cropL + clamp((fx - b) / (1.0 - 2.0 * b), 0.0, 1.0) * cfx;
+    let sy = cropT + clamp((fy - b) / (1.0 - 2.0 * b), 0.0, 1.0) * cfy;
     let sxi = min(u32(floor(sx * f32(dims.x))), dims.x - 1u);
     let syi = min(u32(floor(sy * f32(dims.y))), dims.y - 1u);
     let c = textureLoad(inTex, vec2<i32>(i32(sxi), i32(syi)), 0);
@@ -67,16 +91,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   }
 
   // Rebate band. Sprocket holes read as lighter than the black rebate (light
-  // passes through), so a pixel inside a hole is repainted light.
+  // passes through), so a pixel inside a hole is repainted light. Hole pitch
+  // is relative to the crop content so it scales with the framed image.
   var color = rebateColor(style);
   let hole = holeF(style);
   if (hole > 0.0) {
-    let phase = nx / 0.055 - floor(nx / 0.055);
+    let px = (nx - cropL) / cfx;
+    let phase = px / 0.055 - floor(px / 0.055);
     let inCell = phase < 0.6;
     if (inCell) {
       let half = hole * 0.5;
-      let topBand = abs(ny - b * 0.5) < half;
-      let bottomBand = abs(ny - (1.0 - b * 0.5)) < half;
+      let topBand = abs(ny - (cropT + by * 0.5)) < half;
+      let bottomBand = abs(ny - (cropT + cfy - by * 0.5)) < half;
       if (topBand || bottomBand) {
         color = vec3<f32>(0.18, 0.18, 0.22); // hole: light spills through
       }

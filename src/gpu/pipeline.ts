@@ -2,7 +2,8 @@ import unpackShader from '../shaders/unpack.wgsl?raw';
 import demosaicShader from '../shaders/demosaic.wgsl?raw';
 import blitShader from '../shaders/blit.wgsl?raw';
 import { packCfa6, shiftCfa6 } from './uniforms';
-import { OP_RENDERERS, presentOpIndices, setAsShotGains, setCameraColorMatrix, setCameraXyz } from './ops';
+import { OP_RENDERERS, presentOpIndices, setAsShotGains, setCameraColorMatrix, setCameraXyz, setImageSize } from './ops';
+import { cropFracFromOps } from './crop';
 import type { Op } from '../catalog/types';
 import type { DecodedRaw } from '../raw/decode';
 
@@ -28,6 +29,15 @@ export class Pipeline {
 
   private readonly levelsBuffer: GPUBuffer;
   private readonly cfaBuffer: GPUBuffer;
+  // Blit uniforms (blit.wgsl binding 2): the crop mask fraction the blit
+  // samples. The canvas always shows the full texture (window view = crop +
+  // bars) so its buffer holds (1,1) forever; the histogram/export blits use a
+  // SEPARATE buffer written per-use with the real fraction. Two buffers --
+  // device.queue.writeBuffer for the crop one can't clobber the canvas one
+  // (they'd both be wrong if shared, since queue writes land before any
+  // encoder in the submit executes).
+  private readonly canvasBlitUniform: GPUBuffer;
+  private readonly cropBlitUniform: GPUBuffer;
   // One pipeline + uniform buffer per op kind, in OP_RENDERERS order. Index 0
   // is the `profile` op (camera color matrix) -- it subsumed the load-time
   // matrix pass, so there is no separate colorMatrixBuffer/cameraColorPipeline.
@@ -88,6 +98,9 @@ export class Pipeline {
     // 9 x vec4<u32> = 144 bytes -- the 6x6 CFA, one color per component
     // (packCfa6 emits 36 u32s filling all 144 bytes).
     this.cfaBuffer = device.createBuffer({ size: 144, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.canvasBlitUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.cropBlitUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    this.device.queue.writeBuffer(this.canvasBlitUniform, 0, new Float32Array([1, 1, 0, 0]));
     this.opUniformBuffers = OP_RENDERERS.map((r) => device.createBuffer({
       size: r.uniformSize,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -213,6 +226,10 @@ export class Pipeline {
     // As-Shot WB default (identity when the camera reports no cam_mul). The
     // whiteBalance op's packParams reads this when no WB op is present.
     setAsShotGains(raw.asShotGains ?? { r: 1, g: 1, b: 1 });
+    // The crop op's geometry, and the vignette/frame cropFrac it feeds, are
+    // fractions of the effective size -- module-level in ops.ts so packParams
+    // can resolve them from the current image.
+    setImageSize(effW, effH);
 
     const encoder = this.device.createCommandEncoder();
     this.dispatchUnpack(encoder, effW, effH);
@@ -311,6 +328,9 @@ export class Pipeline {
       entries: [
         { binding: 0, resource: this.displayTexture.createView() },
         { binding: 1, resource: this.blitSampler },
+        // canvasBlitUniform stays (1,1): the canvas is the window view, crop +
+        // bars, never the cropped region alone.
+        { binding: 2, resource: { buffer: this.canvasBlitUniform } },
       ],
     });
     // The blit target is the canvas's drawing buffer -- if it comes back
@@ -345,11 +365,15 @@ export class Pipeline {
     const wantHistogram = this.histogramListener !== null && !this.histogramInFlight;
     if (wantHistogram) {
       this.histogramInFlight = true;
+      // Sample only the image content, not the bars (the crop mask fraction).
+      const cropFrac = cropFracFromOps(ops, this.demosaicedTexture!.width, this.demosaicedTexture!.height);
+      this.device.queue.writeBuffer(this.cropBlitUniform, 0, new Float32Array([cropFrac[0], cropFrac[1], 0, 0]));
       const histogramBindGroup = this.device.createBindGroup({
         layout: this.exportBlitPipeline.getBindGroupLayout(0),
         entries: [
           { binding: 0, resource: this.displayTexture.createView() },
           { binding: 1, resource: this.histogramSampler },
+          { binding: 2, resource: { buffer: this.cropBlitUniform } },
         ],
       });
       const histogramPass = encoder.beginRenderPass({
@@ -407,9 +431,14 @@ export class Pipeline {
     }
     const srcW = this.demosaicedTexture.width;
     const srcH = this.demosaicedTexture.height;
-    const scale = Math.min(1, maxDim / Math.max(srcW, srcH));
-    const tw = Math.max(1, Math.round(srcW * scale));
-    const th = Math.max(1, Math.round(srcH * scale));
+    // Export the crop mask region -- the WYSIWYG loupe view (rotated crop +
+    // straighten wedges), bars excluded. No crop = the full source.
+    const cropFrac = cropFracFromOps(ops, srcW, srcH);
+    const maskW = srcW * cropFrac[0];
+    const maskH = srcH * cropFrac[1];
+    const scale = Math.min(1, maxDim / Math.max(maskW, maskH));
+    const tw = Math.max(1, Math.round(maskW * scale));
+    const th = Math.max(1, Math.round(maskH * scale));
 
     const encoder = this.device.createCommandEncoder();
     const source = this.dispatchOps(encoder, ops);
@@ -420,11 +449,13 @@ export class Pipeline {
       format: 'rgba8unorm',
       usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
     });
+    this.device.queue.writeBuffer(this.cropBlitUniform, 0, new Float32Array([cropFrac[0], cropFrac[1], 0, 0]));
     const blitBindGroup = this.device.createBindGroup({
       layout: this.exportBlitPipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: source.createView() },
         { binding: 1, resource: this.blitSampler },
+        { binding: 2, resource: { buffer: this.cropBlitUniform } },
       ],
     });
     const renderPass = encoder.beginRenderPass({
@@ -539,5 +570,7 @@ export class Pipeline {
     this.opB?.destroy();
     this.histogramTexture.destroy();
     this.histogramReadBuffer.destroy();
+    this.canvasBlitUniform.destroy();
+    this.cropBlitUniform.destroy();
   }
 }

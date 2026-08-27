@@ -13,13 +13,14 @@ import { loadEditState, saveEditState } from './catalog/editsStore';
 import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
 import { commitEdit, undo, redo, currentOps, createEditState } from './catalog/editHistory';
 import { getOrExtractThumbnail } from './catalog/thumbnails';
-import { isExposureOp, isBwOp, isFrameOp, isGrainOp, isLightleakOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type FrameStyle, type WbGains, type BwMix, type BwToneId } from './catalog/types';
+import { isExposureOp, isBwOp, isCropOp, isFrameOp, isGrainOp, isLightleakOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type FrameStyle, type AspectPreset, type WbGains, type BwMix, type BwToneId } from './catalog/types';
 import { FILM_STOCKS } from './gpu/film';
 import { buildParametricToneLut, buildToneCurveLut, fitRegionParams, isNeutralTone, parametricControlPoints, TONE_LUT_SIZE, type ToneParams } from './gpu/tone';
 import { isNeutralPresence, type PresenceParams } from './gpu/presence';
 import { isNeutralVignette, type VignetteParams } from './gpu/vignette';
 import { isNeutralGrain, seedFromPath, setGrainSeed, type GrainParams } from './gpu/grain';
 import { isNeutralLightleak, type LightleakParams } from './gpu/lightleak';
+import { isNeutralCrop, type CropParams } from './gpu/crop';
 import { BW_FILTERS, BW_TONES, type BwFilterId } from './gpu/bw';
 import { getState, selectFile, setSelection, subscribe, type ModuleId } from './app/state';
 import { registerModule, switchModule } from './app/modules';
@@ -98,6 +99,14 @@ const lightleakHueSlider = document.querySelector<HTMLInputElement>('#lightleak-
 const lightleakAmountValue = document.querySelector<HTMLOutputElement>('#lightleak-amount-value')!;
 const lightleakHueValue = document.querySelector<HTMLOutputElement>('#lightleak-hue-value')!;
 const frameStyleSelect = document.querySelector<HTMLSelectElement>('#frame-style')!;
+const cropAspectSelect = document.querySelector<HTMLSelectElement>('#crop-aspect')!;
+const rotateCcwBtn = document.querySelector<HTMLButtonElement>('#rotate-ccw')!;
+const rotateCwBtn = document.querySelector<HTMLButtonElement>('#rotate-cw')!;
+const straightenSlider = document.querySelector<HTMLInputElement>('#straighten')!;
+const straightenValue = document.querySelector<HTMLOutputElement>('#straighten-value')!;
+// Cumulative clockwise quarter-turns (0..3) of the crop tool. Not a slider --
+// step state advanced by the rotate buttons, restored by applyOpsToSliders.
+let cropRotate90 = 0;
 const bwTreatmentSelect = document.querySelector<HTMLSelectElement>('#bw-treatment')!;
 const bwControls = document.querySelector<HTMLDivElement>('#bw-controls')!;
 const bwFilterSelect = document.querySelector<HTMLSelectElement>('#bw-filter')!;
@@ -273,6 +282,9 @@ const ALL_SLIDERS: SliderConfig[] = [
   { slider: regionLightsSlider, output: regionLightsValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: regionDarksSlider, output: regionDarksValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: regionShadowsSlider, output: regionShadowsValue, neutral: 0, format: (v) => formatSigned(v) },
+  // Crop straighten -- the aspect select + rotate buttons are separate (mode
+  // switches, not sliders); only the angle is a slider.
+  { slider: straightenSlider, output: straightenValue, neutral: 0, format: (v) => `${formatSigned(v, 1)}°` },
 ];
 
 function paintSliders(): void {
@@ -474,6 +486,14 @@ function readLightleakParams(): LightleakParams {
   };
 }
 
+function readCropParams(): CropParams {
+  return {
+    aspect: cropAspectSelect.value as AspectPreset,
+    rotate90: cropRotate90,
+    angle: Number(straightenSlider.value),
+  };
+}
+
 // B&W treatment. The mix tuple is in RGB order (Red..Magenta), matching both
 // the bw op's BwMix and the shader's band array.
 function readBwMix(): BwMix {
@@ -544,6 +564,10 @@ function currentOpsFromSliders(): Op[] {
   // on its own) -- same rule as vignette/grain.
   const lightleak = readLightleakParams();
   if (!isNeutralLightleak(lightleak)) ops.push({ kind: 'lightleak', ...lightleak });
+  // Crop is emitted only when non-neutral (original aspect / no rotation /
+  // 0° straighten = no pass) -- same rule as vignette/grain.
+  const crop = readCropParams();
+  if (!isNeutralCrop(crop)) ops.push({ kind: 'crop', ...crop });
   // Film frame is a mode switch (style select): 'none' emits nothing.
   const frameStyle = frameStyleSelect.value as FrameStyle;
   if (frameStyle !== 'none') ops.push({ kind: 'frame', style: frameStyle });
@@ -566,6 +590,7 @@ function applyOpsToSliders(ops: Op[]): void {
   const vignetteOp = ops.find(isVignetteOp);
   const grainOp = ops.find(isGrainOp);
   const lightleakOp = ops.find(isLightleakOp);
+  const cropOp = ops.find(isCropOp);
   const frameOp = ops.find(isFrameOp);
   const bwOp = ops.find(isBwOp);
   profileSelect.value = profileOp?.profile ?? 'camera';
@@ -614,6 +639,9 @@ function applyOpsToSliders(ops: Op[]): void {
   grainRoughnessSlider.value = String(grainOp?.roughness ?? 50);
   lightleakAmountSlider.value = String(lightleakOp?.amount ?? 0);
   lightleakHueSlider.value = String(lightleakOp?.hue ?? 0);
+  cropAspectSelect.value = cropOp?.aspect ?? 'original';
+  cropRotate90 = cropOp?.rotate90 ?? 0;
+  straightenSlider.value = String(cropOp?.angle ?? 0);
   frameStyleSelect.value = frameOp?.style ?? 'none';
   // B&W: the op's presence IS the treatment (no bw op = Color). Mix sliders
   // restore to the op's 8 weights (0 = that hue contributes normal luminance);
@@ -722,6 +750,13 @@ function opsToLabel(ops: Op[]): string {
       }
       if (isFrameOp(op)) {
         return `Frame ${op.style === '135' ? '135' : op.style === '120' ? '120' : 'Print'}`;
+      }
+      if (isCropOp(op)) {
+        const parts: string[] = [];
+        if (op.aspect !== 'original') parts.push(op.aspect);
+        if (op.rotate90 !== 0) parts.push(`${op.rotate90 * 90}°`);
+        if (op.angle !== 0) parts.push(`Straighten ${formatSigned(op.angle, 1)}°`);
+        return `Crop ${parts.join(' · ')}`;
       }
       if (isBwOp(op)) {
         const tone = op.tone !== 'none' ? ` · ${BW_TONES[op.tone].name}` : '';
@@ -1270,6 +1305,9 @@ async function init(): Promise<void> {
     profileSelect.disabled = !enabled;
     bwTreatmentSelect.disabled = !enabled;
     frameStyleSelect.disabled = !enabled;
+    cropAspectSelect.disabled = !enabled;
+    rotateCcwBtn.disabled = !enabled;
+    rotateCwBtn.disabled = !enabled;
     syncBwEnabled();
     curveAdjust.disabled = !enabled;
     curveCanvas.style.pointerEvents = enabled ? 'auto' : 'none';
@@ -1551,6 +1589,25 @@ async function init(): Promise<void> {
 
   // Film frame is a discrete mode switch like B&W treatment.
   frameStyleSelect.addEventListener('change', () => {
+    onSliderInput();
+    commitCurrentEdit();
+  });
+
+  // Crop aspect is a discrete pick like profile; the rotate buttons step the
+  // quarter-turn state. All three render + commit per change.
+  cropAspectSelect.addEventListener('change', () => {
+    onSliderInput();
+    commitCurrentEdit();
+  });
+  rotateCcwBtn.addEventListener('click', () => {
+    if (currentFileId === null) return;
+    cropRotate90 = (cropRotate90 + 3) % 4;
+    onSliderInput();
+    commitCurrentEdit();
+  });
+  rotateCwBtn.addEventListener('click', () => {
+    if (currentFileId === null) return;
+    cropRotate90 = (cropRotate90 + 1) % 4;
     onSliderInput();
     commitCurrentEdit();
   });

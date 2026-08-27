@@ -22,14 +22,14 @@
 // protection keys on linear luma alone (no per-channel), same ceiling.
 
 struct Vignette {
-  amount: f32,      // -100..100
-  midpoint: f32,    // 0..100
-  roundness: f32,   // -100..100
-  feather: f32,     // 0..100
-  highlights: f32,  // 0..100
+  amount: f32,       // -100..100
+  midpoint: f32,     // 0..100
+  roundness: f32,    // -100..100
+  feather: f32,      // 0..100
+  highlights: f32,   // 0..100
+  cropFracX: f32,    // crop mask / texture (see crop.ts); 1 = no crop
+  cropFracY: f32,
   _pad0: f32,
-  _pad1: f32,
-  _pad2: f32,
 };
 
 const LUMA: vec3<f32> = vec3<f32>(0.2126729, 0.7151522, 0.0721750);
@@ -48,9 +48,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= dims.x || id.y >= dims.y) { return; }
   let c = textureLoad(inTex, vec2<i32>(id.xy), 0);
 
-  // Normalized centered coords (-1..1).
-  let dx = f32(id.x) * 2.0 / f32(dims.x) - 1.0;
-  let dy = f32(id.y) * 2.0 / f32(dims.y) - 1.0;
+  // Normalized centered coords (-1..1) over the CROP rect, not the full
+  // texture: after a crop the vignette must span the image inside the crop,
+  // with the black bars left untouched (they're 0, so factor × 0 stays 0
+  // whether the vignette darkens or lightens). (1,1) cropFrac = identity.
+  let dx = (f32(id.x) * 2.0 / f32(dims.x) - 1.0) / max(p.cropFracX, 1e-3);
+  let dy = (f32(id.y) * 2.0 / f32(dims.y) - 1.0) / max(p.cropFracY, 1e-3);
   // Circular radius: corner of a unit square sits at sqrt(2), so scale by
   // 1/sqrt(2) to make the corner ~1.
   let rCirc = sqrt(dx * dx + dy * dy) * 0.70710678;

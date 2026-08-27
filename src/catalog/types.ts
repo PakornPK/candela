@@ -72,6 +72,10 @@ export type BwToneId = 'none' | 'acros' | 'tx400' | 'doublex' | 'leica';
 // Film-frame style (Effects panel). 'none' = no frame.
 export type FrameStyle = 'none' | '135' | '120' | 'print';
 
+// Crop tool aspect preset ('original' = the source's own ratio, resolved per
+// file at render time -- not a number here so isValidOp stays closed).
+export type AspectPreset = 'original' | '1:1' | '3:2' | '4:3' | '5:4' | '16:9' | '2:3' | '4:5';
+
 export type Op =
   | { kind: 'profile'; profile: ProfileKind }
   | { kind: 'exposure'; ev: number }
@@ -82,9 +86,10 @@ export type Op =
   | { kind: 'vignette'; amount: number; midpoint: number; roundness: number; feather: number; highlights: number }
   | { kind: 'grain'; amount: number; size: number; roughness: number }
   | { kind: 'lightleak'; amount: number; hue: number }
+  | { kind: 'crop'; aspect: AspectPreset; rotate90: number; angle: number }
   | { kind: 'frame'; style: FrameStyle }
   | { kind: 'bw'; mix: BwMix; tone: BwToneId };
-  // future op kinds (crop, ...) extend this union.
+  // future op kinds (perspective, dodgeBurn, ...) extend this union.
 
 export function isProfileOp(op: Op): op is { kind: 'profile'; profile: ProfileKind } {
   return op.kind === 'profile';
@@ -128,6 +133,10 @@ export function isGrainOp(op: Op): op is { kind: 'grain'; amount: number; size: 
 
 export function isLightleakOp(op: Op): op is { kind: 'lightleak'; amount: number; hue: number } {
   return op.kind === 'lightleak';
+}
+
+export function isCropOp(op: Op): op is { kind: 'crop'; aspect: AspectPreset; rotate90: number; angle: number } {
+  return op.kind === 'crop';
 }
 
 export function isFrameOp(op: Op): op is { kind: 'frame'; style: FrameStyle } {

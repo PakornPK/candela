@@ -13,10 +13,12 @@ describe('frame', () => {
   it('is neutral at none; packs the style id as 1 f32', () => {
     expect(isNeutralFrame('none')).toBe(true);
     expect(isNeutralFrame('135')).toBe(false);
-    expect(Array.from(packFrame('none'))).toEqual([3, 0, 0, 0]);
-    expect(Array.from(packFrame('135'))).toEqual([0, 0, 0, 0]);
-    expect(Array.from(packFrame('120'))).toEqual([1, 0, 0, 0]);
-    expect(Array.from(packFrame('print'))).toEqual([2, 0, 0, 0]);
+    expect(Array.from(packFrame('none'))).toEqual([3, 1, 1, 0]);
+    expect(Array.from(packFrame('135'))).toEqual([0, 1, 1, 0]);
+    expect(Array.from(packFrame('120'))).toEqual([1, 1, 1, 0]);
+    expect(Array.from(packFrame('print'))).toEqual([2, 1, 1, 0]);
+    // A cropFrac makes the frame wrap the image inside the crop.
+    expect(Array.from(packFrame('135', [0.5, 0.5]))).toEqual([0, 0.5, 0.5, 0]);
   });
 
   it('print has the widest border; none has none', () => {

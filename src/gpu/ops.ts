@@ -9,15 +9,17 @@ import grainShader from '../shaders/grain.wgsl?raw';
 import lightleakShader from '../shaders/lightleak.wgsl?raw';
 import frameShader from '../shaders/frame.wgsl?raw';
 import bwShader from '../shaders/bw.wgsl?raw';
+import cropShader from '../shaders/crop.wgsl?raw';
 import { evToGain, kelvinToShift, packColorMatrix, wbShiftToGains, type WhiteBalanceGains } from './uniforms';
 import { buildParametricToneLut, buildToneCurveLut, buildToneLuts, TONE_LUT_SIZE, type ToneParams, type ToneLook } from './tone';
-import { isPresenceOp, isBwOp, isExposureOp, isFrameOp, isGrainOp, isLightleakOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type WbGains } from '../catalog/types';
+import { isPresenceOp, isBwOp, isCropOp, isExposureOp, isFrameOp, isGrainOp, isLightleakOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type WbGains } from '../catalog/types';
 import { packPresence, type PresenceParams } from './presence';
 import { packVignette, type VignetteParams } from './vignette';
 import { packGrain, getGrainSeed, type GrainParams } from './grain';
 import { packLightleak, type LightleakParams } from './lightleak';
 import { packFrame } from './frame';
 import { packBw } from './bw';
+import { cropFracFromOps, packCrop, type CropParams } from './crop';
 import { FILM_STOCKS, isFilmStockId } from './film';
 import type { FilmStock } from './film';
 
@@ -65,6 +67,15 @@ let asShotGains: WhiteBalanceGains = { rGain: 1, gGain: 1, bGain: 1 };
 
 export function setAsShotGains(g: WbGains): void {
   asShotGains = { rGain: g.r, gGain: g.g, bGain: g.b };
+}
+
+// The loaded raw's effective size (set by pipeline.load()) -- the crop op's
+// geometry (crop.ts) and the vignette/frame cropFrac it feeds are fractions of
+// this. Same per-file lifetime as cameraColorMatrix.
+let imageSize: [number, number] = [0, 0];
+
+export function setImageSize(w: number, h: number): void {
+  imageSize = [w, h];
 }
 
 // One GPU pass per edit kind. Pipeline.render() dispatches every renderer
@@ -198,16 +209,48 @@ export const OP_RENDERERS: OpRenderer[] = [
     },
   },
   {
+    kind: 'lightleak',
+    // A creative display-level effect (not in LrC) that belongs BEFORE the
+    // crop: it bakes into the cropped content (cropping a leaked shot keeps
+    // the leak), and its X-Half shape spreads corner-to-corner. Seed shared
+    // with grain (same film-roll character). Absent op packs the neutral
+    // defaults (amount 0) so a no-op pass renders as identity.
+    shader: lightleakShader,
+    uniformSize: 32, // struct Lightleak { 3 f32 + 5 pad }
+    packParams: (ops) => {
+      const op = ops.find(isLightleakOp);
+      const p: LightleakParams = op ?? { amount: 0, hue: 0 };
+      return packLightleak(p, getGrainSeed());
+    },
+  },
+  {
+    kind: 'crop',
+    // AFTER lightleak, BEFORE vignette/frame: the crop rect defines the
+    // post-crop content the vignette (LrC's Post-Crop Vignetting) and the
+    // film frame wrap, and its black bars fall through to the blit as the
+    // letterbox bars. Runs only when a crop op is present (original/0°/0 is
+    // neutral and never emitted).
+    shader: cropShader,
+    uniformSize: 32, // struct Crop { angle, zoom, halfW, halfH + 4 pad }
+    packParams: (ops) => {
+      const op = ops.find(isCropOp);
+      const p: CropParams = op ?? { aspect: 'original', rotate90: 0, angle: 0 };
+      return packCrop(p, imageSize[0], imageSize[1]);
+    },
+  },
+  {
     kind: 'vignette',
-    // LAST-but-one -- a display-level effect (LrC's Effects panel applies it
-    // after the color/tone chain). Absent op packs the neutral defaults (amount 0,
-    // midpoint/feather 50) so a no-op pass renders as identity.
+    // A display-level effect (LrC's Effects panel applies it after the
+    // color/tone chain) -- LrC calls this Post-Crop Vignetting: the cropFrac
+    // uniform spans it across the image inside the crop. Absent op packs the
+    // neutral defaults (amount 0, midpoint/feather 50) so a no-op pass renders
+    // as identity.
     shader: vignetteShader,
-    uniformSize: 32, // struct Vignette { 5 f32 + 3 pad }
+    uniformSize: 32, // struct Vignette { 5 f32 + cropFracX/Y + pad }
     packParams: (ops) => {
       const op = ops.find(isVignetteOp);
       const p: VignetteParams = op ?? { amount: 0, midpoint: 50, roundness: 0, feather: 50, highlights: 0 };
-      return packVignette(p);
+      return packVignette(p, cropFracFromOps(ops, imageSize[0], imageSize[1]));
     },
   },
   {
@@ -225,28 +268,16 @@ export const OP_RENDERERS: OpRenderer[] = [
     },
   },
   {
-    kind: 'lightleak',
-    // A creative display-level effect (not in LrC). Seed shared with grain
-    // (same film-roll character). Absent op packs the neutral defaults
-    // (amount 0) so a no-op pass renders as identity.
-    shader: lightleakShader,
-    uniformSize: 32, // struct Lightleak { 3 f32 + 5 pad }
-    packParams: (ops) => {
-      const op = ops.find(isLightleakOp);
-      const p: LightleakParams = op ?? { amount: 0, hue: 0 };
-      return packLightleak(p, getGrainSeed());
-    },
-  },
-  {
     kind: 'frame',
     // LAST -- the film rebate / print matte wraps everything (nothing draws
-    // over it). A style switch like bw: absent op = 'none' = identity (no
+    // over it). With a crop it wraps the image inside the crop, black bars
+    // beyond. A style switch like bw: absent op = 'none' = identity (no
     // frame), so the renderer is only ever present when a style is active.
     shader: frameShader,
-    uniformSize: 16, // struct Frame { 1 f32 + 3 pad }
+    uniformSize: 16, // struct Frame { style + cropFracX/Y + pad }
     packParams: (ops) => {
       const op = ops.find(isFrameOp);
-      return packFrame(op?.style ?? 'none');
+      return packFrame(op?.style ?? 'none', cropFracFromOps(ops, imageSize[0], imageSize[1]));
     },
   },
 ];

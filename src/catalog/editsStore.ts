@@ -113,6 +113,14 @@ export function isValidOp(op: unknown): op is Op {
     const s = (op as { style?: unknown }).style;
     return s === 'none' || s === '135' || s === '120' || s === 'print';
   }
+  if (candidate.kind === 'crop') {
+    const c = op as { aspect?: unknown; rotate90?: unknown; angle?: unknown };
+    const aspect = c.aspect;
+    const aspectOk =
+      aspect === 'original' || aspect === '1:1' || aspect === '3:2' || aspect === '4:3' ||
+      aspect === '5:4' || aspect === '16:9' || aspect === '2:3' || aspect === '4:5';
+    return aspectOk && Number.isInteger(c.rotate90) && Number(c.rotate90) >= 0 && Number(c.rotate90) <= 3 && typeof c.angle === 'number';
+  }
   return false;
 }
 
