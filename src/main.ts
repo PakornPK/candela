@@ -149,7 +149,6 @@ const exportButton = document.querySelector<HTMLButtonElement>('#export-btn')!;
 const exportFormat = document.querySelector<HTMLSelectElement>('#export-format')!;
 const resetButton = document.querySelector<HTMLButtonElement>('#reset-btn')!;
 const beforeAfterBtn = document.querySelector<HTMLButtonElement>('#beforeafter-btn')!;
-const beforeAfterLabels = document.querySelector<HTMLDivElement>('#beforeafter-labels')!;
 const presetSaveButton = document.querySelector<HTMLButtonElement>('#preset-save')!;
 const presetListEl = document.querySelector<HTMLDivElement>('#preset-list')!;
 const syncBtn = document.querySelector<HTMLButtonElement>('#sync-btn')!;
@@ -871,14 +870,8 @@ async function init(): Promise<void> {
     return promise;
   }
 
-  // Before/After split mode: while on, every render shows the fresh-import
-  // ops ([]) on the left half and the current ops on the right. Declared above
-  // renderOps so every re-render -- slider drag, undo, history click -- keeps
-  // the split live instead of silently dropping back to a single image.
-  let beforeAfter = false;
-
   function renderOps(ops: Op[]): void {
-    pipeline.render(ops, beforeAfter ? [] : undefined);
+    pipeline.render(ops);
   }
 
   const virtualizer = new Virtualizer<HTMLDivElement, HTMLDivElement>({
@@ -1596,23 +1589,33 @@ async function init(): Promise<void> {
   });
 
   // ---- before / after (Develop) ----
-  // Two-up comparison, LrC-style: the button (or \ key) toggles a split view
-  // with the fresh-import look on the left and the current edits on the right.
-  // renderOps() above keeps the split live through edits; switching files just
-  // makes the Before half the new file's import state.
-  beforeAfterBtn.addEventListener('click', () => setBeforeAfter(!beforeAfter));
+  // LrC's \ key holds the original as-imported look; the footer button makes it
+  // sticky. "Before" = empty ops (the same fresh-import render Reset shows).
+  // ponytail: dragging a slider mid-before falls back to After (live edit wins)
+  // but leaves the button lit until clicked again -- acceptable, the momentary
+  // \ is the primary gesture.
+  let beforeAfter = false;
+  let beforeAfterSticky = false;
+  function setBeforeAfter(v: boolean, sticky: boolean): void {
+    if (beforeAfter === v && beforeAfterSticky === sticky) return;
+    beforeAfter = v;
+    beforeAfterSticky = sticky;
+    beforeAfterBtn.classList.toggle('active', v);
+    renderOps(v ? [] : currentOps(currentEditState ?? createEditState()));
+  }
+  beforeAfterBtn.addEventListener('click', () => setBeforeAfter(!beforeAfter, true));
   window.addEventListener('keydown', (e) => {
     if (e.key === '\\' && !e.repeat && getState().module === 'develop') {
       e.preventDefault();
-      setBeforeAfter(!beforeAfter);
+      setBeforeAfter(true, false);
     }
   });
-  function setBeforeAfter(v: boolean): void {
-    beforeAfter = v;
-    beforeAfterBtn.classList.toggle('active', v);
-    beforeAfterLabels.hidden = !v;
-    renderOps(currentOps(currentEditState ?? createEditState()));
-  }
+  window.addEventListener('keyup', (e) => {
+    if (e.key === '\\' && beforeAfter && !beforeAfterSticky) setBeforeAfter(false, false);
+  });
+  window.addEventListener('blur', () => {
+    if (beforeAfter && !beforeAfterSticky) setBeforeAfter(false, false);
+  });
 
   // ---- presets ----
   let presets: PresetRow[] = [];

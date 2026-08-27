@@ -1,7 +1,6 @@
 import unpackShader from '../shaders/unpack.wgsl?raw';
 import demosaicShader from '../shaders/demosaic.wgsl?raw';
 import blitShader from '../shaders/blit.wgsl?raw';
-import splitShader from '../shaders/split.wgsl?raw';
 import { packCfa6, shiftCfa6 } from './uniforms';
 import { OP_RENDERERS, presentOpIndices, setAsShotGains, setCameraColorMatrix, setCameraXyz } from './ops';
 import type { Op } from '../catalog/types';
@@ -17,11 +16,6 @@ export class Pipeline {
   private opA: GPUTexture | null = null;
   private opB: GPUTexture | null = null;
   private displayTexture: GPUTexture | null = null;
-  // Dedicated ping-pong pair for the Before chain in before/after split mode.
-  // Can't reuse opA/opB: both chains must survive in one encoder, and the two
-  // dispatchOps calls would otherwise overwrite each other's output.
-  private beforeOpA: GPUTexture | null = null;
-  private beforeOpB: GPUTexture | null = null;
 
   private readonly unpackPipeline: GPUComputePipeline;
   private readonly demosaicPipeline: GPUComputePipeline;
@@ -31,9 +25,6 @@ export class Pipeline {
   // target format is fixed at pipeline creation, so it can't share the canvas
   // pipeline.
   private readonly exportBlitPipeline: GPURenderPipeline;
-  // Before/After split blit: split.wgsl's fragment (two textures, half each)
-  // with the same full-screen vertex + canvas target format.
-  private readonly splitPipeline: GPURenderPipeline;
 
   private readonly levelsBuffer: GPUBuffer;
   private readonly cfaBuffer: GPUBuffer;
@@ -89,16 +80,6 @@ export class Pipeline {
         module: device.createShaderModule({ code: blitShader }),
         entryPoint: 'fs_main',
         targets: [{ format: 'rgba8unorm' }],
-      },
-      primitive: { topology: 'triangle-list' },
-    });
-    this.splitPipeline = device.createRenderPipeline({
-      layout: 'auto',
-      vertex: { module: device.createShaderModule({ code: blitShader }), entryPoint: 'vs_main' },
-      fragment: {
-        module: device.createShaderModule({ code: splitShader }),
-        entryPoint: 'fs_main',
-        targets: [{ format }],
       },
       primitive: { topology: 'triangle-list' },
     });
@@ -172,8 +153,6 @@ export class Pipeline {
     this.demosaicedTexture?.destroy();
     this.opA?.destroy();
     this.opB?.destroy();
-    this.beforeOpA?.destroy();
-    this.beforeOpB?.destroy();
     this.displayTexture = null;
 
     // Crop the raw buffer to the effective (sensor-cropped) image area. LibRaw's
@@ -221,9 +200,6 @@ export class Pipeline {
     const workUsage = GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC;
     this.opA = this.device.createTexture({ size, format: 'rgba16float', usage: workUsage });
     this.opB = this.device.createTexture({ size, format: 'rgba16float', usage: workUsage });
-    // BeforeOpA/B are created lazily on the first split render and freed by the
-    // destroy() at the top of this method on the next load, so a session that
-    // never opens Before/After pays no extra full-res textures.
 
     this.device.queue.writeBuffer(this.levelsBuffer, 0, new Float32Array([raw.blackLevel, raw.whiteLevel, 0, 0]));
     this.device.queue.writeBuffer(this.cfaBuffer, 0, packCfa6(shiftCfa6(raw.cfa6, cropLeft, cropTop)));
@@ -290,19 +266,17 @@ export class Pipeline {
   // op's output. presentOpIndices always includes the first two passes
   // (whiteBalance As-Shot fallback + profile camera matrix), so even a no-ops
   // fresh open (renderOps([])) applies both -- the chain always starts from
-  // demosaicedTexture. Shared by render() (canvas blit source), the Before
-  // chain in split mode (its own ping pair, so the two chains can coexist in
-  // one encoder) and exportImage() (offscreen target) so all produce exactly
-  // the same picture from the same ops.
-  private dispatchOps(encoder: GPUCommandEncoder, ops: Op[], ping?: [GPUTexture, GPUTexture]): GPUTexture {
+  // demosaicedTexture. Shared by render() (canvas blit source) and
+  // exportImage() (offscreen target) so both produce exactly the same picture
+  // from the same ops.
+  private dispatchOps(encoder: GPUCommandEncoder, ops: Op[]): GPUTexture {
     const width = this.demosaicedTexture!.width;
     const height = this.demosaicedTexture!.height;
-    const [outA, outB] = ping ?? [this.opA!, this.opB!];
     let source = this.demosaicedTexture!;
     const present = presentOpIndices(ops);
     for (let i = 0; i < present.length; i++) {
       const index = present[i];
-      const target = i % 2 === 0 ? outA : outB;
+      const target = i % 2 === 0 ? this.opA! : this.opB!;
       const renderer = OP_RENDERERS[index];
       this.device.queue.writeBuffer(this.opUniformBuffers[index], 0, renderer.packParams(ops));
       const bindGroup = this.device.createBindGroup({
@@ -325,47 +299,20 @@ export class Pipeline {
   }
 
   // Re-runs only the present ops + blit — this is the < 50ms slider path (no
-  // re-demosaic). Ops dispatch in registry order via dispatchOps. When
-  // `beforeOps` is given, the Before chain runs into its own ping-pong pair
-  // and the canvas blit shows both side by side (split.wgsl) -- the Before /
-  // After view. displayTexture stays the After output, so the histogram and
-  // export keep showing the edited image.
-  render(ops: Op[], beforeOps?: Op[]): void {
+  // re-demosaic). Ops dispatch in registry order via dispatchOps.
+  render(ops: Op[]): void {
     if (!this.demosaicedTexture || !this.opA || !this.opB) return;
 
     const encoder = this.device.createCommandEncoder();
-    const afterSource = this.dispatchOps(encoder, ops);
-    this.displayTexture = afterSource;
+    this.displayTexture = this.dispatchOps(encoder, ops);
 
-    let blitPipeline: GPURenderPipeline;
-    let blitBindGroup: GPUBindGroup;
-    if (beforeOps !== undefined) {
-      if (!this.beforeOpA || !this.beforeOpB) {
-        const size = [this.demosaicedTexture.width, this.demosaicedTexture.height];
-        const usage = GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC;
-        this.beforeOpA = this.device.createTexture({ size, format: 'rgba16float', usage });
-        this.beforeOpB = this.device.createTexture({ size, format: 'rgba16float', usage });
-      }
-      const beforeSource = this.dispatchOps(encoder, beforeOps, [this.beforeOpA!, this.beforeOpB!]);
-      blitPipeline = this.splitPipeline;
-      blitBindGroup = this.device.createBindGroup({
-        layout: this.splitPipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: beforeSource.createView() },
-          { binding: 1, resource: afterSource.createView() },
-          { binding: 2, resource: this.blitSampler },
-        ],
-      });
-    } else {
-      blitPipeline = this.blitPipeline;
-      blitBindGroup = this.device.createBindGroup({
-        layout: this.blitPipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: afterSource.createView() },
-          { binding: 1, resource: this.blitSampler },
-        ],
-      });
-    }
+    const blitBindGroup = this.device.createBindGroup({
+      layout: this.blitPipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: this.displayTexture.createView() },
+        { binding: 1, resource: this.blitSampler },
+      ],
+    });
     // The blit target is the canvas's drawing buffer -- if it comes back
     // 1x1 or throws (hidden/stale surface), the canvas stays black no matter
     // how correct the compute output is. Log its size so the Develop-mode
@@ -388,7 +335,7 @@ export class Pipeline {
         clearValue: { r: 0, g: 0, b: 0, a: 1 },
       }],
     });
-    renderPass.setPipeline(blitPipeline);
+    renderPass.setPipeline(this.blitPipeline);
     renderPass.setBindGroup(0, blitBindGroup);
     renderPass.draw(3);
     renderPass.end();
@@ -590,8 +537,6 @@ export class Pipeline {
     this.demosaicedTexture?.destroy();
     this.opA?.destroy();
     this.opB?.destroy();
-    this.beforeOpA?.destroy();
-    this.beforeOpB?.destroy();
     this.histogramTexture.destroy();
     this.histogramReadBuffer.destroy();
   }
