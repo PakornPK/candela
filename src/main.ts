@@ -450,13 +450,21 @@ function isBwEnabled(): boolean {
   return bwTreatmentSelect.value === 'bw';
 }
 
+// Global lock set by setAdjustEnabled(false) while a preview (embedded-JPEG
+// fallback) is showing -- no decoded texture, so no adjustment can render.
+let adjustEnabled = false;
+
 // Hides/grays the B&W mix + filter + tone controls unless Treatment is B&W.
+// Must ALSO respect the global adjust lock: setAdjustEnabled(false) runs while
+// a preview (embedded-JPEG fallback) is showing, and re-enabling the B&W
+// controls there would let the user drag mix sliders that render() no-ops on
+// (no decoded texture) -- "bw mix doesn't change anything".
 function syncBwEnabled(): void {
-  const on = isBwEnabled();
+  const on = isBwEnabled() && adjustEnabled;
   // The whole B&W section (mix/filter/tone) disappears in Color mode; the
   // treatment choice itself now lives up in the Profile panel.
-  bwSection.hidden = !on;
-  bwControls.hidden = !on;
+  bwSection.hidden = !isBwEnabled();
+  bwControls.hidden = !isBwEnabled();
   bwFilterSelect.disabled = !on;
   bwToneSelect.disabled = !on;
   for (const k in bwMixSliders) bwMixSliders[k as keyof typeof bwMixSliders].disabled = !on;
@@ -1190,6 +1198,7 @@ async function init(): Promise<void> {
   // While a preview is showing they're disabled, so the UI doesn't offer an
   // adjustment that can't do anything.
   function setAdjustEnabled(enabled: boolean): void {
+    adjustEnabled = enabled;
     for (const cfg of ALL_SLIDERS) cfg.slider.disabled = !enabled;
     profileSelect.disabled = !enabled;
     bwTreatmentSelect.disabled = !enabled;
