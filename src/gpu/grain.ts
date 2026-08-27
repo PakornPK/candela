@@ -6,9 +6,9 @@
 // Film grain is DISPLAY-referred: LrC applies it in the Effects panel, after
 // the color/tone chain, as output-referred luminance noise. Model (mirrors
 // O3DE's FilmGrain shader):
-//   - noise = mix(coarse value-noise clumps, fine per-pixel gaussian, roughness)
-//     `size` sets the value-noise cell size (grain particle scale), `roughness`
-//     blends between smooth clumps and sharp speckle.
+//   - noise = mix(coarse gradient-noise clumps, fine per-pixel gaussian,
+//     roughness) `size` sets the gradient-noise cell size (grain particle
+//     scale), `roughness` blends between smooth clumps and sharp speckle.
 //   - The noise is a multiplicative MASK on the linear color -- exp2(noise*A*damp),
 //     log-symmetric like real film density (no brightening bias, no white-clip),
 //     gated by a mid-gray damp `max(4d(1-d), 0)` (strongest mid-tone, invisible
@@ -93,18 +93,31 @@ export function gauss(x: number, y: number, seed: number): number {
   return Math.sqrt(-2 * Math.log(u1)) * Math.cos(2 * Math.PI * u2);
 }
 
-// Bilinear value noise in [0,1]: smooth clumps of `size` px, the coarse half of
-// the field. x/y are in CELL units (already divided by sizePx).
-export function valueNoise(px: number, py: number, seed: number): number {
+// 2D Perlin gradient noise, roughly [-1,1] with the *1.5 scale. Smooth clumps
+// of `size` px, the coarse half of the field. x/y are in CELL units (already
+// divided by sizePx). Replaces bilinear value noise: value noise pins every
+// local maximum to a cell corner, so the coarse clumps marched in a visible
+// square lattice ("grid of pink specks" on a magenta cast). Gradient noise
+// rotates smooth pseudo-random slopes instead -- extrema sit off-grid.
+function gradAngle(x: number, y: number, seed: number): number {
+  return (hashU32(x, y, seed) & 0xffff) / 65536 * 2 * Math.PI;
+}
+export function gradientNoise(px: number, py: number, seed: number): number {
   const x0 = Math.floor(px);
   const y0 = Math.floor(py);
-  const tx = smoothstep01(px - x0);
-  const ty = smoothstep01(py - y0);
-  const a = hash01(x0, y0, seed);
-  const b = hash01(x0 + 1, y0, seed);
-  const c = hash01(x0, y0 + 1, seed);
-  const d = hash01(x0 + 1, y0 + 1, seed);
-  return mix01(mix01(a, b, tx), mix01(c, d, tx), ty);
+  const tx = px - x0;
+  const ty = py - y0;
+  const sx = smoothstep01(tx);
+  const sy = smoothstep01(ty);
+  const a = gradAngle(x0, y0, seed);
+  const b = gradAngle(x0 + 1, y0, seed);
+  const c = gradAngle(x0, y0 + 1, seed);
+  const d = gradAngle(x0 + 1, y0 + 1, seed);
+  const g00 = Math.cos(a) * tx + Math.sin(a) * ty;
+  const g10 = Math.cos(b) * (tx - 1) + Math.sin(b) * ty;
+  const g01 = Math.cos(c) * tx + Math.sin(c) * (ty - 1);
+  const g11 = Math.cos(d) * (tx - 1) + Math.sin(d) * (ty - 1);
+  return mix01(mix01(g00, g10, sx), mix01(g01, g11, sx), sy);
 }
 
 // The uniform carries the seed as a [0,1) float; the shader converts it once
@@ -116,12 +129,12 @@ export function seedU32(seed: number): number {
   return Math.floor(seed * 16777215) >>> 0;
 }
 
-// The combined noise field: coarse value-noise clumps (cell size from `size`,
-// 1..24 px) blended toward fine per-pixel gaussian by `roughness`. Zero-mean,
-// roughly [-0.7, 0.7]. `seed` is the u32 hash key (see seedU32).
+// The combined noise field: coarse gradient-noise clumps (cell size from
+// `size`, 1..24 px) blended toward fine per-pixel gaussian by `roughness`.
+// Zero-mean, roughly [-0.7, 0.7]. `seed` is the u32 hash key (see seedU32).
 export function grainNoise(x: number, y: number, p: GrainParams, seed: number): number {
   const sizePx = 1 + 23 * clamp01(p.size / 100);
-  const coarse = valueNoise(x / sizePx, y / sizePx, seed) * 2 - 1;
+  const coarse = gradientNoise(x / sizePx, y / sizePx, seed) * 1.5;
   const fine = gauss(x, y, seed);
   return mix01(coarse * 0.5, fine * 0.7, clamp01(p.roughness / 100));
 }

@@ -4,7 +4,7 @@ import {
   hashU32,
   seedFromPath,
   setGrainSeed,
-  valueNoise,
+  gradientNoise,
   isNeutralGrain,
   packGrain,
   type GrainParams,
@@ -90,13 +90,38 @@ describe('grain', () => {
     expect(Array.from(packed)).toEqual([60, 30, 80, 0.25, 0, 0, 0, 0]);
   });
 
-  it('hash/value-noise stay in the right ranges', () => {
+  it('gradient-noise stays in [-1,1] and has no lattice extrema', () => {
     expect(hashU32(0, 0, 1)).toBeGreaterThanOrEqual(0);
     expect(hashU32(0, 0, 1)).toBeLessThan(4294967295);
-    for (let i = 0; i < 50; i++) {
-      const n = valueNoise(i * 0.37, i * 0.71, 7);
-      expect(n).toBeGreaterThanOrEqual(0);
-      expect(n).toBeLessThanOrEqual(1);
+    const N = 256;
+    const cell = 6.75; // size=25
+    const field = new Float32Array(N * N);
+    for (let y = 0; y < N; y++) {
+      for (let x = 0; x < N; x++) {
+        const v = gradientNoise(x / cell, y / cell, 7) * 1.5;
+        expect(v).toBeGreaterThanOrEqual(-1);
+        expect(v).toBeLessThanOrEqual(1);
+        field[y * N + x] = v;
+      }
     }
+    // Lattice signature: value-noise pins every local max to a cell corner.
+    // Gradient noise must NOT -- most maxima land off-grid.
+    let cornerMax = 0;
+    let offMax = 0;
+    for (let y = 2; y < N - 2; y++) {
+      for (let x = 2; x < N - 2; x++) {
+        const c = field[y * N + x];
+        const isMax = c >= field[y * N + x - 1] && c >= field[y * N + x + 1] &&
+          c >= field[(y - 1) * N + x] && c >= field[(y + 1) * N + x];
+        if (!isMax) continue;
+        const fx = x / cell;
+        const fy = y / cell;
+        const dx = Math.min(fx - Math.floor(fx), Math.ceil(fx) - fx);
+        const dy = Math.min(fy - Math.floor(fy), Math.ceil(fy) - fy);
+        if (Math.max(dx, dy) < 0.15) cornerMax++;
+        else offMax++;
+      }
+    }
+    expect(offMax).toBeGreaterThan(cornerMax * 10); // value noise: cornerMax >> offMax
   });
 });
