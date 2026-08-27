@@ -91,6 +91,12 @@ struct DecodeResult {
     // ~0.00714); JS formats it as a fraction. Same array-of-floats pattern as
     // color_matrix so JS can DataView-read without a HEAPF32 heap view.
     float camera_meta[4] = {};
+    // Camera identity from imgdata.idata (EXIF Make/Model) -- the key for
+    // per-camera calibration registries (the WB readout). 64 bytes matches
+    // libraw_iparams_t; empty when the file reports none. Fixed buffers (not
+    // heap), read on the JS side via UTF8ToString on the returned pointer.
+    char make[64] = {};
+    char model[64] = {};
     // As-shot white-balance scale factors (imgdata.color.cam_mul), one per CFA
     // channel [R, G1, B, G2]. NOT normalized: LibRaw stores them in the
     // camera's natural scale, so JS normalizes by the green reference before
@@ -314,6 +320,11 @@ DecodeResult* decode(const uint8_t* file_bytes, uint32_t length) {
         result->camera_meta[1] = processor.imgdata.other.shutter;
         result->camera_meta[2] = processor.imgdata.other.aperture;
         result->camera_meta[3] = processor.imgdata.other.focal_len;
+
+        // Camera identity (EXIF Make/Model). Copied with an explicit cap so a
+        // pathological idata string can't overflow the fixed result buffer.
+        std::strncpy(result->make, processor.imgdata.idata.make, sizeof(result->make) - 1);
+        std::strncpy(result->model, processor.imgdata.idata.model, sizeof(result->model) - 1);
     } catch (const std::exception&) {
         // Allocation failure (new/make_unique) or any other exception raised
         // by the wrapper's own code, as opposed to a LibRaw-internal error
@@ -391,6 +402,12 @@ int decode_result_has_cam_mul(DecodeResult* r) { return r->has_cam_mul; }
 
 EMSCRIPTEN_KEEPALIVE
 float* decode_result_cam_xyz(DecodeResult* r) { return r->cam_xyz; }
+
+EMSCRIPTEN_KEEPALIVE
+const char* decode_result_make(DecodeResult* r) { return r->make; }
+
+EMSCRIPTEN_KEEPALIVE
+const char* decode_result_model(DecodeResult* r) { return r->model; }
 
 EMSCRIPTEN_KEEPALIVE
 void free_decoded(DecodeResult* r) {

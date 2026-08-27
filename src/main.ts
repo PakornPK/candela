@@ -2,7 +2,7 @@ import { Virtualizer, elementScroll, observeElementRect, observeElementOffset } 
 import { Pipeline } from './gpu/pipeline';
 import { decode, DecodeError, type CameraMeta, type DecodedRaw } from './raw/decode';
 import { extractThumbnail } from './raw/thumbnail';
-import { gainsToKelvin, gainsToTint, WB_NEUTRAL_KELVIN } from './gpu/uniforms';
+import { cameraCalibrationKey, gainsToKelvin, gainsToTint, WB_NEUTRAL_KELVIN } from './gpu/uniforms';
 import { getCameraXyz } from './gpu/ops';
 import { openCatalogDb } from './catalog/db';
 import { listFolders, listFiles } from './catalog/query';
@@ -716,7 +716,7 @@ function currentOpsFromSliders(): Op[] {
   return ops;
 }
 
-function applyOpsToSliders(ops: Op[]): void {
+function applyOpsToSliders(ops: Op[], cameraKey?: string): void {
   const profileOp = ops.find(isProfileOp);
   const exposureOp = ops.find(isExposureOp);
   const wbOp = ops.find(isWhiteBalanceOp);
@@ -739,8 +739,8 @@ function applyOpsToSliders(ops: Op[]): void {
   // the slider values themselves; no op at all falls back to the file's
   // As-Shot (neutral daylight when the camera reports none).
   if (wbOp?.gains) {
-    wbSlider.value = String(kelvinToWbSlider(gainsToKelvin(wbOp.gains, getCameraXyz())));
-    tintSlider.value = String(wbOp.tint ?? gainsToTint(wbOp.gains, getCameraXyz()));
+    wbSlider.value = String(kelvinToWbSlider(gainsToKelvin(wbOp.gains, getCameraXyz(), cameraKey)));
+    tintSlider.value = String(wbOp.tint ?? gainsToTint(wbOp.gains, getCameraXyz(), cameraKey));
     wbTouched = false;
   } else if (wbOp) {
     wbSlider.value = String(kelvinToWbSlider(wbOp.kelvin));
@@ -1024,7 +1024,12 @@ async function init(): Promise<void> {
 
   let currentFileId: number | null = null;
   let currentEditState: EditState | null = null;
-  let lastDecoded: { width: number; height: number; cameraMeta: CameraMeta | null } | null = null;
+  let lastDecoded: { width: number; height: number; cameraMeta: CameraMeta | null; make: string; model: string } | null = null;
+  // Camera identity of the loaded file, for the per-camera WB-readout
+  // calibration (uniforms.ts wbCalibrationFor). null until a raw decodes.
+  function currentCameraKey(): string | undefined {
+    return lastDecoded ? cameraCalibrationKey(lastDecoded.make, lastDecoded.model) : undefined;
+  }
   // Embedded-JPEG preview fallback (Develop loupe): WebGPU and 2D can't
   // share one canvas, so when a raw can't be decoded the camera's embedded
   // JPEG renders through an absolutely-positioned <img> layered over #canvas
@@ -1386,7 +1391,7 @@ async function init(): Promise<void> {
         if (!currentEditState) return;
         currentEditState = { ...currentEditState, cursor: index };
         const opsAtCursor = currentOps(currentEditState);
-        applyOpsToSliders(opsAtCursor);
+        applyOpsToSliders(opsAtCursor, currentCameraKey());
         renderOps(opsAtCursor);
         renderHistory();
         saveEditState(db, currentFileId!, currentEditState).catch((err) =>
@@ -1441,7 +1446,7 @@ async function init(): Promise<void> {
       currentFileId = record.id;
       currentEditState = editState;
       const ops = currentOps(editState);
-      applyOpsToSliders(ops);
+      applyOpsToSliders(ops, currentCameraKey());
 
       // The full raw decode is the slow synchronous LibRaw step (~1.6s), so
       // it runs only when the image is about to be shown -- i.e. the loupe is
@@ -1455,7 +1460,7 @@ async function init(): Promise<void> {
           // loadIntoPipeline just set asShotWB from the decoded camera WB --
           // re-apply so the WB slider shows the As-Shot readout (kelvin/tint)
           // before the first render, for a fresh file.
-          applyOpsToSliders(currentOps(currentEditState));
+          applyOpsToSliders(currentOps(currentEditState), currentCameraKey());
           renderOps(currentOps(currentEditState));
         }
       } else {
@@ -1580,7 +1585,7 @@ async function init(): Promise<void> {
           if (requestId !== openRequestId) return false; // superseded during preview extract
           if (dims) {
             loadedFileId = record.id;
-            lastDecoded = { width: dims.width, height: dims.height, cameraMeta: null };
+            lastDecoded = { width: dims.width, height: dims.height, cameraMeta: null, make: '', model: '' };
             asShotWB = null; // no raw camera data behind a preview
             canvas.width = dims.width;
             canvas.height = dims.height;
@@ -1610,10 +1615,11 @@ async function init(): Promise<void> {
       // The fresh (no-WB-op) default renders at the camera's As-Shot gains;
       // the WB slider readout is derived from them (kelvin/tint).
       if (decoded.asShotGains) {
+        const cameraKey = cameraCalibrationKey(decoded.make, decoded.model);
         asShotWB = {
           gains: decoded.asShotGains,
-          kelvin: gainsToKelvin(decoded.asShotGains, decoded.camXyz),
-          tint: gainsToTint(decoded.asShotGains, decoded.camXyz),
+          kelvin: gainsToKelvin(decoded.asShotGains, decoded.camXyz, cameraKey),
+          tint: gainsToTint(decoded.asShotGains, decoded.camXyz, cameraKey),
         };
         // wb-diag: the browser's actual readout inputs at fresh open -- paste
         // this line when the displayed temp/tint disagrees with LrC, so the
@@ -1629,7 +1635,13 @@ async function init(): Promise<void> {
         asShotWB = null;
       }
       loadedFileId = record.id;
-      lastDecoded = { width: decoded.effectiveWidth ?? decoded.width, height: decoded.effectiveHeight ?? decoded.height, cameraMeta: decoded.cameraMeta };
+      lastDecoded = {
+        width: decoded.effectiveWidth ?? decoded.width,
+        height: decoded.effectiveHeight ?? decoded.height,
+        cameraMeta: decoded.cameraMeta,
+        make: decoded.make,
+        model: decoded.model,
+      };
       // waitForGPU() is awaited only for the perf log below -- it doesn't gate
       // anything, since nothing after it touches shared state.
       await pipeline.waitForGPU();

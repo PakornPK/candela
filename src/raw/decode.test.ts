@@ -51,6 +51,11 @@ describe('decode', () => {
     expect(result.cameraMeta.aperture).toBeGreaterThan(0);
     expect(result.cameraMeta.focal).toBeGreaterThan(0);
 
+    // Camera identity (EXIF Make/Model, LibRaw-normalized) -- the key the
+    // per-camera WB-readout calibration registry matches on.
+    expect(result.make).toBe('Fujifilm');
+    expect(result.model).toBe('X100V');
+
     // As-Shot WB: a real camera reports cam_mul, so asShotGains is present,
     // green-normalized (g=1), and not the flat neutral (1,1,1) -- a daylight
     // shot of a real scene needs real WB multipliers. Exercises the new
@@ -150,5 +155,11 @@ describe('decode: synthetic Bayer DNG', () => {
 
     // No EXIF in the synthetic file: all metadata reads as "not reported" (0).
     expect(result.cameraMeta).toEqual({ iso: 0, shutter: 0, aperture: 0, focal: 0 });
+
+    // Make/Model ARE written into the DNG (the generator sets NIKON D800 so
+    // LibRaw's camera table engages) -- verified in the exact normalized form
+    // LibRaw reports, which is what the WB-calibration key consumes.
+    expect(result.make).toBe('Nikon');
+    expect(result.model).toBe('D800');
   });
 });

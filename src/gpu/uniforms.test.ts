@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { evToGain, wbShiftToGains, packCfa6, shiftCfa6, packColorMatrix, kelvinToShift, shiftToKelvin, gainsToKelvin, gainsToTint, xyToCctAndTint, WB_NEUTRAL_KELVIN } from './uniforms';
+import { evToGain, wbShiftToGains, packCfa6, shiftCfa6, packColorMatrix, kelvinToShift, shiftToKelvin, gainsToKelvin, gainsToTint, xyToCctAndTint, WB_NEUTRAL_KELVIN, fitWbCalibration } from './uniforms';
 
 // LibRaw's cam_xyz (XYZ->camera) for the Fuji X100V, as decoded from the
 // fixture -- the exact matrix the LrC-model readout decomposes As-Shot gains
@@ -136,12 +136,23 @@ describe('gainsToKelvin / gainsToTint (As-Shot WB readout)', () => {
 
   it('pins the real compared file through the LrC model -- the "WB readout ≠ LrC" fix (5350K / +35)', () => {
     // The exact As-Shot gains the app opens DSCF8946.RAF at (probe-decoded
-    // 2026-08-26), decomposed through the X100V's cam_xyz + the re-fit offsets
-    // to land on the user's LrC measurement, 5350K / +35 -- the repro for
-    // "temp 5408 vs 5350, tint +29 vs +35" is closed. The render keeps the
-    // exact gains regardless; only the readout is calibrated here.
-    expect(gainsToKelvin(REAL_GAINS, FUJI_CAM_XYZ)).toBeCloseTo(5350, 1);
-    expect(gainsToTint(REAL_GAINS, FUJI_CAM_XYZ)).toBeCloseTo(35, 1);
+    // 2026-08-26), decomposed through the X100V's cam_xyz + the X100V
+    // calibration to land on the user's LrC measurement, 5350K / +35 -- the
+    // repro for "temp 5408 vs 5350, tint +29 vs +35" is closed. The render
+    // keeps the exact gains regardless; only the readout is calibrated here.
+    // The calibration is per-camera now, so the pin passes the X100V key.
+    expect(gainsToKelvin(REAL_GAINS, FUJI_CAM_XYZ, 'Fujifilm X100V')).toBeCloseTo(5350, 1);
+    expect(gainsToTint(REAL_GAINS, FUJI_CAM_XYZ, 'Fujifilm X100V')).toBeCloseTo(35, 1);
+  });
+
+  it('an unknown camera reads the raw formula (default calibration = identity)', () => {
+    // Same X100V gains+matrix WITHOUT the X100V key (or with any other key):
+    // the pre-calibration decomposition 4521.83K / +46.50. This is the core
+    // of the per-camera generalization -- an accurate-matrix camera must not
+    // inherit the X100V's ~34 mired correction.
+    expect(gainsToKelvin(REAL_GAINS, FUJI_CAM_XYZ)).toBeCloseTo(4521.83, 0);
+    expect(gainsToTint(REAL_GAINS, FUJI_CAM_XYZ)).toBeCloseTo(46.5, 1);
+    expect(gainsToKelvin(REAL_GAINS, FUJI_CAM_XYZ, 'Sony ILCE-7M4')).toBeCloseTo(4521.83, 0);
   });
 
   it('falls back to the legacy R/B-ratio axes when no camera matrix is available', () => {
@@ -150,6 +161,41 @@ describe('gainsToKelvin / gainsToTint (As-Shot WB readout)', () => {
     // (hasColorMatrix false) still gets a sane readout.
     expect(gainsToKelvin(FUJI_GAINS)).toBeCloseTo(5544.2, 1);
     expect(gainsToTint(FUJI_GAINS)).toBeCloseTo(67.5, 1);
+  });
+});
+
+describe('fitWbCalibration (per-camera affine)', () => {
+  it('a single anchor fits a constant offset (slope 1)', () => {
+    const cal = fitWbCalibration([
+      { formulaKelvin: 4521.83, displayKelvin: 5350, formulaTint: 46.5, displayTint: 35 },
+    ]);
+    expect(cal.miredSlope).toBe(1);
+    expect(cal.tintSlope).toBe(1);
+    // display_mired = formula_mired - 34.2334 -- the X100V's fitted offset.
+    expect(cal.miredIntercept).toBeCloseTo(1e6 / 5350 - 1e6 / 4521.83, 4);
+    expect(cal.tintIntercept).toBeCloseTo(35 - 46.5, 4);
+    // And it reproduces the anchor (the 5350K/+35 pin above runs this same fit).
+    expect(1e6 / (1e6 / 4521.83 + cal.miredIntercept)).toBeCloseTo(5350, 1);
+  });
+
+  it('two anchors fit a line exact through both (the 2-point fit)', () => {
+    // A camera whose matrix error scales with temperature: the DNG model reads
+    // 5000K at daylight and 2500K at tungsten, but LrC shows 5500K / 2700K.
+    const cal = fitWbCalibration([
+      { formulaKelvin: 5000, displayKelvin: 5500, formulaTint: 0, displayTint: 0 },
+      { formulaKelvin: 2500, displayKelvin: 2700, formulaTint: 0, displayTint: 0 },
+    ]);
+    // mired: formula 200/400, display 181.818/370.370 -> slope = 0.94276.
+    const slope = (1e6 / 2700 - 1e6 / 5500) / (1e6 / 2500 - 1e6 / 5000);
+    expect(cal.miredSlope).toBeCloseTo(slope, 6);
+    // The fitted line lands on both anchors exactly.
+    expect(1e6 / (cal.miredSlope * (1e6 / 2500) + cal.miredIntercept)).toBeCloseTo(2700, 0);
+    expect(1e6 / (cal.miredSlope * (1e6 / 5000) + cal.miredIntercept)).toBeCloseTo(5500, 0);
+    expect(cal.tintIntercept).toBeCloseTo(0, 6);
+  });
+
+  it('no anchors -> identity', () => {
+    expect(fitWbCalibration([])).toEqual({ miredSlope: 1, miredIntercept: 0, tintSlope: 1, tintIntercept: 0 });
   });
 });
 

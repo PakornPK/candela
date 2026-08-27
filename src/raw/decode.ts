@@ -73,6 +73,12 @@ export interface DecodedRaw {
   asShotGains?: { r: number; g: number; b: number };
   // Shooting metadata (iso/shutter/aperture/focal), 0 when not reported.
   cameraMeta: CameraMeta;
+  // Camera identity from EXIF, as LibRaw normalizes it (title-cased brand,
+  // e.g. "Fujifilm" / "X100V", "Nikon" / "D800"). Empty string when the file
+  // reports none. The per-camera WB-readout calibration registry keys on
+  // `${make} ${model}` (see uniforms.ts cameraCalibrationKey).
+  make: string;
+  model: string;
 }
 
 export async function decode(fileBytes: ArrayBuffer): Promise<DecodedRaw> {
@@ -187,6 +193,12 @@ export async function decode(fileBytes: ArrayBuffer): Promise<DecodedRaw> {
     }
   }
 
+  // Camera identity -- Emscripten ccall 'string' ret copies the C string out
+  // (reads the struct's fixed char[64] buffers via UTF8ToString internally).
+  // Must be read before free_decoded() below, which frees the struct.
+  const make = module.ccall('decode_result_make', 'string', ['number'], [resultPtr]);
+  const model = module.ccall('decode_result_model', 'string', ['number'], [resultPtr]);
+
   module.ccall('free_decoded', null, ['number'], [resultPtr]);
 
   return {
@@ -206,5 +218,7 @@ export async function decode(fileBytes: ArrayBuffer): Promise<DecodedRaw> {
     camXyz,
     asShotGains,
     cameraMeta,
+    make,
+    model,
   };
 }

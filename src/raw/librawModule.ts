@@ -6,7 +6,11 @@ import createLibRawModule from '../wasm/libraw.js';
 // -- see Task 2's code review in this plan for why that matters once both
 // are imported together, as main.ts (this task) does.
 export interface LibRawModule {
-  ccall: (name: string, ret: string | null, argTypes: string[], args: unknown[]) => number;
+  // ret 'string' (Emscripten's UTF8ToString copy for a `const char*` return)
+  // maps to JS string; everything else maps to number.
+  ccall: <T extends 'number' | 'string' | null>(
+    name: string, ret: T, argTypes: string[], args: unknown[],
+  ) => T extends 'string' ? string : number;
   HEAPU8: Uint8Array;
   HEAPU16: Uint16Array;
   _malloc: (size: number) => number;

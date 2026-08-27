@@ -122,18 +122,85 @@ export function shiftToKelvin(c: number): number {
 // fall back to the legacy R/B-ratio axes (below) when the file has no usable
 // matrix.
 //
-// Calibration of the readout to LrC -- ONE anchor: the Fuji X100V fixture
-// (sample.raf), which LrC opens at 5450K / +35 (user-measured). Through
-// LibRaw's cam_xyz those As-Shot gains decompose as 4551K / +52. LibRaw's
-// X100V matrix is known-anomalous -- its Z-row R coefficient (+0.058) flips
-// sign vs the whole X100 family in LibRaw's own table (X100F -0.067,
-// X100S/T -0.087), a ~900K-too-warm white point -- so a constant mired/tint
-// offset calibrates the whole X100V range, not just the anchor. ponytail:
-// single-anchor fit -- re-fit when a second camera's LrC readout is measured.
-// Re-fit 2026-08-26 to the real compared file (DSCF8946.RAF, X100V):
-// raw decomposition 4521.83 K / +46.50 -> LrC reads 5350 K / +35.
-const WB_TEMP_MIRED_OFFSET = 34.2334; // mired_display = mired_formula - this
-const WB_TINT_OFFSET = -11.5049; // tint_display = tint_formula + this
+// Calibration of the readout to LrC, per camera. The DNG model (cam_xyz
+// inverse -> xy -> Robertson -> temp/tint) matches LrC when LibRaw's camera
+// matrix is colorimetrically close to Adobe's; cameras whose LibRaw matrix
+// deviates need a per-camera correction keyed by make+model. Default is
+// identity (no correction), so an accurate-matrix camera reads the raw
+// formula and the X100V's correction never leaks onto it.
+//
+// The ONE measured camera is the Fuji X100V fixture (sample.raf): LrC opens
+// it at 5350K / +35 (user-measured on DSCF8946.RAF, re-fit 2026-08-26), while
+// the As-Shot gains decompose through LibRaw's cam_xyz as 4521.83 K / +46.50.
+// LibRaw's X100V matrix is known-anomalous -- its Z-row R coefficient
+// (+0.058) flips sign vs the whole X100 family in LibRaw's own table (X100F
+// -0.067, X100S/T -0.087), a ~900K-too-warm white point -- so a constant
+// mired/tint offset calibrates the whole X100V range, not just the anchor.
+// ponytail: one anchor per camera -> constant offset; fit a second anchor for
+// a camera and fitWbCalibration upgrades it to a slope (a 2-point line).
+export interface WbCalibration {
+  miredSlope: number;
+  miredIntercept: number;
+  tintSlope: number;
+  tintIntercept: number;
+}
+
+export interface WbAnchor {
+  formulaKelvin: number; // DNG-model readout of the camera's As-Shot gains
+  displayKelvin: number; // what LrC actually reads at that white point
+  formulaTint: number;
+  displayTint: number;
+}
+
+// Affine fit in mired/tint space: display = formula * slope + intercept.
+// One anchor -> constant offset (slope 1); two or more -> least-squares line
+// (exact through 2, which is the "2-point fit"). The fit lives in mired
+// (1e6/K), not Kelvin, because isotemperature lines are near-parallel in
+// mired and nearly hyperbolic in Kelvin.
+export function fitWbCalibration(anchors: WbAnchor[]): WbCalibration {
+  const fitLine = (ax: number[], ay: number[]): [number, number] => {
+    const n = ax.length;
+    if (n === 0) return [1, 0];
+    if (n === 1) return [1, ay[0] - ax[0]];
+    const mx = ax.reduce((s, v) => s + v, 0) / n;
+    const my = ay.reduce((s, v) => s + v, 0) / n;
+    let sxx = 0;
+    let sxy = 0;
+    for (let i = 0; i < n; i++) {
+      sxx += (ax[i] - mx) ** 2;
+      sxy += (ax[i] - mx) * (ay[i] - my);
+    }
+    const slope = sxx > 0 ? sxy / sxx : 1;
+    return [slope, my - slope * mx];
+  };
+  const mired = fitLine(
+    anchors.map((a) => 1e6 / a.formulaKelvin),
+    anchors.map((a) => 1e6 / a.displayKelvin),
+  );
+  const tint = fitLine(
+    anchors.map((a) => a.formulaTint),
+    anchors.map((a) => a.displayTint),
+  );
+  return { miredSlope: mired[0], miredIntercept: mired[1], tintSlope: tint[0], tintIntercept: tint[1] };
+}
+
+const WB_CALIBRATIONS: Readonly<Record<string, WbCalibration>> = {
+  'Fujifilm X100V': fitWbCalibration([
+    { formulaKelvin: 4521.83, displayKelvin: 5350, formulaTint: 46.5, displayTint: 35 },
+  ]),
+};
+
+// Normalized "MAKE MODEL" key for the registry. LibRaw title-cases the EXIF
+// identity (verified: "Fujifilm X100V", "Nikon D800"), so the registry keys
+// use that exact form; trimming here tolerates files whose fields carry
+// trailing whitespace.
+export function cameraCalibrationKey(make: string, model: string): string {
+  return `${(make || '').trim()} ${(model || '').trim()}`.trim();
+}
+
+export function wbCalibrationFor(cameraKey?: string): WbCalibration {
+  return (cameraKey && WB_CALIBRATIONS[cameraKey]) || { miredSlope: 1, miredIntercept: 0, tintSlope: 1, tintIntercept: 0 };
+}
 
 // Robertson (1968) isotemperature table: [i, u, v, dv/du] in CIE-1960 uv
 // (colour-science `_uv_to_CCT_Robertson1968`, verbatim). The temperature is
@@ -252,8 +319,10 @@ function invert3x3(m: Float32Array): Float32Array | null {
 }
 
 // Full readout: the LrC/DNG model when the camera's XYZ->camera matrix is
-// available, else the legacy R/B-ratio axes (below).
-export function gainsToReadout(g: WbGains, camXyz?: Float32Array): { kelvin: number; tint: number } {
+// available, else the legacy R/B-ratio axes (below). cameraKey (the
+// normalized "MAKE MODEL", see cameraCalibrationKey) selects the per-camera
+// calibration; absent/unknown cameras read the raw formula (identity).
+export function gainsToReadout(g: WbGains, camXyz?: Float32Array, cameraKey?: string): { kelvin: number; tint: number } {
   const r = Math.max(g.r, 1e-6);
   const b = Math.max(g.b, 1e-6);
   if (camXyz) {
@@ -269,9 +338,9 @@ export function gainsToReadout(g: WbGains, camXyz?: Float32Array): { kelvin: num
       const sum = X + Y + Z;
       if (sum > 1e-12) {
         const raw = xyToCctAndTint(X / sum, Y / sum);
-        // Calibrated to the LrC anchor (see the offsets above).
-        const kelvin = 1e6 / (1e6 / raw.kelvin - WB_TEMP_MIRED_OFFSET);
-        const tint = Math.max(-150, Math.min(150, raw.tint + WB_TINT_OFFSET));
+        const cal = wbCalibrationFor(cameraKey);
+        const kelvin = 1e6 / (cal.miredSlope * (1e6 / raw.kelvin) + cal.miredIntercept);
+        const tint = Math.max(-150, Math.min(150, cal.tintSlope * raw.tint + cal.tintIntercept));
         return { kelvin: Math.max(2000, Math.min(50000, kelvin)), tint };
       }
     }
@@ -286,10 +355,10 @@ export function gainsToReadout(g: WbGains, camXyz?: Float32Array): { kelvin: num
   return { kelvin: shiftToKelvin(c), tint: Math.max(-150, Math.min(150, 37.5 * p)) };
 }
 
-export function gainsToKelvin(g: WbGains, camXyz?: Float32Array): number {
-  return gainsToReadout(g, camXyz).kelvin;
+export function gainsToKelvin(g: WbGains, camXyz?: Float32Array, cameraKey?: string): number {
+  return gainsToReadout(g, camXyz, cameraKey).kelvin;
 }
 
-export function gainsToTint(g: WbGains, camXyz?: Float32Array): number {
-  return gainsToReadout(g, camXyz).tint;
+export function gainsToTint(g: WbGains, camXyz?: Float32Array, cameraKey?: string): number {
+  return gainsToReadout(g, camXyz, cameraKey).tint;
 }
