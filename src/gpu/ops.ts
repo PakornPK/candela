@@ -284,7 +284,7 @@ export const OP_RENDERERS: OpRenderer[] = [
     uniformSize: 16, // struct DodgeBurn { ev + 3 pad }
     packParams: (ops) => {
       const op = ops.find(isDodgeBurnOp);
-      const p: DodgeBurnParams = op ?? { amount: 0, size: 20, opacity: 50 };
+      const p: DodgeBurnParams = op ?? { amount: 0, size: 20, opacity: 50, feather: 0 };
       return packDodgeBurn(p);
     },
   },

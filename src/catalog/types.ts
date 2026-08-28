@@ -94,7 +94,8 @@ export type Op =
       kind: 'dodgeBurn';
       amount: number;    // 0..100 brush strength magnitude -> 0..4 EV
       size: number;      // 1..100 brush radius % (UI restore)
-      opacity: number;   // 1..100 stroke opacity (UI restore)
+      opacity: number;   // 1..100 live mask gain, /50 (UI restore)
+      feather: number;   // 0..100 live edge blur, /2500 of mask max edge (UI restore)
       mask: Int8Array;   // signed density, maskW*maskH, /127 (see gpu/dodge.ts)
       maskW: number;
       maskH: number;
@@ -161,7 +162,7 @@ export function isGeometryOp(
 
 export function isDodgeBurnOp(
   op: Op,
-): op is { kind: 'dodgeBurn'; amount: number; size: number; opacity: number; mask: Int8Array; maskW: number; maskH: number } {
+): op is { kind: 'dodgeBurn'; amount: number; size: number; opacity: number; feather: number; mask: Int8Array; maskW: number; maskH: number } {
   return op.kind === 'dodgeBurn';
 }
 

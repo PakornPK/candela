@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   DODGE_MASK_MAX,
+  effectiveMask,
   isNeutralDodgeBurn,
   maskDims,
   maskHasPaint,
@@ -32,30 +33,67 @@ describe('maskDims', () => {
 describe('paintStroke', () => {
   it('accumulates positive density for dodge', () => {
     const m = new Float32Array(100);
-    paintStroke(m, 10, 10, 2, 5, 2, 5, 2, 0.5, 1);
+    paintStroke(m, 10, 10, 2, 5, 2, 5, 2, 1);
     expect(m[5 * 10 + 2]).toBeGreaterThan(0); // stroke center
     expect(m[0]).toBe(0); // untouched corner stays neutral
   });
 
   it('accumulates negative density for burn', () => {
     const m = new Float32Array(100);
-    paintStroke(m, 10, 10, 2, 5, 2, 5, 2, 0.5, -1);
+    paintStroke(m, 10, 10, 2, 5, 2, 5, 2, -1);
     expect(m[5 * 10 + 2]).toBeLessThan(0);
   });
 
   it('clamps at +-1', () => {
     const m = new Float32Array(100);
-    paintStroke(m, 10, 10, 2, 5, 2, 5, 2, 2, 1); // opacity 2x clamps
+    paintStroke(m, 10, 10, 2, 5, 2, 5, 2, 1);
     expect(m[5 * 10 + 2]).toBe(1);
-    paintStroke(m, 10, 10, 2, 5, 2, 5, 2, 2, -1);
+    paintStroke(m, 10, 10, 2, 5, 2, 5, 2, -1);
     expect(m[5 * 10 + 2]).toBeLessThan(1); // burn over dodge cancels
   });
 
   it('interpolates a continuous band across a drag', () => {
     const m = new Float32Array(100);
-    paintStroke(m, 10, 10, 0, 5, 9, 5, 1.5, 0.4, 1);
+    paintStroke(m, 10, 10, 0, 5, 9, 5, 1.5, 1);
     expect(m[5 * 10 + 4]).toBeGreaterThan(0); // mid-drag stamped
     expect(m[5 * 10 + 9]).toBeGreaterThan(0); // end stamped
+  });
+});
+
+describe('effectiveMask (live opacity + feather)', () => {
+  it('opacity 50 is neutral x1.0, 25 halves, 100 boosts to +-1 clamp', () => {
+    const m = new Float32Array([0.8, -0.6, 0.4, 0]);
+    const at50 = effectiveMask(m, 2, 2, 50, 0);
+    expect(at50[0]).toBeCloseTo(0.8); expect(at50[1]).toBeCloseTo(-0.6);
+    expect(at50[2]).toBeCloseTo(0.4); expect(at50[3]).toBeCloseTo(0);
+    const at25 = effectiveMask(m, 2, 2, 25, 0);
+    expect(at25[0]).toBeCloseTo(0.4);  // 0.8 * 0.5
+    expect(at25[1]).toBeCloseTo(-0.3); // -0.6 * 0.5
+    const at100 = effectiveMask(m, 2, 2, 100, 0);
+    expect(at100[0]).toBe(1);          // 0.8 * 2.0 clamped
+    expect(at100[1]).toBe(-1);
+  });
+
+  it('neutral paint stays neutral at any opacity/feather', () => {
+    const z = new Float32Array(64);
+    for (let i = 0; i < z.length; i++) {
+      expect(effectiveMask(z, 8, 8, 25, 0)[i]).toBeCloseTo(0);
+      expect(effectiveMask(z, 8, 8, 100, 100)[i]).toBeCloseTo(0); // no NaN/-0 from the blur
+    }
+  });
+
+  it('feather spreads density past the hard edge, keeps the interior strong', () => {
+    // 25x25, one full-strength dab at center (radius 6 -> a soft disc; the
+    // center pixel's falloff is ~0.96, near the full-density plateau).
+    const m = new Float32Array(25 * 25);
+    paintStroke(m, 25, 25, 12, 12, 12, 12, 6, 1);
+    expect(m[12 * 25 + 12]).toBeGreaterThan(0.9);
+    const f = effectiveMask(m, 25, 25, 50, 100); // max feather -> blur r=1
+    expect(f[12 * 25 + 12]).toBeGreaterThan(0.8);  // interior preserved
+    // One pixel past the hard disc edge: raw is 0, the blur bleeds into it.
+    expect(m[12 * 25 + 18]).toBe(0);
+    expect(f[12 * 25 + 18]).toBeGreaterThan(0.0005);
+    expect(f[0]).toBe(0);                          // far corner stays neutral
   });
 });
 
@@ -77,8 +115,8 @@ describe('maskToOverlay (the brush red-mask overlay)', () => {
 
   it('every painted pixel is red (filter scan: no gray leaks into the overlay)', () => {
     const m = new Float32Array(100);
-    paintStroke(m, 10, 10, 4, 5, 4, 5, 2, 0.5, 1);
-    paintStroke(m, 10, 10, 6, 5, 6, 5, 2, 0.5, -1);
+    paintStroke(m, 10, 10, 4, 5, 4, 5, 2, 1);
+    paintStroke(m, 10, 10, 6, 5, 6, 5, 2, -1);
     const rgba = maskToOverlay(m);
     for (let i = 0; i < m.length; i++) {
       const o = i * 4;
@@ -112,18 +150,18 @@ describe('mask byte/op encodings', () => {
 
 describe('packDodgeBurn', () => {
   it('amount 100 -> ev 4', () => {
-    expect(packDodgeBurn({ amount: 100, size: 20, opacity: 50 })[0]).toBe(4);
+    expect(packDodgeBurn({ amount: 100, size: 20, opacity: 50, feather: 0 })[0]).toBe(4);
   });
   it('amount 25 -> ev 1, amount 0 -> ev 0', () => {
-    expect(packDodgeBurn({ amount: 25, size: 20, opacity: 50 })[0]).toBe(1);
-    expect(packDodgeBurn({ amount: 0, size: 20, opacity: 50 })[0]).toBe(0);
+    expect(packDodgeBurn({ amount: 25, size: 20, opacity: 50, feather: 0 })[0]).toBe(1);
+    expect(packDodgeBurn({ amount: 0, size: 20, opacity: 50, feather: 0 })[0]).toBe(0);
   });
 });
 
 describe('guards', () => {
   it('isNeutralDodgeBurn', () => {
-    expect(isNeutralDodgeBurn({ amount: 0, size: 20, opacity: 50 })).toBe(true);
-    expect(isNeutralDodgeBurn({ amount: 30, size: 20, opacity: 50 })).toBe(false);
+    expect(isNeutralDodgeBurn({ amount: 0, size: 20, opacity: 50, feather: 0 })).toBe(true);
+    expect(isNeutralDodgeBurn({ amount: 30, size: 20, opacity: 50, feather: 0 })).toBe(false);
   });
   it('maskHasPaint only counts nonzero density', () => {
     expect(maskHasPaint(new Float32Array(4))).toBe(false);

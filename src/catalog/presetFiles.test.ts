@@ -23,7 +23,7 @@ describe('presetFiles', () => {
     // serialize as a plain byte array and come back as an Int8Array or
     // isValidOp rejects it on import.
     const withMask: Op[] = [
-      { kind: 'dodgeBurn', amount: 40, size: 20, opacity: 50, mask: new Int8Array([0, 127, -127, 64]), maskW: 2, maskH: 2 },
+      { kind: 'dodgeBurn', amount: 40, size: 20, opacity: 50, feather: 0, mask: new Int8Array([0, 127, -127, 64]), maskW: 2, maskH: 2 },
     ];
     const parsed = parsePreset(serializePreset('Brush', withMask));
     expect(parsed.ops[0]).toEqual(withMask[0]);

@@ -23,7 +23,7 @@ import { isNeutralGrain, seedFromPath, setGrainSeed, type GrainParams } from './
 import { isNeutralLightleak, type LightleakParams } from './gpu/lightleak';
 import { isNeutralCrop, type CropParams } from './gpu/crop';
 import { isNeutralGeometry, type GeometryParams } from './gpu/geometry';
-import { maskDims, maskHasPaint, maskToBytes, maskToOp, maskToOverlay, opToMask, paintStroke, type DodgeBurnParams } from './gpu/dodge';
+import { effectiveMask, maskDims, maskHasPaint, maskToBytes, maskToOp, maskToOverlay, opToMask, paintStroke, type DodgeBurnParams } from './gpu/dodge';
 import { BW_FILTERS, BW_TONES, type BwFilterId } from './gpu/bw';
 import { getState, selectFile, setSelection, subscribe, type ModuleId } from './app/state';
 import { registerModule, switchModule } from './app/modules';
@@ -206,9 +206,11 @@ const dodgeModeSelect = document.querySelector<HTMLSelectElement>('#dodge-mode')
 const dodgeAmountSlider = document.querySelector<HTMLInputElement>('#dodge-amount')!;
 const dodgeSizeSlider = document.querySelector<HTMLInputElement>('#dodge-size')!;
 const dodgeOpacitySlider = document.querySelector<HTMLInputElement>('#dodge-opacity')!;
+const dodgeFeatherSlider = document.querySelector<HTMLInputElement>('#dodge-feather')!;
 const dodgeAmountValue = document.querySelector<HTMLOutputElement>('#dodge-amount-value')!;
 const dodgeSizeValue = document.querySelector<HTMLOutputElement>('#dodge-size-value')!;
 const dodgeOpacityValue = document.querySelector<HTMLOutputElement>('#dodge-opacity-value')!;
+const dodgeFeatherValue = document.querySelector<HTMLOutputElement>('#dodge-feather-value')!;
 const dodgeOverlayColor = document.querySelector<HTMLInputElement>('#dodge-overlay-color')!;
 const maskOverlay = document.querySelector<HTMLCanvasElement>('#mask-overlay')!;
 const maskOverlayCtx = maskOverlay.getContext('2d')!;
@@ -327,11 +329,13 @@ const ALL_SLIDERS: SliderConfig[] = [
   { slider: geometryScaleSlider, output: geometryScaleValue, neutral: 100, format: (v) => `${v}%` },
   { slider: geometryOffsetXSlider, output: geometryOffsetXValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: geometryOffsetYSlider, output: geometryOffsetYValue, neutral: 0, format: (v) => formatSigned(v) },
-  // Dodge & Burn brush -- amount 0 (off) / size 20 / opacity 50. The dodgeBurn
-  // op is emitted only when the painted mask has content, not by these sliders.
+  // Dodge & Burn brush -- amount 0 (off) / size 20 / opacity 50 / feather 0.
+  // The dodgeBurn op is emitted only when the painted mask has content, not by
+  // these sliders.
   { slider: dodgeAmountSlider, output: dodgeAmountValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: dodgeSizeSlider, output: dodgeSizeValue, neutral: 20, format: (v) => `${v}%` },
   { slider: dodgeOpacitySlider, output: dodgeOpacityValue, neutral: 50, format: (v) => `${v}%` },
+  { slider: dodgeFeatherSlider, output: dodgeFeatherValue, neutral: 0, format: (v) => `${v}%` },
 ];
 
 function paintSliders(): void {
@@ -612,15 +616,20 @@ function readDodgeParams(): DodgeBurnParams {
     amount: Number(dodgeAmountSlider.value),
     size: Number(dodgeSizeSlider.value),
     opacity: Number(dodgeOpacitySlider.value),
+    feather: Number(dodgeFeatherSlider.value),
   };
 }
 
 // Uploads the current paint mask to the GPU when it changed since the last
 // render/export. Called from renderOps (the single render gate) and the export
-// handler (which dispatches ops directly without a render first).
+// handler (which dispatches ops directly without a render first). Opacity and
+// feather are LIVE: the upload applies effectiveMask (opacity gain + edge blur)
+// so dragging either slider after painting re-shapes the mark. The painted
+// mask itself is never mutated, so history stores the raw paint.
 function syncDodgeMaskToGPU(): void {
   if (!dodgeMaskDirty || !paintMask) return;
-  pipeline.setDodgeMask(maskToBytes(paintMask));
+  const p = readDodgeParams();
+  pipeline.setDodgeMask(maskToBytes(effectiveMask(paintMask, paintMaskW, paintMaskH, p.opacity, p.feather)));
   dodgeMaskDirty = false;
 }
 
@@ -835,6 +844,7 @@ function applyOpsToSliders(ops: Op[], cameraKey?: string): void {
   dodgeAmountSlider.value = String(dodgeOp?.amount ?? 0);
   dodgeSizeSlider.value = String(dodgeOp?.size ?? 20);
   dodgeOpacitySlider.value = String(dodgeOp?.opacity ?? 50);
+  dodgeFeatherSlider.value = String(dodgeOp?.feather ?? 0);
   frameStyleSelect.value = frameOp?.style ?? 'none';
   // B&W: the op's presence IS the treatment (no bw op = Color). Mix sliders
   // restore to the op's 8 weights (0 = that hue contributes normal luminance);
@@ -1777,6 +1787,10 @@ async function init(): Promise<void> {
       // Dragging WB/tint exits the As-Shot default: from here on the slider
       // kelvin/tint is authoritative (exact camera gains stop being emitted).
       if (cfg.slider === wbSlider || cfg.slider === tintSlider) wbTouched = true;
+      // Opacity/feather live-reshape the painted mask (effectiveMask at upload),
+      // so the mask texture must re-upload on drag -- renderOps only re-uploads
+      // when dodgeMaskDirty is set, and the slider alone doesn't paint.
+      if (cfg.slider === dodgeOpacitySlider || cfg.slider === dodgeFeatherSlider) dodgeMaskDirty = true;
       paintSliders();
       onSliderInput();
     });
@@ -2020,7 +2034,7 @@ async function init(): Promise<void> {
     const sign = dodgeModeSelect.value === 'dodge' ? 1 : -1;
     const radius = (p.size / 100) * (Math.max(paintMaskW, paintMaskH) / 2);
     const from = lastBrushPt ?? pt;
-    paintStroke(paintMask, paintMaskW, paintMaskH, from[0], from[1], pt[0], pt[1], radius, p.opacity / 100, sign);
+    paintStroke(paintMask, paintMaskW, paintMaskH, from[0], from[1], pt[0], pt[1], radius, sign);
     lastBrushPt = pt;
     dodgeMaskDirty = true;
     drawDodgeOverlay();

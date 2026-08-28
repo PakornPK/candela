@@ -32,7 +32,7 @@ describe('presentOpIndices', () => {
     expect(presentOpIndices([{ kind: 'lightleak', amount: 60, hue: 20 }])).toEqual([0, 1, 3, 8]);
     expect(presentOpIndices([{ kind: 'crop', aspect: '1:1', rotate90: 0, angle: 0 }])).toEqual([0, 1, 3, 9]);
     expect(presentOpIndices([
-      { kind: 'dodgeBurn', amount: 40, size: 20, opacity: 50, mask: new Int8Array(4), maskW: 2, maskH: 2 },
+      { kind: 'dodgeBurn', amount: 40, size: 20, opacity: 50, feather: 0, mask: new Int8Array(4), maskW: 2, maskH: 2 },
     ])).toEqual([0, 1, 3, 11]);
     expect(presentOpIndices([{ kind: 'frame', style: '135' }])).toEqual([0, 1, 3, 13]);
     expect(presentOpIndices([{ kind: 'geometry', vertical: 10, horizontal: 0, rotate: 0, aspect: 0, scale: 100, offsetX: 0, offsetY: 0 }])).toEqual([0, 1, 3, 7]);
@@ -200,7 +200,7 @@ describe('OP_RENDERERS packParams', () => {
     const absent = dodge.packParams([]);
     expect(Array.from(absent)).toEqual([0, 0, 0, 0]); // amount 0 = off
     const strong = dodge.packParams([
-      { kind: 'dodgeBurn', amount: 75, size: 20, opacity: 50, mask: new Int8Array(4), maskW: 2, maskH: 2 },
+      { kind: 'dodgeBurn', amount: 75, size: 20, opacity: 50, feather: 0, mask: new Int8Array(4), maskW: 2, maskH: 2 },
     ]);
     expect(strong[0]).toBeCloseTo(3, 9); // 75/25 = 3 EV
   });
