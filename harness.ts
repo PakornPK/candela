@@ -787,7 +787,7 @@ async function main() {
     // (committed PNG) under the shader's uv mapping, at three hues (one
     // texture each) and with the fade envelope. A procedural shader can't
     // reproduce the PNGs' pixels.
-    const leakTexs = await Promise.all(['/leaks/leak-0.png', '/leaks/leak-1.png', '/leaks/leak-2.png'].map(decodeImg));
+    const leakTexs = await Promise.all([0, 1, 2, 3, 4, 5].map((i) => decodeImg(`/leaks/leak-${i}.png`))); // 2 sets x 3 hues
     const leakLin = leakTexs.map((L) => {
       const f = new Float32Array(L.w * L.h * 3);
       for (let i = 0; i < L.w * L.h; i++) for (let c = 0; c < 3; c++) f[i * 3 + c] = L.data[i * 4 + c] / 255; // unorm: bytes ARE linear
@@ -808,17 +808,25 @@ async function main() {
       const s = w[0] + w[1] + w[2];
       return w.map((x) => x / s);
     };
-    // Mirror of lightleak.wgsl with seed 0.01 -> seedU=167772 -> edge 0 (top):
-    // uv=(nx,ny), tex = sum w_i * bilin(leak_i), gain = amount*0.01 * fadeGain.
-    const expectedLeak = (x: number, y: number, hue: number, fade: number, ch: number) => {
+    // Mirror of lightleak.wgsl. seedU = floor(seed*16777215); the seed's low
+    // bits pick the edge (seedU%4), its TOP bit (seedU>>23) picks the pattern
+    // set in Auto mode (0 = Set A, 1 = Set B); fixed mode uses patternSel.
+    const seedGeo = (seed: number, pattern: number) => {
+      const su = Math.floor(seed * 16777215);
+      return { su, edge: su % 4, fam: pattern === -1 ? (su >> 23) & 1 : pattern };
+    };
+    const edgeDist = (edge: number, nx: number, ny: number) => (edge === 0 ? ny : edge === 1 ? 1 - nx : edge === 2 ? 1 - ny : nx);
+    const uvForEdge = (edge: number, nx: number, ny: number) => (edge === 0 ? [nx, ny] : edge === 1 ? [ny, 1 - nx] : edge === 2 ? [nx, 1 - ny] : [1 - ny, nx]);
+    const expectedLeak = (x: number, y: number, hue: number, fade: number, ch: number, edge: number, fam: number) => {
       const nx = (x + 0.5) / 2048, ny = (y + 0.5) / 2048;
+      const [u, v] = uvForEdge(edge, nx, ny);
       const w = leakWeights(Math.min(1, Math.max(0, hue * 0.01)));
       let tex = 0;
-      for (let i = 0; i < 3; i++) tex += bilin(leakLin[i], leakTexs[i].w, leakTexs[i].h, nx, ny, ch) * w[i];
-      const fadeGain = 1 - smoothstep(0, 0.35, ny); // fade 100: 1-smoothstep(0,LEAK_WIDTH,d)
+      for (let i = 0; i < 3; i++) tex += bilin(leakLin[fam * 3 + i], leakTexs[fam * 3 + i].w, leakTexs[fam * 3 + i].h, u, v, ch) * w[i];
+      const fadeGain = 1 - smoothstep(0, 0.35, edgeDist(edge, nx, ny)); // fade 100: 1-smoothstep(0,LEAK_WIDTH,d)
       return tex * (fade === 100 ? fadeGain : 1);
     };
-    setGrainSeed(0.01); // pins edge 0 for every render below
+    setGrainSeed(0.01); // seedU=167772 -> edge 0 (top), fam 0 (Set A) in Auto
     const leakPix = async (tex: GPUTexture, x: number, y: number) => {
       const lW = tex.width;
       const lBPR = Math.ceil((lW * 8) / 256) * 256;
@@ -844,20 +852,21 @@ async function main() {
       return leakPix((pipe3 as any).displayTexture as GPUTexture, x, y);
     };
     const base = await leakRender(null, LEAKP, LEAKY);
-    const hueGot = await Promise.all([0, 50, 100].map((hue) => leakRender({ kind: 'lightleak', amount: 100, hue, fade: 0 } as never, LEAKP, LEAKY)));
+    // Auto pattern (pattern:-1): at seed 0.01 the seed picks Set A + edge 0.
+    const hueGot = await Promise.all([0, 50, 100].map((hue) => leakRender({ kind: 'lightleak', amount: 100, hue, fade: 0, pattern: -1 } as never, LEAKP, LEAKY)));
     let maxLeakDelta = 0;
     for (let i = 0; i < 3; i++) for (let c = 0; c < 3; c++) {
-      const exp = base[c] + expectedLeak(LEAKP, LEAKY, i * 50, 0, c);
+      const exp = base[c] + expectedLeak(LEAKP, LEAKY, i * 50, 0, c, 0, 0);
       maxLeakDelta = Math.max(maxLeakDelta, Math.abs(hueGot[i][c] - exp));
     }
     // fade: at a deep pixel (ny > LEAK_WIDTH) fade 100 must kill the leak exactly
     const FY = 900;
     const baseF = await leakRender(null, LEAKP, FY);
-    const f0 = await leakRender({ kind: 'lightleak', amount: 100, hue: 0, fade: 0 } as never, LEAKP, FY);
-    const f100 = await leakRender({ kind: 'lightleak', amount: 100, hue: 0, fade: 100 } as never, LEAKP, FY);
+    const f0 = await leakRender({ kind: 'lightleak', amount: 100, hue: 0, fade: 0, pattern: -1 } as never, LEAKP, FY);
+    const f100 = await leakRender({ kind: 'lightleak', amount: 100, hue: 0, fade: 100, pattern: -1 } as never, LEAKP, FY);
     let maxFadeDelta = 0;
     for (let c = 0; c < 3; c++) {
-      maxFadeDelta = Math.max(maxFadeDelta, Math.abs(f0[c] - (baseF[c] + expectedLeak(LEAKP, FY, 0, 0, c))));
+      maxFadeDelta = Math.max(maxFadeDelta, Math.abs(f0[c] - (baseF[c] + expectedLeak(LEAKP, FY, 0, 0, c, 0, 0))));
       maxFadeDelta = Math.max(maxFadeDelta, Math.abs(f100[c] - baseF[c]));
     }
     const hueMoves = Math.abs(hueGot[0][0] - hueGot[2][0]) > 0.05; // warm vs cool textures genuinely differ
@@ -865,6 +874,36 @@ async function main() {
     log(`LEAK PROOF @(${LEAKP},${LEAKY}) base R=${base[0].toFixed(3)} | hue0 R=${hueGot[0][0].toFixed(3)} hue50=${hueGot[1][0].toFixed(3)} hue100=${hueGot[2][0].toFixed(3)} (max |rendered-expect|=${maxLeakDelta.toFixed(4)})`);
     log(`LEAK PROOF fade @(${LEAKP},${FY}) base R=${baseF[0].toFixed(3)}, fade0 R=${f0[0].toFixed(3)}, fade100 R=${f100[0].toFixed(3)} (max |fade-expect|=${maxFadeDelta.toFixed(4)})`);
     log(`LEAK FILTER: ${leakOk ? 'PASS' : 'FAIL'} -- committed textures drive the leak (pixels-match:${maxLeakDelta < 0.04}, fade-kill:${maxFadeDelta < 0.04}, hue-moves:${hueMoves})`);
+
+    // PATTERN-SET PROOF (the picker + per-photo variety). Two vendored sets
+    // (A = leak-0..2, B = leak-3..5) must (a) be genuinely different textures,
+    // (b) drive the render pixel-exact when fixed (pattern:1), and (c) flip by
+    // the seed's top bit in Auto (seed 0.6 -> seedU=10066329 -> edge 1 right,
+    // fam 1 Set B). A shader that ignored the set selector can't reproduce the
+    // Set B pixels.
+    const setB = await leakRender({ kind: 'lightleak', amount: 100, hue: 0, fade: 0, pattern: 1 } as never, LEAKP, LEAKY);
+    let maxSetBDelta = 0;
+    for (let c = 0; c < 3; c++) maxSetBDelta = Math.max(maxSetBDelta, Math.abs(setB[c] - (base[c] + expectedLeak(LEAKP, LEAKY, 0, 0, c, 0, 1))));
+    // Set A vs Set B at the same probe MUST be different textures (else the
+    // picker is pointless): assert it on the DECODED textures, not the render.
+    let texDiff = 0;
+    for (let c = 0; c < 3; c++) texDiff = Math.max(texDiff, Math.abs(bilin(leakLin[0], 1024, 1024, (LEAKP + 0.5) / 2048, (LEAKY + 0.5) / 2048, c) - bilin(leakLin[3], 1024, 1024, (LEAKP + 0.5) / 2048, (LEAKY + 0.5) / 2048, c)));
+    // Auto flips to Set B at seed 0.6: probe a pixel near the RIGHT edge.
+    const RPX = 2028, RPY = 1024;
+    setGrainSeed(0.6);
+    const baseR = await leakRender(null, RPX, RPY);
+    const autoR = await leakRender({ kind: 'lightleak', amount: 100, hue: 0, fade: 0, pattern: -1 } as never, RPX, RPY);
+    let maxAutoDelta = 0;
+    for (let c = 0; c < 3; c++) maxAutoDelta = Math.max(maxAutoDelta, Math.abs(autoR[c] - (baseR[c] + expectedLeak(RPX, RPY, 0, 0, c, 1, 1))));
+    setGrainSeed(0.01); // restore for later sections
+    // The two sets at the SAME probe must render differently (R saturates to
+    // 2.000 in both warm textures, but G/B differ) -- else the picker is a
+    // no-op. Compare the max channel diff of the rendered results.
+    const renderDiff = Math.max(...[0, 1, 2].map((c) => Math.abs(setB[c] - hueGot[0][c])));
+    const famOk = maxSetBDelta < 0.04 && maxAutoDelta < 0.04 && texDiff > 0.05 && renderDiff > 0.05;
+    log(`PATTERN PROOF Set B @(${LEAKP},${LEAKY}) R=${setB[0].toFixed(3)} G=${setB[1].toFixed(3)} B=${setB[2].toFixed(3)} vs Set A R=${hueGot[0][0].toFixed(3)} G=${hueGot[0][1].toFixed(3)} B=${hueGot[0][2].toFixed(3)} (texDiff=${texDiff.toFixed(3)}, renderDiff=${renderDiff.toFixed(3)}, max |setB-expect|=${maxSetBDelta.toFixed(4)})`);
+    log(`PATTERN PROOF auto seed 0.6 @(${RPX},${RPY}) R=${autoR[0].toFixed(3)} vs base ${baseR[0].toFixed(3)} (max |auto-expect|=${maxAutoDelta.toFixed(4)})`);
+    log(`PATTERN FILTER: ${famOk ? 'PASS' : 'FAIL'} -- fixed Set B pixel-exact, auto follows the seed's set bit (setB:${maxSetBDelta < 0.04}, auto:${maxAutoDelta < 0.04}, texDiff:${texDiff > 0.05}, differs:${renderDiff > 0.05})`);
 
     // 12) EXPORT DOWNSCALE PROOF (case #5 -- "export presets wreck resolution").
     // Research: IG/FB preset VALUES are correct (1080/2048 = display caps, JPEG

@@ -6,11 +6,12 @@
 // Analog film light leak: light that reached the film during load/rewind,
 // ADDING a band of color along one frame edge -- strongest at the edge, fading
 // inward. Light leaks are extra exposure, so the effect adds to LINEAR RGB
-// (not the luma-ratio of grain). Per-photo seed picks the edge; `hue` blends
-// the three vendored leak textures' weights (warm/mid/cool); `fade` scales a
-// distance envelope on top of the textures' own falloff.
+// (not the luma-ratio of grain). Per-photo seed picks the edge AND the pattern
+// set in Auto; `pattern` picks a set directly; `hue` blends the set's three
+// vendored leak textures' weights (warm/mid/cool); `fade` scales a distance
+// envelope on top of the textures' own falloff.
 //
-// ponytail: the shader samples three vendored textures (public/leaks/*.png)
+// ponytail: the shader samples six vendored textures (public/leaks/*.png)
 // which the CPU can't -- this mirror models their density with a fixed
 // envelope + representative colors, enough to unit-test the op's directions.
 // The pixels themselves are the render+scan harness's proof.
@@ -21,9 +22,10 @@ export interface LightleakParams {
   amount: number; // 0..100, 0 off
   hue: number; // 0..100, 0 warm (orange) .. 100 cool (cyan)
   fade: number; // 0..100, 0 = texture falloff, 100 = hard stop by LEAK_WIDTH
+  pattern: number; // -1 auto (seed picks the set), 0 Set A, 1 Set B
 }
 
-export const LIGHTLEAK_DEFAULTS: LightleakParams = { amount: 0, hue: 0, fade: 0 };
+export const LIGHTLEAK_DEFAULTS: LightleakParams = { amount: 0, hue: 0, fade: 0, pattern: -1 };
 
 // Only `amount` matters -- at 0 the leak adds exactly zero light, so a pass is
 // only worth emitting when it's non-zero (same rule as presence/grain).
@@ -31,9 +33,12 @@ export function isNeutralLightleak(p: LightleakParams): boolean {
   return p.amount === 0;
 }
 
-// Layout must match the `Lightleak` struct in lightleak.wgsl (4 f32s + 4 pad).
+// Layout must match the `Lightleak` struct in lightleak.wgsl (8 f32s):
+// amount, hue, fade, seed, patternMode (0 auto / 1 fixed), patternSel (0/1).
 export function packLightleak(p: LightleakParams, seed: number): Float32Array {
-  return new Float32Array([p.amount, p.hue, p.fade, seed, 0, 0, 0, 0]);
+  const mode = p.pattern === -1 ? 0 : 1;
+  const sel = p.pattern === 1 ? 1 : 0;
+  return new Float32Array([p.amount, p.hue, p.fade, seed, mode, sel, 0, 0]);
 }
 
 // How far the `fade` envelope reaches into the frame (fraction, from the leak

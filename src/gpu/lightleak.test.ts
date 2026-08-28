@@ -11,8 +11,8 @@ import {
 } from './lightleak';
 import { seedU32 } from './grain';
 
-const ON = { amount: 80, hue: 0, fade: 0 } satisfies LightleakParams;
-const OFF = { amount: 0, hue: 0, fade: 0 } satisfies LightleakParams;
+const ON = { amount: 80, hue: 0, fade: 0, pattern: -1 } satisfies LightleakParams;
+const OFF = { amount: 0, hue: 0, fade: 0, pattern: -1 } satisfies LightleakParams;
 
 describe('lightleak', () => {
   it('is neutral at amount 0: adds exactly zero light', () => {
@@ -43,8 +43,8 @@ describe('lightleak', () => {
   });
 
   it('is monotonic in amount (more leak = more added light)', () => {
-    const weak = leakAdd(0.2, 0.5, { amount: 40, hue: 0, fade: 0 }, seedU32(0.5)).reduce((s, v) => s + v, 0);
-    const strong = leakAdd(0.2, 0.5, { amount: 100, hue: 0, fade: 0 }, seedU32(0.5)).reduce((s, v) => s + v, 0);
+    const weak = leakAdd(0.2, 0.5, { amount: 40, hue: 0, fade: 0, pattern: -1 }, seedU32(0.5)).reduce((s, v) => s + v, 0);
+    const strong = leakAdd(0.2, 0.5, { amount: 100, hue: 0, fade: 0, pattern: -1 }, seedU32(0.5)).reduce((s, v) => s + v, 0);
     expect(strong).toBeGreaterThan(weak);
     expect(weak).toBeGreaterThan(0);
   });
@@ -88,8 +88,8 @@ describe('lightleak', () => {
   it('fade reduces the added light at mid distance without touching the edge', () => {
     const edge = seedU32(0.5) % 4;
     const mid: [number, number] = edge === 0 ? [0.5, 0.2] : edge === 1 ? [0.8, 0.5] : edge === 2 ? [0.5, 0.8] : [0.2, 0.5];
-    const soft = leakAdd(...mid, { amount: 80, hue: 0, fade: 100 }, seedU32(0.5)).reduce((s, v) => s + v, 0);
-    const full = leakAdd(...mid, { amount: 80, hue: 0, fade: 0 }, seedU32(0.5)).reduce((s, v) => s + v, 0);
+    const soft = leakAdd(...mid, { amount: 80, hue: 0, fade: 100, pattern: -1 }, seedU32(0.5)).reduce((s, v) => s + v, 0);
+    const full = leakAdd(...mid, { amount: 80, hue: 0, fade: 0, pattern: -1 }, seedU32(0.5)).reduce((s, v) => s + v, 0);
     expect(full).toBeGreaterThan(soft);
     expect(full).toBeGreaterThan(0);
   });
@@ -103,8 +103,14 @@ describe('lightleak', () => {
     expect(edgeDistance(3, 0.0, 0.5)).toBe(0); // left
   });
 
-  it('packs 8 f32s (4 values + 4 pad) matching the Lightleak struct', () => {
-    const packed = packLightleak({ amount: 60, hue: 40, fade: 30 }, 0.25);
-    expect(Array.from(packed)).toEqual([60, 40, 30, 0.25, 0, 0, 0, 0]);
+  it('packs 8 f32s matching the Lightleak struct; pattern maps to mode+sel', () => {
+    // auto (-1) -> patternMode 0 (seed picks the set) -- same layout as before.
+    const auto = packLightleak({ amount: 60, hue: 40, fade: 30, pattern: -1 }, 0.25);
+    expect(Array.from(auto)).toEqual([60, 40, 30, 0.25, 0, 0, 0, 0]);
+    // fixed set -> patternMode 1, patternSel 0 (Set A) or 1 (Set B).
+    const setA = packLightleak({ amount: 60, hue: 40, fade: 30, pattern: 0 }, 0.25);
+    expect(Array.from(setA)).toEqual([60, 40, 30, 0.25, 1, 0, 0, 0]);
+    const setB = packLightleak({ amount: 60, hue: 40, fade: 30, pattern: 1 }, 0.25);
+    expect(Array.from(setB)).toEqual([60, 40, 30, 0.25, 1, 1, 0, 0]);
   });
 });

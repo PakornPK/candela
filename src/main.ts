@@ -101,6 +101,7 @@ const grainRoughnessValue = document.querySelector<HTMLOutputElement>('#grain-ro
 const lightleakAmountSlider = document.querySelector<HTMLInputElement>('#lightleak-amount')!;
 const lightleakHueSlider = document.querySelector<HTMLInputElement>('#lightleak-hue')!;
 const lightleakFadeSlider = document.querySelector<HTMLInputElement>('#lightleak-fade')!;
+const lightleakPatternSelect = document.querySelector<HTMLSelectElement>('#lightleak-pattern')!;
 const lightleakAmountValue = document.querySelector<HTMLOutputElement>('#lightleak-amount-value')!;
 const lightleakHueValue = document.querySelector<HTMLOutputElement>('#lightleak-hue-value')!;
 const lightleakFadeValue = document.querySelector<HTMLOutputElement>('#lightleak-fade-value')!;
@@ -546,6 +547,7 @@ function readLightleakParams(): LightleakParams {
     amount: Number(lightleakAmountSlider.value),
     hue: Number(lightleakHueSlider.value),
     fade: Number(lightleakFadeSlider.value),
+    pattern: Number(lightleakPatternSelect.value), // -1 auto, 0 Set A, 1 Set B
   };
 }
 
@@ -912,6 +914,7 @@ function applyOpsToSliders(ops: Op[], cameraKey?: string): void {
   lightleakAmountSlider.value = String(lightleakOp?.amount ?? 0);
   lightleakHueSlider.value = String(lightleakOp?.hue ?? 0);
   lightleakFadeSlider.value = String(lightleakOp?.fade ?? 0);
+  lightleakPatternSelect.value = String(lightleakOp?.pattern ?? -1);
   cropAspectSelect.value = cropOp?.aspect ?? 'original';
   cropRotate90 = cropOp?.rotate90 ?? 0;
   straightenSlider.value = String(cropOp?.angle ?? 0);
@@ -1050,7 +1053,8 @@ function opsToLabel(ops: Op[]): string {
         return `Grain ${formatSigned(op.amount)}`;
       }
       if (isLightleakOp(op)) {
-        return `Light leak ${formatSigned(op.amount)}${op.hue !== 0 ? ` · Color ${op.hue}` : ''}`;
+        const pat = op.pattern === 0 ? ' · Set A' : op.pattern === 1 ? ' · Set B' : '';
+        return `Light leak ${formatSigned(op.amount)}${op.hue !== 0 ? ` · Color ${op.hue}` : ''}${pat}`;
       }
       if (isFrameOp(op)) {
         return `Frame ${op.style === '135' ? '135' : op.style === '120' ? '120' : 'Print'}`;
@@ -1632,6 +1636,7 @@ async function init(): Promise<void> {
     adjustEnabled = enabled;
     for (const cfg of ALL_SLIDERS) cfg.slider.disabled = !enabled;
     profileSelect.disabled = !enabled;
+    lightleakPatternSelect.disabled = !enabled;
     bwTreatmentSelect.disabled = !enabled;
     frameStyleSelect.disabled = !enabled;
     cropAspectSelect.disabled = !enabled;
@@ -1942,6 +1947,13 @@ async function init(): Promise<void> {
 
   // Film frame is a discrete mode switch like B&W treatment.
   frameStyleSelect.addEventListener('change', () => {
+    onSliderInput();
+    commitCurrentEdit();
+  });
+
+  // Light-leak pattern is a discrete set switch (Auto / Set A / Set B) -- one
+  // render + one history commit per change, like the frame style select.
+  lightleakPatternSelect.addEventListener('change', () => {
     onSliderInput();
     commitCurrentEdit();
   });

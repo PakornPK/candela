@@ -392,15 +392,12 @@ export class Pipeline {
           { binding: 4, resource: this.filmStripSampler },
         );
       }
-      // Light leak carries four: the three vendored leak textures + one shared
-      // linear sampler (lightleak.wgsl binding 3/4/5/6).
+      // Light leak carries seven: the six vendored leak textures (2 pattern
+      // sets x 3 hue anchors) + one shared linear sampler
+      // (lightleak.wgsl binding 3..9).
       if (renderer.kind === 'lightleak') {
-        entries.push(
-          { binding: 3, resource: this.leakTextures[0].createView() },
-          { binding: 4, resource: this.leakTextures[1].createView() },
-          { binding: 5, resource: this.leakTextures[2].createView() },
-          { binding: 6, resource: this.leakSampler },
-        );
+        for (let b = 0; b < 6; b++) entries.push({ binding: 3 + b, resource: this.leakTextures[b].createView() });
+        entries.push({ binding: 9, resource: this.leakSampler });
       }
       const bindGroup = this.device.createBindGroup({
         layout: this.opPipelines[index].getBindGroupLayout(0),
@@ -815,7 +812,9 @@ async function loadFilmStrip(device: GPUDevice): Promise<GPUTexture> {
 // buckets). A missing leak texture falls back to a 1x1 black texel, which
 // samples as 0 -- the leak just adds nothing for that asset.
 async function loadLightLeaks(device: GPUDevice): Promise<GPUTexture[]> {
-  return Promise.all(['leak-0', 'leak-1', 'leak-2'].map((n) => loadPngTexture(device, `/leaks/${n}.png`, 'rgba8unorm', 'light leak')));
+  // Six textures = 2 pattern sets x 3 hue anchors (Set A leak-0..2, Set B
+  // leak-3..5). See scripts/vend-light-leaks.mjs.
+  return Promise.all([0, 1, 2, 3, 4, 5].map((i) => loadPngTexture(device, `/leaks/leak-${i}.png`, 'rgba8unorm', 'light leak')));
 }
 
 // Decode a committed PNG through a 2D canvas and upload via writeTexture --

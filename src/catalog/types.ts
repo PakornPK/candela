@@ -85,7 +85,7 @@ export type Op =
   | { kind: 'presence'; texture: number; clarity: number; dehaze: number; vibrance: number; saturation: number }
   | { kind: 'vignette'; amount: number; midpoint: number; roundness: number; feather: number; highlights: number }
   | { kind: 'grain'; amount: number; size: number; roughness: number }
-  | { kind: 'lightleak'; amount: number; hue: number; fade: number }
+  | { kind: 'lightleak'; amount: number; hue: number; fade: number; pattern: number } // pattern -1 auto, 0 Set A, 1 Set B
   | { kind: 'crop'; aspect: AspectPreset; rotate90: number; angle: number; x?: number; y?: number; w?: number; h?: number }
   | { kind: 'frame'; style: FrameStyle }
   | { kind: 'bw'; mix: BwMix; tone: BwToneId }
@@ -142,7 +142,7 @@ export function isGrainOp(op: Op): op is { kind: 'grain'; amount: number; size: 
   return op.kind === 'grain';
 }
 
-export function isLightleakOp(op: Op): op is { kind: 'lightleak'; amount: number; hue: number; fade: number } {
+export function isLightleakOp(op: Op): op is { kind: 'lightleak'; amount: number; hue: number; fade: number; pattern: number } {
   return op.kind === 'lightleak';
 }
 

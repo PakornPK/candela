@@ -106,9 +106,11 @@ export function isValidOp(op: unknown): op is Op {
     return [g.amount, g.size, g.roughness].every((v) => typeof v === 'number');
   }
   if (candidate.kind === 'lightleak') {
-    // fade is optional (lenient): old rows without it default to 0.
-    const l = op as { amount?: unknown; hue?: unknown; fade?: unknown };
-    return [l.amount, l.hue].every((v) => typeof v === 'number') && (l.fade === undefined || typeof l.fade === 'number');
+    // fade/pattern are optional (lenient): old rows without them default to 0 / auto (-1).
+    const l = op as { amount?: unknown; hue?: unknown; fade?: unknown; pattern?: unknown };
+    return [l.amount, l.hue].every((v) => typeof v === 'number') &&
+      (l.fade === undefined || typeof l.fade === 'number') &&
+      (l.pattern === undefined || (typeof l.pattern === 'number' && l.pattern >= -1 && l.pattern <= 1));
   }
   if (candidate.kind === 'frame') {
     const s = (op as { style?: unknown }).style;

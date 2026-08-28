@@ -29,7 +29,7 @@ describe('presentOpIndices', () => {
     expect(presentOpIndices([{ kind: 'vignette', amount: -50, midpoint: 50, roundness: 0, feather: 50, highlights: 0 }])).toEqual([0, 1, 3, 10]);
     expect(presentOpIndices([{ kind: 'bw', mix: [0, 0, 0, 0, 0, 0, 0, 0], tone: 'acros' }])).toEqual([0, 1, 3, 4]);
     expect(presentOpIndices([{ kind: 'grain', amount: 40, size: 25, roughness: 50 }])).toEqual([0, 1, 3, 12]);
-    expect(presentOpIndices([{ kind: 'lightleak', amount: 60, hue: 20, fade: 0 }])).toEqual([0, 1, 3, 8]);
+    expect(presentOpIndices([{ kind: 'lightleak', amount: 60, hue: 20, fade: 0, pattern: -1 }])).toEqual([0, 1, 3, 8]);
     expect(presentOpIndices([{ kind: 'crop', aspect: '1:1', rotate90: 0, angle: 0 }])).toEqual([0, 1, 3, 9]);
     expect(presentOpIndices([
       { kind: 'dodgeBurn', amount: 40, size: 20, opacity: 50, feather: 0, mask: new Int8Array(4), maskW: 2, maskH: 2 },
@@ -237,7 +237,7 @@ describe('OP_RENDERERS packParams', () => {
     const absent = lightleak.packParams([]);
     expect(Array.from(absent)).toEqual([0, 0, 0, 0.5, 0, 0, 0, 0]);
     setGrainSeed(0.75);
-    const warm = lightleak.packParams([{ kind: 'lightleak', amount: 70, hue: 0, fade: 30 }]);
+    const warm = lightleak.packParams([{ kind: 'lightleak', amount: 70, hue: 0, fade: 30, pattern: -1 }]);
     expect(Array.from(warm)).toEqual([70, 0, 30, 0.75, 0, 0, 0, 0]);
   });
 

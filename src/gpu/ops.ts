@@ -234,10 +234,10 @@ export const OP_RENDERERS: OpRenderer[] = [
     // with grain (same film-roll character). Absent op packs the neutral
     // defaults (amount 0) so a no-op pass renders as identity.
     shader: lightleakShader,
-    uniformSize: 32, // struct Lightleak { 3 f32 + 5 pad }
+    uniformSize: 32, // struct Lightleak { 6 f32 + 2 pad }
     packParams: (ops) => {
       const op = ops.find(isLightleakOp);
-      const p: LightleakParams = op ?? { amount: 0, hue: 0, fade: 0 };
+      const p: LightleakParams = op ?? { amount: 0, hue: 0, fade: 0, pattern: -1 };
       return packLightleak(p, getGrainSeed());
     },
   },

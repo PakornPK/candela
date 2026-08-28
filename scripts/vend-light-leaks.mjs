@@ -1,7 +1,8 @@
 // Vendors the downloaded Resource Boy light-leak PHOTOS (light_leak/NNN.jpg)
-// into the three committed additive leak textures the shader samples
-// (public/leaks/leak-{0,1,2}.png). Replaces the old procedural stand-ins:
-// real scans now drive the leak.
+// into the six committed additive leak textures the shader samples
+// (public/leaks/leak-{0..5}.png): two PATTERN SETS of three hue anchors
+// (Set A = leak-0..2, Set B = leak-3..5). Replaces the old procedural
+// stand-ins: real scans now drive the leak.
 //
 // Source: Resource Boy Light Leak Overlays (https://resourceboy.com) —
 // royalty-free for personal + commercial use, no attribution required.
@@ -26,14 +27,27 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-// Selected leaks, one per hue anchor (0 warm, 1 mid, 2 cool). `edge` is the
-// photo's dominant bright edge; the script rotates it to the top. Measured by
-// the edge-luma analysis (all 250; only ~61 have dark backgrounds usable for
-// additive leaks; these three span the pack's warm->cool cast).
-const TEXS = [
-  { src: '119', edge: 'r', note: 'warm red->pink->white right band' },
-  { src: '174', edge: 'r', note: 'bright warm yellow right band' },
-  { src: '139', edge: 't', note: 'cool cyan->white->blue top band' },
+// Two PATTERN SETS, each with one leak per hue anchor (0 warm, 1 mid, 2 cool).
+// The UI picker selects a set (or Auto, where the per-photo seed flips the
+// set), and `hue` blends the set's three textures. `edge` is the photo's
+// dominant bright edge; the script rotates it to the top. Measured by the
+// edge-luma analysis (all 250; only ~61 have dark backgrounds usable for
+// additive leaks).
+//   Set A (leak-0..2) = the original three: subtle pale bands (119 warm
+//   red->pink->white, 174 bright warm yellow, 139 cool cyan->white->blue).
+//   Set B (leak-3..5) = picked from the same dark-bg pool for RICHER casts:
+//   150 saturated warm orange, 122 muted cream, 196 cool blue-white glow.
+const SETS = [
+  { note: 'Set A: subtle pale bands', texs: [
+    { src: '119', edge: 'r', note: 'warm red->pink->white right band' },
+    { src: '174', edge: 'r', note: 'bright warm yellow right band' },
+    { src: '139', edge: 't', note: 'cool cyan->white->blue top band' },
+  ] },
+  { note: 'Set B: richer casts', texs: [
+    { src: '150', edge: 'r', note: 'saturated warm orange right band' },
+    { src: '122', edge: 'r', note: 'muted warm cream right band' },
+    { src: '196', edge: 'r', note: 'cool blue-white glow (center-right)' },
+  ] },
 ];
 // Clockwise degrees to bring each photo edge to the texture top.
 const ROT = { t: 0, r: 270, b: 180, l: 90 };
@@ -88,8 +102,9 @@ const SIZE = 1024;
 
 const tmp = mkdtempSync(join(tmpdir(), 'vendleak-'));
 try {
-  for (let i = 0; i < TEXS.length; i++) {
-    const { src, edge, note } = TEXS[i];
+  let i = 0;
+  for (const set of SETS) for (const { src, edge, note } of set.texs) {
+    const outI = i++; // leak-0..2 = Set A, leak-3..5 = Set B
     const srcPng = join(SRC, `${src}.jpg`);
     // sips: rotate (edge -> top) then resize to exactly SIZE^2, as PNG.
     const rot = join(tmp, `r${src}.png`);
@@ -118,10 +133,10 @@ try {
       if (y > SIZE - 9) bottomMean += rowSum / SIZE;
     }
     topMean /= 8; bottomMean /= 8;
-    const outPng = join(OUT, `leak-${i}.png`);
+    const outPng = join(OUT, `leak-${outI}.png`);
     mkdirSync(OUT, { recursive: true });
     writeFileSync(outPng, encodePng(SIZE, SIZE, rgba));
-    console.log(`leak-${i}.png <- ${src}.jpg (${edge}->top) ${note}: top-8 rows mean=${topMean.toFixed(1)}, bottom-8=${bottomMean.toFixed(1)}, max=${maxL}`);
+    console.log(`leak-${outI}.png <- ${src}.jpg (${edge}->top) ${note}: top-8 rows mean=${topMean.toFixed(1)}, bottom-8=${bottomMean.toFixed(1)}, max=${maxL}`);
   }
 } finally {
   rmSync(tmp, { recursive: true, force: true });
