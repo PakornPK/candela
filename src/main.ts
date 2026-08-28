@@ -565,6 +565,13 @@ function readLightleakParams(): LightleakParams {
   };
 }
 
+// A 90° turn re-frames the crop: re-center a freeform rect so the rotated mask
+// stays centered in the view (the "crop แล้วหมุน รูปไม่อยู่ตรงกลาง" report).
+// Preset crops are already centered; only a dragged (freeform) rect can be off.
+function recenterCropRect(): void {
+  if (cropFreeform) cropFreeform = { ...cropFreeform, x: 0.5, y: 0.5 };
+}
+
 function readCropParams(): CropParams {
   const p: CropParams = {
     aspect: cropAspectSelect.value as AspectPreset,
@@ -2038,6 +2045,7 @@ async function init(): Promise<void> {
   rotateCcwBtn.addEventListener('click', () => {
     if (currentFileId === null) return;
     cropRotate90 = (cropRotate90 + 3) % 4;
+    recenterCropRect();
     setCropMode(true);
     onSliderInput();
     commitCurrentEdit();
@@ -2045,6 +2053,7 @@ async function init(): Promise<void> {
   rotateCwBtn.addEventListener('click', () => {
     if (currentFileId === null) return;
     cropRotate90 = (cropRotate90 + 1) % 4;
+    recenterCropRect();
     setCropMode(true);
     onSliderInput();
     commitCurrentEdit();
@@ -2070,7 +2079,11 @@ async function init(): Promise<void> {
     if (!mode) return;
     e.preventDefault();
     cropOverlay.setPointerCapture(e.pointerId);
-    const cur = cropFreeform ?? { x: r.x / canvas.width, y: r.y / canvas.height, w: r.w / canvas.width, h: r.h / canvas.height };
+    // cropFreeform stores CENTER + size; a first drag starts from the frame
+    // bbox (left/top/size), so convert its center. Feeding the left edge as the
+    // center made the first resize-from-default-frame drag land in the wrong
+    // place (dragCropRect clamps cx = x + dx/2 off the frame's left corner).
+    const cur = cropFreeform ?? { x: (r.x + r.w / 2) / canvas.width, y: (r.y + r.h / 2) / canvas.height, w: r.w / canvas.width, h: r.h / canvas.height };
     cropDrag = { mode, startX: pt[0], startY: pt[1], orig: cur };
   });
   cropOverlay.addEventListener('pointermove', (e) => {

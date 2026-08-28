@@ -109,13 +109,16 @@ describe('crop', () => {
     const r = cropOverlayRect(crop({ rotate90: 1 }), 300, 200);
     expect(r.w).toBeCloseTo(133.33, 2); expect(r.h).toBe(200);
     expect(r.x).toBeCloseTo(83.33, 2); expect(r.angle).toBe(0);
-    // A 90° turn + straighten: the frame carries the straighten tilt only --
-    // it must not also rotate by the quarter-turn ("straighten mark หมุนตาม").
+    // The frame is ALWAYS axis-aligned (LrC-correct): the 90° turn + straighten
+    // rotate the IMAGE in the shader, never the frame. This is what keeps the
+    // drawn handles on the axis-aligned hit-test -- a tilted frame put them
+    // ~521px off at real-photo scale (the "Straighten แล้วเลื่อน ขนาด crop
+    // ไม่ได้" report) and carried the 90° turn ("straighten mark หมุนตาม").
     const rt = cropOverlayRect(crop({ rotate90: 1, angle: 3 }), 300, 200);
-    expect(rt.angle).toBeCloseTo((3 * Math.PI) / 180, 6);
-    // Straighten tilts the overlay rect by the straighten angle.
+    expect(rt.angle).toBe(0);
+    expect(rt.w).toBeCloseTo(138.96, 2); // 90°+3° rotated mask bbox (straighten grows it)
     const s = cropOverlayRect(crop({ angle: 3 }), W, H);
-    expect(s.angle).toBeCloseTo((3 * Math.PI) / 180, 6);
+    expect(s.angle).toBe(0);
     expect(s.x).toBeCloseTo((W - s.w) / 2, 6);
   });
 
@@ -199,5 +202,29 @@ describe('crop', () => {
     // Shrinking below the 2% minimum width clamps to it.
     const s = dragCropRect('s', orig, 0, -100000, W, H, 'original', 0);
     expect(s.h * H).toBeCloseTo(Math.round(W * 0.02), 6);
+  });
+
+  it('w/n edge handles follow the pointer (opposite edge fixed)', () => {
+    const orig = { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }; // 3000x2000 centered on 6000x4000
+    // 'w' (left edge) dragged RIGHT +600: width shrinks, RIGHT edge stays put.
+    const w = dragCropRect('w', orig, 600, 0, W, H, 'original', 0);
+    expect(w.w * W).toBeCloseTo(2400, 3); // 3000 - 600
+    expect(w.x * W + (w.w * W) / 2).toBeCloseTo(4500, 3); // right edge fixed (3000+1500)
+    expect(w.x * W - (w.w * W) / 2).toBeCloseTo(2100, 3); // left edge followed the pointer
+    // 'n' (top edge) dragged DOWN +400: height shrinks, BOTTOM edge stays put.
+    const n = dragCropRect('n', orig, 0, 400, W, H, 'original', 0);
+    expect(n.h * H).toBeCloseTo(1600, 3); // 2000 - 400
+    expect(n.y * H + (n.h * H) / 2).toBeCloseTo(3000, 3); // bottom fixed (2000+1000)
+    expect(n.y * H - (n.h * H) / 2).toBeCloseTo(1400, 3); // top followed the pointer
+  });
+
+  it('nw corner drag keeps the opposite (se) corner fixed', () => {
+    const orig = { x: 0.5, y: 0.5, w: 0.5, h: 0.5 };
+    // Grab NW, drag OUT (up-left: -400,-300): width+height grow, SE stays.
+    const nw = dragCropRect('nw', orig, -400, -300, W, H, 'original', 0);
+    expect(nw.w * W).toBeCloseTo(3400, 3); // 3000 + 400
+    expect(nw.h * H).toBeCloseTo(2300, 3); // 2000 + 300
+    expect(nw.x * W + (nw.w * W) / 2).toBeCloseTo(4500, 3); // SE x fixed
+    expect(nw.y * H + (nw.h * H) / 2).toBeCloseTo(3000, 3); // SE y fixed
   });
 });

@@ -129,7 +129,11 @@ export function dragCropRect(
     return { x: ncx / W, y: ncy / H, w: orig.w, h: orig.h };
   }
   // Resize: the opposite corner stays fixed; the dragged corner follows the
-  // pointer (LrC's aspect-locked corner drag).
+  // pointer (LrC's aspect-locked corner drag). `dx`/`dy` are the signed width/
+  // height deltas (the LEFT/TOP edges move against the pointer), so nw/nh use
+  // them; the CENTER must follow the pointer on BOTH axes (ncx = cx + dxPx/2),
+  // or a left/top-edge drag moves the wrong edge ("ลากขอบซ้าย/บนแล้วข้างตรงข้าม
+  // เลื่อน").
   const dx = mode.includes('e') ? dxPx : mode.includes('w') ? -dxPx : 0;
   const dy = mode.includes('s') ? dyPx : mode.includes('n') ? -dyPx : 0;
   let nw = cw + dx, nh = ch + dy;
@@ -147,9 +151,11 @@ export function dragCropRect(
   nw = Math.max(nw, MIN);
   nh = Math.max(nh, MIN);
   if (a) { if (nw / nh > a) nh = nw / a; else nw = nh * a; }
-  // Keep the rect inside the source.
-  const ncx = Math.min(Math.max(cx + dx / 2, nw / 2), W - nw / 2);
-  const ncy = Math.min(Math.max(cy + dy / 2, nh / 2), H - nh / 2);
+  // Keep the rect inside the source. The center follows the raw pointer delta
+  // (dxPx/dyPx), NOT the signed edge delta (dx/dy) -- for 'w'/'n' those have
+  // opposite signs, so the +dx/2 form pinned the wrong edge.
+  const ncx = Math.min(Math.max(cx + dxPx / 2, nw / 2), W - nw / 2);
+  const ncy = Math.min(Math.max(cy + dyPx / 2, nh / 2), H - nh / 2);
   return { x: ncx / W, y: ncy / H, w: nw / W, h: nh / H };
 }
 
@@ -211,18 +217,19 @@ export interface CropOverlayRect {
   y: number;
   w: number;
   h: number;
-  angle: number; // radians; straighten tilt only (NOT the 90° turns)
+  angle: number; // radians; ALWAYS 0 -- the selection frame is axis-aligned
 }
 
 export function cropOverlayRect(c: CropParams, W: number, H: number): CropOverlayRect {
   const g = cropGeometry(c, W, H);
-  // The frame is the mask bbox tilted by the STRAIGHTEN angle only. The 90°
-  // quarter-turns re-orient the mask axis-aligned (a landscape crop rotated
-  // 90° fills a PORTRAIT mask), so drawing the bbox at the TOTAL angle turns
-  // it landscape and it no longer hugs the rotated image -- the "crop แล้วหมุน
-  // / straighten mark หมุนตาม" reports. cropGeometry keeps the total angle for
-  // the shader + export; only the DOM selection uses the straighten tilt.
-  return { x: g.cx - g.halfW, y: g.cy - g.halfH, w: g.maskW, h: g.maskH, angle: (c.angle * Math.PI) / 180 };
+  // The DOM selection frame is ALWAYS axis-aligned -- LrC's crop frame never
+  // rotates. The straighten/90° rotation lives in the crop SHADER, which tilts
+  // the IMAGE under the fixed frame, so the axis-aligned mask bbox is exactly
+  // the region the rotated image fills and the frame hugs it. Drawing the
+  // frame tilted instead (straighten-only) made the drawn handles sit far from
+  // the axis-aligned hit-test at real-photo scale (3000px·sin10° ≈ 521px vs a
+  // ~171px grab radius) -- the "Straighten แล้วเลื่อน ขนาด crop ไม่ได้" report.
+  return { x: g.cx - g.halfW, y: g.cy - g.halfH, w: g.maskW, h: g.maskH, angle: 0 };
 }
 
 // The crop mask bbox as a normalized [x, y, w, h] rect (left/top/size, 0..1) —
