@@ -7,20 +7,20 @@
 //
 // The leak shape is VENDORED TEXTURE-DRIVEN (case #8 -- the old procedural
 // smoothstep+hash-band gradient looked "fake"). Three committed rgba8unorm
-// leak textures (public/leaks/leak-{0,1,2}.png, generated once by
-// scripts/gen-light-leaks.mjs) are authored entering from the TOP; the frame
-// is rotated so the texture's top aligns with the per-photo edge. The bytes
-// ARE linear additive values (no -srgb), so `texture * gain` adds straight to
-// linear RGB. `hue` blends the three textures' weights (0 warm tex0, 50 mid
-// tex1, 100 cool tex2); `fade` scales a distance envelope on top of the
-// textures' own falloff (0 = texture shape, 100 = hard stop by LEAK_WIDTH).
+// leak textures (public/leaks/leak-{0,1,2}.png, vendored from real Resource
+// Boy scans by scripts/vend-light-leaks.mjs) are authored entering from the
+// TOP; the frame is rotated so the texture's top aligns with the per-photo
+// edge. The bytes are the scans' own sRGB display values (no -srgb), kept
+// as-is so `texture * gain` adds a screen-blend amount to linear RGB.
+// `hue` blends the three textures' weights (0 warm tex0, 50 mid tex1, 100
+// cool tex2); `fade` scales a distance envelope on top of the textures' own
+// falloff (0 = texture shape, 100 = hard stop by LEAK_WIDTH).
 //
 // Model mirrored by lightleak.ts -- this shader and the CPU `leakAdd` must
 // stay in sync (the CPU mirror uses representative colors + an envelope for
 // the texture density; the pixels themselves are the harness's proof).
 //
-// ponytail: generated stand-ins for CC0 scans (none found clean enough); swap
-// the PNGs for scans later without touching the shader. No bloom/blur pass.
+// ponytail: no bloom/blur pass; the leak is one additive band per frame edge.
 
 struct Lightleak {
   amount: f32,      // 0..100

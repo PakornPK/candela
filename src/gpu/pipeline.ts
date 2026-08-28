@@ -808,9 +808,11 @@ async function loadFilmStrip(device: GPUDevice): Promise<GPUTexture> {
   return loadPngTexture(device, '/frames/135-strip.png', 'rgba8unorm-srgb', 'film strip');
 }
 
-// The three vendored light-leak textures. rgba8unorm (NOT -srgb): the bytes
-// are linear additive values, so the shader adds `texture * gain` straight to
-// linear RGB. A missing leak texture falls back to a 1x1 black texel, which
+// The three vendored light-leak textures (real Resource Boy scans, scripts/
+// vend-light-leaks.mjs). rgba8unorm (NOT -srgb): the bytes are the scan's own
+// sRGB display values, kept as-is so `texture * gain` adds a screen-blend
+// amount to linear RGB (linearizing them crushed the gradient to a few value
+// buckets). A missing leak texture falls back to a 1x1 black texel, which
 // samples as 0 -- the leak just adds nothing for that asset.
 async function loadLightLeaks(device: GPUDevice): Promise<GPUTexture[]> {
   return Promise.all(['leak-0', 'leak-1', 'leak-2'].map((n) => loadPngTexture(device, `/leaks/${n}.png`, 'rgba8unorm', 'light leak')));
