@@ -209,6 +209,8 @@ const dodgeOpacitySlider = document.querySelector<HTMLInputElement>('#dodge-opac
 const dodgeAmountValue = document.querySelector<HTMLOutputElement>('#dodge-amount-value')!;
 const dodgeSizeValue = document.querySelector<HTMLOutputElement>('#dodge-size-value')!;
 const dodgeOpacityValue = document.querySelector<HTMLOutputElement>('#dodge-opacity-value')!;
+const dodgeOverlayBtn = document.querySelector<HTMLButtonElement>('#dodge-overlay')!;
+const dodgeOverlayColor = document.querySelector<HTMLInputElement>('#dodge-overlay-color')!;
 const maskOverlay = document.querySelector<HTMLCanvasElement>('#mask-overlay')!;
 const maskOverlayCtx = maskOverlay.getContext('2d')!;
 
@@ -563,6 +565,9 @@ let dodgeMaskDirty = false; // set whenever paintMask changes; drained by render
 let brushActive = false;
 let brushPainting = false;
 let lastBrushPt: [number, number] | null = null;
+// LrC-style mask overlay: visible while brushing OR when the Mask toggle is
+// on (the user reviews an existing mask without holding the brush button).
+let dodgeOverlayOn = false;
 
 // The WebGPU pipeline. Module scope (not init-local) so the dodge brush helpers
 // (syncDodgeMaskToGPU) can reach it; init runs once.
@@ -587,15 +592,23 @@ function resizePaintMask(w: number, h: number): void {
   drawDodgeOverlay();
 }
 
-// Draws the brush red-mask overlay from the CPU-authoritative paintMask (the
-// GPU texture is its mirror; drawing from the mask keeps overlay and render
-// in sync with no readback). Shown only while the brush is active.
+// Draws the brush mask overlay from the CPU-authoritative paintMask (the GPU
+// texture is its mirror; drawing from the mask keeps overlay and render in
+// sync with no readback). Visible while brushing OR while the Mask toggle is
+// on; the color is the user's swatch (LrC-style).
 function drawDodgeOverlay(): void {
-  if (!brushActive || !paintMask) {
+  const visible = (brushActive || dodgeOverlayOn) && paintMask;
+  dodgeOverlayBtn.classList.toggle('active', dodgeOverlayOn);
+  dodgeOverlayBtn.textContent = dodgeOverlayOn ? 'Mask: on' : 'Mask: off';
+  if (!visible || !paintMask) {
     maskOverlay.hidden = true;
     return;
   }
-  maskOverlayCtx.putImageData(new ImageData(maskToOverlay(paintMask), paintMaskW, paintMaskH), 0, 0);
+  const hex = dodgeOverlayColor.value;
+  const color: [number, number, number] = [
+    parseInt(hex.slice(1, 3), 16), parseInt(hex.slice(3, 5), 16), parseInt(hex.slice(5, 7), 16),
+  ];
+  maskOverlayCtx.putImageData(new ImageData(maskToOverlay(paintMask, color), paintMaskW, paintMaskH), 0, 0);
   maskOverlay.hidden = false;
 }
 
@@ -1522,6 +1535,11 @@ async function init(): Promise<void> {
     dodgeBrushBtn.disabled = !enabled;
     dodgeClearBtn.disabled = !enabled;
     dodgeModeSelect.disabled = !enabled;
+    dodgeOverlayBtn.disabled = !enabled;
+    dodgeOverlayColor.disabled = !enabled;
+    // No decoded texture -> nothing to overlay; don't leave a stale mask
+    // floating over an embedded-JPEG preview.
+    if (!enabled) maskOverlay.hidden = true;
   }
 
   function hidePreview(): void {
@@ -2028,6 +2046,15 @@ async function init(): Promise<void> {
     canvas.style.cursor = brushActive ? 'crosshair' : 'default';
     drawDodgeOverlay();
   });
+
+  // Mask overlay toggle + color: review/edit the painted mask without holding
+  // the brush button, in any color (LrC's overlay is red by default but
+  // swappable). Show while brushing regardless of this toggle.
+  dodgeOverlayBtn.addEventListener('click', () => {
+    dodgeOverlayOn = !dodgeOverlayOn;
+    drawDodgeOverlay();
+  });
+  dodgeOverlayColor.addEventListener('input', drawDodgeOverlay);
 
   dodgeClearBtn.addEventListener('click', () => {
     if (!paintMask) return;

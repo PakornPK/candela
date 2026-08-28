@@ -69,6 +69,12 @@ describe('maskToOverlay (the brush red-mask overlay)', () => {
     expect(Array.from(rgba.slice(12, 16))).toEqual([255, 0, 60, 0]);   // neutral transparent
   });
 
+  it('custom overlay color is honored', () => {
+    const rgba = maskToOverlay(new Float32Array([0.5, 0]), [0, 255, 0]);
+    expect(Array.from(rgba.slice(0, 4))).toEqual([0, 255, 0, 128]); // green swatch
+    expect(Array.from(rgba.slice(4, 8))).toEqual([0, 255, 0, 0]);   // neutral transparent
+  });
+
   it('every painted pixel is red (filter scan: no gray leaks into the overlay)', () => {
     const m = new Float32Array(100);
     paintStroke(m, 10, 10, 4, 5, 4, 5, 2, 0.5, 1);

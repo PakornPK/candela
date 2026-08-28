@@ -103,16 +103,17 @@ export function maskToOp(mask: Float32Array): Int8Array {
 }
 
 // Brush overlay pixels (RGBA) for the DOM canvas above the WebGPU canvas:
-// LrC-style red mask while brushing. Drawn from the CPU-authoritative
-// paintMask (the GPU texture is just its mirror), so no readback is needed.
-// alpha = |density| (0..1), color pure red; the mask is signed (dodge vs burn)
-// but the overlay is one color -- LrC shows the same red either way.
-export function maskToOverlay(mask: Float32Array): Uint8ClampedArray<ArrayBuffer> {
+// LrC-style mask while brushing. Drawn from the CPU-authoritative paintMask
+// (the GPU texture is just its mirror), so no readback is needed.
+// alpha = |density| (0..1); the color is the overlay swatch (user-adjustable,
+// red by default). The mask is signed (dodge vs burn) but the overlay is one
+// color -- LrC shows the same overlay color either way.
+export function maskToOverlay(mask: Float32Array, color: [number, number, number] = [255, 0, 60]): Uint8ClampedArray<ArrayBuffer> {
   const out = new Uint8ClampedArray(mask.length * 4);
   for (let i = 0; i < mask.length; i++) {
     const o = i * 4;
     const a = Math.min(1, Math.abs(mask[i]));
-    out[o] = 255; out[o + 1] = 0; out[o + 2] = 60; out[o + 3] = Math.round(a * 255);
+    out[o] = color[0]; out[o + 1] = color[1]; out[o + 2] = color[2]; out[o + 3] = Math.round(a * 255);
   }
   return out;
 }
