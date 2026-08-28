@@ -18,12 +18,12 @@ export function isNeutralVignette(p: VignetteParams): boolean {
   return p.amount === 0;
 }
 
-// Layout must match the `Vignette` struct in vignette.wgsl (5 f32s + cropFrac
-// X/Y + 1 pad). cropFrac = the crop mask / texture (from crop.ts), 1,1 = no
-// crop -- the vignette spans the image inside the crop, like LrC's Post-Crop
-// Vignetting.
-export function packVignette(p: VignetteParams, cropFrac: [number, number] = [1, 1]): Float32Array {
-  return new Float32Array([p.amount, p.midpoint, p.roundness, p.feather, p.highlights, cropFrac[0], cropFrac[1], 0]);
+// Layout must match the `Vignette` struct in vignette.wgsl (5 f32s + the crop
+// mask rect x/y/w/h + 1 pad). region = the crop mask rect (from crop.ts),
+// [0,0,1,1] = no crop -- the vignette spans the image inside the crop, like
+// LrC's Post-Crop Vignetting.
+export function packVignette(p: VignetteParams, region: [number, number, number, number] = [0, 0, 1, 1]): Float32Array {
+  return new Float32Array([p.amount, p.midpoint, p.roundness, p.feather, p.highlights, region[0], region[1], region[2], region[3], 0]);
 }
 
 export function smoothstep01(x: number): number {

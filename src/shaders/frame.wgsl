@@ -15,9 +15,13 @@
 
 struct Frame {
   style: f32,      // 0/1/2/3
-  cropFracX: f32,  // crop mask / texture (see crop.ts); 1 = no crop
-  cropFracY: f32,
+  cropX: f32,      // crop mask rect (see crop.ts): left/top/size, normalized;
+  cropY: f32,      // [0,0,1,1] = no crop -- the frame wraps the image inside it
+  cropW: f32,
+  cropH: f32,
   _pad0: f32,
+  _pad1: f32,
+  _pad2: f32,
 };
 
 // Border band as a fraction of the frame (matches FRAME_BORDER in frame.ts).
@@ -46,18 +50,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= dims.x || id.y >= dims.y) { return; }
   let style = u32(p.style);
   let b = borderF(style);
-  let cfx = max(p.cropFracX, 1e-3);
-  let cfy = max(p.cropFracY, 1e-3);
+  let cfx = max(p.cropW, 1e-3);
+  let cfy = max(p.cropH, 1e-3);
   let nx = (f32(id.x) + 0.5) / f32(dims.x);
   let ny = (f32(id.y) + 0.5) / f32(dims.y);
 
-  // The crop op leaves its content centered in the texture, black outside
-  // (cropFrac = 1,1 when there's no crop -> the crop region IS the texture,
+  // The crop op leaves its content in the crop rect, black outside
+  // ([0,0,1,1] when there's no crop -> the crop region IS the texture,
   // so every formula below reduces to the no-crop geometry). The frame wraps
   // the CROP rect: rebate of border b around it, image = the crop rect
   // shrunk by b -- exactly the no-crop layout applied inside the crop.
-  let cropL = (1.0 - cfx) * 0.5;
-  let cropT = (1.0 - cfy) * 0.5;
+  let cropL = p.cropX;
+  let cropT = p.cropY;
   let bx = b * cfx; // border thickness in texture space
   let by = b * cfy;
   let imgL = cropL + bx;

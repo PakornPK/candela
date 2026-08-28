@@ -21,7 +21,7 @@ import { packGrain, getGrainSeed, type GrainParams } from './grain';
 import { packLightleak, type LightleakParams } from './lightleak';
 import { packFrame } from './frame';
 import { packBw } from './bw';
-import { cropFracFromOps, packCrop, type CropParams } from './crop';
+import { cropRegion, packCrop, type CropParams } from './crop';
 import { packGeometry, type GeometryParams } from './geometry';
 import { packDodgeBurn, type DodgeBurnParams } from './dodge';
 import { FILM_STOCKS, isFilmStockId } from './film';
@@ -264,11 +264,11 @@ export const OP_RENDERERS: OpRenderer[] = [
     // neutral defaults (amount 0, midpoint/feather 50) so a no-op pass renders
     // as identity.
     shader: vignetteShader,
-    uniformSize: 32, // struct Vignette { 5 f32 + cropFracX/Y + pad }
+    uniformSize: 40, // struct Vignette { 5 f32 + crop rect x/y/w/h + pad }
     packParams: (ops) => {
       const op = ops.find(isVignetteOp);
       const p: VignetteParams = op ?? { amount: 0, midpoint: 50, roundness: 0, feather: 50, highlights: 0 };
-      return packVignette(p, cropFracFromOps(ops, imageSize[0], imageSize[1]));
+      return packVignette(p, cropRegion(ops, imageSize[0], imageSize[1]));
     },
   },
   {
@@ -309,10 +309,10 @@ export const OP_RENDERERS: OpRenderer[] = [
     // beyond. A style switch like bw: absent op = 'none' = identity (no
     // frame), so the renderer is only ever present when a style is active.
     shader: frameShader,
-    uniformSize: 16, // struct Frame { style + cropFracX/Y + pad }
+    uniformSize: 32, // struct Frame { style + crop rect x/y/w/h + 3 pad }
     packParams: (ops) => {
       const op = ops.find(isFrameOp);
-      return packFrame(op?.style ?? 'none', cropFracFromOps(ops, imageSize[0], imageSize[1]));
+      return packFrame(op?.style ?? 'none', cropRegion(ops, imageSize[0], imageSize[1]));
     },
   },
 ];

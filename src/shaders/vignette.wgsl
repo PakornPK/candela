@@ -27,8 +27,10 @@ struct Vignette {
   roundness: f32,    // -100..100
   feather: f32,      // 0..100
   highlights: f32,   // 0..100
-  cropFracX: f32,    // crop mask / texture (see crop.ts); 1 = no crop
-  cropFracY: f32,
+  cropX: f32,        // crop mask rect (see crop.ts): left/top/size, normalized;
+  cropY: f32,        // [0,0,1,1] = no crop -- the vignette spans the image
+  cropW: f32,        // inside the crop, like LrC's Post-Crop Vignetting
+  cropH: f32,
   _pad0: f32,
 };
 
@@ -51,9 +53,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   // Normalized centered coords (-1..1) over the CROP rect, not the full
   // texture: after a crop the vignette must span the image inside the crop,
   // with the black bars left untouched (they're 0, so factor × 0 stays 0
-  // whether the vignette darkens or lightens). (1,1) cropFrac = identity.
-  let dx = (f32(id.x) * 2.0 / f32(dims.x) - 1.0) / max(p.cropFracX, 1e-3);
-  let dy = (f32(id.y) * 2.0 / f32(dims.y) - 1.0) / max(p.cropFracY, 1e-3);
+  // whether the vignette darkens or lightens). [0,0,1,1] region = identity.
+  let nx = (f32(id.x) + 0.5) / f32(dims.x);
+  let ny = (f32(id.y) + 0.5) / f32(dims.y);
+  let dx = ((nx - p.cropX) / max(p.cropW, 1e-3)) * 2.0 - 1.0;
+  let dy = ((ny - p.cropY) / max(p.cropH, 1e-3)) * 2.0 - 1.0;
   // Circular radius: corner of a unit square sits at sqrt(2), so scale by
   // 1/sqrt(2) to make the corner ~1.
   let rCirc = sqrt(dx * dx + dy * dy) * 0.70710678;

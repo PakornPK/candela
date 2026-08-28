@@ -115,12 +115,16 @@ export function isValidOp(op: unknown): op is Op {
     return s === 'none' || s === '135' || s === '120' || s === 'print';
   }
   if (candidate.kind === 'crop') {
-    const c = op as { aspect?: unknown; rotate90?: unknown; angle?: unknown };
+    const c = op as { aspect?: unknown; rotate90?: unknown; angle?: unknown; x?: unknown; y?: unknown; w?: unknown; h?: unknown };
     const aspect = c.aspect;
     const aspectOk =
       aspect === 'original' || aspect === '1:1' || aspect === '3:2' || aspect === '4:3' ||
       aspect === '5:4' || aspect === '16:9' || aspect === '2:3' || aspect === '4:5';
-    return aspectOk && Number.isInteger(c.rotate90) && Number(c.rotate90) >= 0 && Number(c.rotate90) <= 3 && typeof c.angle === 'number';
+    const intOk = Number.isInteger(c.rotate90) && Number(c.rotate90) >= 0 && Number(c.rotate90) <= 3 && typeof c.angle === 'number';
+    // Freeform rect (x/y/w/h, normalized 0..1) is optional; all-or-nothing.
+    const freeOk = [c.x, c.y, c.w, c.h].every((v) => v === undefined) ||
+      [c.x, c.y, c.w, c.h].every((v) => typeof v === 'number');
+    return aspectOk && intOk && freeOk;
   }
   if (candidate.kind === 'geometry') {
     const g = op as { vertical?: unknown; horizontal?: unknown; rotate?: unknown; aspect?: unknown; scale?: unknown; offsetX?: unknown; offsetY?: unknown };

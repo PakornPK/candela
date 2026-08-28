@@ -1,11 +1,12 @@
 // Crop + rotate: map each output pixel to its source sample via the inverse
 // rotation, masked to the rotated crop's axis-aligned bbox. Outside the mask
-// is black — the bars LrC letterboxes a crop into. The mask is centered in
-// the full-res texture and scaled to fit, so the fixed-size canvas shows the
-// crop fit-in-window exactly like LrC's loupe (crop fills one dimension, the
-// bars the other). Bilinear source sampling keeps the crop smooth; 90° and
-// straighten share the same inverse-map (rotate90·π/2 + angle·π/180) so
-// rotating a straightened crop keeps the rotation cumulative.
+// is black — the bars LrC letterboxes a crop into. The mask is centered on
+// the crop rect (cx,cy — the texture center for a preset, the freeform rect's
+// center when the overlay drags it) and scaled to fit, so the fixed-size
+// canvas shows the crop fit-in-window exactly like LrC's loupe (crop fills
+// one dimension, the bars the other). Bilinear source sampling keeps the crop
+// smooth; 90° and straighten share the same inverse-map (rotate90·π/2 +
+// angle·π/180) so rotating a straightened crop keeps the rotation cumulative.
 //
 // ponytail: the mask fits the rotated rect inside the source (no black corner
 // wedges) rather than LrC's cover-to-fill — indistinguishable at ≤5°.
@@ -15,10 +16,10 @@ struct Crop {
   zoom: f32,
   halfW: f32,
   halfH: f32,
+  cx: f32,
+  cy: f32,
   _pad0: f32,
   _pad1: f32,
-  _pad2: f32,
-  _pad3: f32,
 };
 
 @group(0) @binding(0) var srcTex: texture_2d<f32>;
@@ -34,7 +35,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   }
 
   let id = vec2<f32>(pos);
-  let center = vec2<f32>(dims) * 0.5;
+  let center = vec2<f32>(p.cx, p.cy);
 
   // ponytail: a pure aspect crop (no 90° turn, no straighten) is the workbench
   // identity -- the FULL image stays on screen and the crop is a DOM rect+dim
@@ -47,7 +48,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     return;
   }
 
-  // Output-space offset from the texture center (the crop is centered).
+  // Output-space offset from the crop rect center.
   let o = id - center;
 
   // Outside the rotated crop's bbox -> letterbox bar.

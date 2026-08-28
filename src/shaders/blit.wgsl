@@ -39,10 +39,11 @@ fn linearToSrgb(c: f32) -> f32 {
 @fragment
 fn fs_main(in: VertexOut) -> @location(0) vec4<f32> {
   // cropFrac remaps the fullscreen quad onto the crop mask region (crop.ts):
-  // (1,1) = identity (the canvas blit = the window view, crop + bars). The
-  // histogram/export blits pass the real fraction so they sample only the
-  // image content, not the bars.
-  let uv2 = vec2<f32>(0.5) + (in.uv - vec2<f32>(0.5)) * cropFrac.xy;
+  // [x, y, w, h] = left/top/size of the mask bbox, normalized; [0,0,1,1] =
+  // identity (the canvas blit = the window view, crop + bars). The
+  // histogram/export blits pass the real rect so they sample only the image
+  // content, not the bars.
+  let uv2 = cropFrac.xy + in.uv * cropFrac.zw;
   let c = textureSample(srcTex, srcSampler, uv2);
   return vec4<f32>(linearToSrgb(c.r), linearToSrgb(c.g), linearToSrgb(c.b), 1.0);
 }

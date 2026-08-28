@@ -38,11 +38,11 @@ export function frameStyleId(style: FrameStyle): number {
   return style === 'none' ? 3 : style === '135' ? 0 : style === '120' ? 1 : 2;
 }
 
-// Uniform layout: style id + cropFrac X/Y + 1 pad. cropFrac = the crop mask /
-// texture (from crop.ts), 1,1 = no crop -- the frame wraps the image inside
-// the crop, black bars beyond (frame.wgsl's crop branch).
-export function packFrame(style: FrameStyle, cropFrac: [number, number] = [1, 1]): Float32Array {
-  return new Float32Array([frameStyleId(style), cropFrac[0], cropFrac[1], 0]);
+// Uniform layout: style id + the crop mask rect [x, y, w, h] (from crop.ts),
+// [0,0,1,1] = no crop -- the frame wraps the image inside the crop, black bars
+// beyond (frame.wgsl's crop branch).
+export function packFrame(style: FrameStyle, region: [number, number, number, number] = [0, 0, 1, 1]): Float32Array {
+  return new Float32Array([frameStyleId(style), region[0], region[1], region[2], region[3], 0, 0, 0]);
 }
 
 // Map an output-fraction coordinate to the source-image fraction, given the

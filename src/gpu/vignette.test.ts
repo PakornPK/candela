@@ -15,17 +15,19 @@ describe('isNeutralVignette', () => {
 });
 
 describe('packVignette', () => {
-  it('packs 8 floats in the shader struct layout (5 values + cropFrac X/Y + pad)', () => {
+  it('packs 10 floats in the shader struct layout (5 values + crop rect x/y/w/h + pad)', () => {
     const packed = packVignette({ amount: -60, midpoint: 40, roundness: 20, feather: 30, highlights: 10 });
-    expect(packed.length).toBe(8);
-    expect(Array.from(packed)).toEqual([-60, 40, 20, 30, 10, 1, 1, 0]);
-    // The cropFrac (from the crop op) spans the vignette across the cropped
+    expect(packed.length).toBe(10);
+    expect(Array.from(packed)).toEqual([-60, 40, 20, 30, 10, 0, 0, 1, 1, 0]);
+    // The crop region (from the crop op) spans the vignette across the cropped
     // image -- LrC's Post-Crop Vignetting.
-    const cropped = packVignette({ amount: -60, midpoint: 40, roundness: 20, feather: 30, highlights: 10 }, [0.667, 1]);
+    const cropped = packVignette({ amount: -60, midpoint: 40, roundness: 20, feather: 30, highlights: 10 }, [0.25, 0.125, 0.667, 1]);
     expect(Array.from(cropped.subarray(0, 5))).toEqual([-60, 40, 20, 30, 10]);
-    expect(cropped[5]).toBeCloseTo(0.667, 3); // f32 round-trip of a fraction
-    expect(cropped[6]).toBe(1);
-    expect(cropped[7]).toBe(0);
+    expect(cropped[5]).toBe(0.25);
+    expect(cropped[6]).toBe(0.125);
+    expect(cropped[7]).toBeCloseTo(0.667, 3); // f32 round-trip of a fraction
+    expect(cropped[8]).toBe(1);
+    expect(cropped[9]).toBe(0);
   });
 });
 

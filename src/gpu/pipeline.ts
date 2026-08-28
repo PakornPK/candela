@@ -5,7 +5,7 @@ import export16Shader from '../shaders/export16.wgsl?raw';
 import downscaleShader from '../shaders/downscale.wgsl?raw';
 import { packCfa6, shiftCfa6 } from './uniforms';
 import { OP_RENDERERS, presentOpIndices, setAsShotGains, setCameraColorMatrix, setCameraXyz, setImageSize } from './ops';
-import { cropFracFromOps } from './crop';
+import { cropRegion } from './crop';
 import { maskDims } from './dodge';
 import { encodePng16, encodeTiff16 } from './exportEncode';
 import type { Op } from '../catalog/types';
@@ -461,9 +461,9 @@ export class Pipeline {
     const wantHistogram = this.histogramListener !== null && !this.histogramInFlight;
     if (wantHistogram) {
       this.histogramInFlight = true;
-      // Sample only the image content, not the bars (the crop mask fraction).
-      const cropFrac = cropFracFromOps(ops, this.demosaicedTexture!.width, this.demosaicedTexture!.height);
-      this.device.queue.writeBuffer(this.cropBlitUniform, 0, new Float32Array([cropFrac[0], cropFrac[1], 0, 0]));
+      // Sample only the image content, not the bars (the crop mask rect).
+      const region = cropRegion(ops, this.demosaicedTexture!.width, this.demosaicedTexture!.height);
+      this.device.queue.writeBuffer(this.cropBlitUniform, 0, new Float32Array(region));
       const histogramBindGroup = this.device.createBindGroup({
         layout: this.exportBlitPipeline.getBindGroupLayout(0),
         entries: [
@@ -557,9 +557,9 @@ export class Pipeline {
     const srcH = this.demosaicedTexture.height;
     // Export the crop mask region -- the WYSIWYG loupe view (rotated crop +
     // straighten wedges), bars excluded. No crop = the full source.
-    const cropFrac = cropFracFromOps(ops, srcW, srcH);
-    const maskW = srcW * cropFrac[0];
-    const maskH = srcH * cropFrac[1];
+    const region = cropRegion(ops, srcW, srcH);
+    const maskW = srcW * region[2];
+    const maskH = srcH * region[3];
     const scale = opts.longEdge === null ? 1 : Math.min(1, opts.longEdge / Math.max(maskW, maskH));
     const tw = Math.max(1, Math.round(maskW * scale));
     const th = Math.max(1, Math.round(maskH * scale));
@@ -567,7 +567,7 @@ export class Pipeline {
     const encoder = this.device.createCommandEncoder();
     const source = this.dispatchOps(encoder, ops);
     this.displayTexture = source;
-    this.device.queue.writeBuffer(this.cropBlitUniform, 0, new Float32Array([cropFrac[0], cropFrac[1], 0, 0]));
+    this.device.queue.writeBuffer(this.cropBlitUniform, 0, new Float32Array(region));
 
     // Box-filter pyramid (case #5): halve with exact 2x2 box-averages until the
     // remaining reduction is <= 2x, then the blit/export16 passes do that final

@@ -20,7 +20,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     return;
   }
   let uv = (vec2<f32>(gid.xy) + vec2<f32>(0.5)) / vec2<f32>(dims);
-  let uv2 = vec2<f32>(0.5) + (uv - vec2<f32>(0.5)) * cropFrac.xy;
+  let uv2 = cropFrac.xy + uv * cropFrac.zw;
   let c = textureSampleLevel(srcTex, srcSampler, uv2, 0.0);
   let e = vec3<f32>(linearToSrgb(c.r), linearToSrgb(c.g), linearToSrgb(c.b));
   textureStore(dstTex, vec2<i32>(gid.xy), vec4<u32>(u32(round(e.x * 65535.0)), u32(round(e.y * 65535.0)), u32(round(e.z * 65535.0)), 0xFFFFu));

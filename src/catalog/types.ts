@@ -86,7 +86,7 @@ export type Op =
   | { kind: 'vignette'; amount: number; midpoint: number; roundness: number; feather: number; highlights: number }
   | { kind: 'grain'; amount: number; size: number; roughness: number }
   | { kind: 'lightleak'; amount: number; hue: number; fade: number }
-  | { kind: 'crop'; aspect: AspectPreset; rotate90: number; angle: number }
+  | { kind: 'crop'; aspect: AspectPreset; rotate90: number; angle: number; x?: number; y?: number; w?: number; h?: number }
   | { kind: 'frame'; style: FrameStyle }
   | { kind: 'bw'; mix: BwMix; tone: BwToneId }
   | { kind: 'geometry'; vertical: number; horizontal: number; rotate: number; aspect: number; scale: number; offsetX: number; offsetY: number }
@@ -146,7 +146,7 @@ export function isLightleakOp(op: Op): op is { kind: 'lightleak'; amount: number
   return op.kind === 'lightleak';
 }
 
-export function isCropOp(op: Op): op is { kind: 'crop'; aspect: AspectPreset; rotate90: number; angle: number } {
+export function isCropOp(op: Op): op is { kind: 'crop'; aspect: AspectPreset; rotate90: number; angle: number; x?: number; y?: number; w?: number; h?: number } {
   return op.kind === 'crop';
 }
 

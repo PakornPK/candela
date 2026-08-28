@@ -179,19 +179,19 @@ describe('OP_RENDERERS packParams', () => {
     expect(slide[TONE_LUT_SIZE + 256]).toBeLessThan(portra[TONE_LUT_SIZE + 256]);
   });
 
-  it('vignette packs 8 floats; neutral when absent, amount-driven when present', () => {
+  it('vignette packs 10 floats; neutral when absent, amount-driven when present', () => {
     const vignette = OP_RENDERERS[10];
     expect(vignette.kind).toBe('vignette');
     const absent = vignette.packParams([]);
-    expect(absent.length).toBe(8);
+    expect(absent.length).toBe(10);
     expect(absent[0]).toBe(0); // amount 0 = off
     expect(absent[1]).toBe(50); // LrC neutral midpoint
     expect(absent[3]).toBe(50); // LrC neutral feather
     const dark = vignette.packParams([
       { kind: 'vignette', amount: -60, midpoint: 40, roundness: 20, feather: 30, highlights: 10 },
     ]);
-    // cropFrac defaults to (1,1) -- no crop op in the ops list.
-    expect(Array.from(dark)).toEqual([-60, 40, 20, 30, 10, 1, 1, 0]);
+    // crop region defaults to [0,0,1,1] -- no crop op in the ops list.
+    expect(Array.from(dark)).toEqual([-60, 40, 20, 30, 10, 0, 0, 1, 1, 0]);
   });
 
   it('dodgeBurn packs ev = amount/25; absent op is neutral (identity pass)', () => {
@@ -241,28 +241,28 @@ describe('OP_RENDERERS packParams', () => {
     expect(Array.from(warm)).toEqual([70, 0, 30, 0.75, 0, 0, 0, 0]);
   });
 
-  it('frame packs the style id + cropFrac; absent op is the none identity', () => {
+  it('frame packs the style id + crop region; absent op is the none identity', () => {
     const frame = OP_RENDERERS[13];
     expect(frame.kind).toBe('frame');
-    // imageSize is unloaded in tests -> cropFrac defaults to (1,1).
-    expect(Array.from(frame.packParams([]))).toEqual([3, 1, 1, 0]); // none = identity
-    expect(Array.from(frame.packParams([{ kind: 'frame', style: '135' }]))).toEqual([0, 1, 1, 0]);
-    expect(Array.from(frame.packParams([{ kind: 'frame', style: 'print' }]))).toEqual([2, 1, 1, 0]);
+    // imageSize is unloaded in tests -> crop region defaults to [0,0,1,1].
+    expect(Array.from(frame.packParams([]))).toEqual([3, 0, 0, 1, 1, 0, 0, 0]); // none = identity
+    expect(Array.from(frame.packParams([{ kind: 'frame', style: '135' }]))).toEqual([0, 0, 0, 1, 1, 0, 0, 0]);
+    expect(Array.from(frame.packParams([{ kind: 'frame', style: 'print' }]))).toEqual([2, 0, 0, 1, 1, 0, 0, 0]);
   });
 
-  it('frame packs the CROP rect cropFrac when a crop op is present (#6 regression)', () => {
+  it('frame packs the CROP rect region when a crop op is present (#6 regression)', () => {
     // Regression: the pre-fix packParams packed only the style id -- cropFrac
     // stayed 0 in the uniform -> frame.wgsl's cfx collapsed to 1e-3 and the
     // framed image sampled a sliver -> "crop after frame = ภาพจะพัง". A 4:3
-    // crop on a 2048x2048 source must now arrive as cropFrac [1, 0.75], the
-    // exact mask the crop.wgsl bbox occupies.
+    // crop on a 2048x2048 source must now arrive as region [0, 0.125, 1, 0.75],
+    // the exact mask bbox the crop.wgsl occupies.
     const frame = OP_RENDERERS[13];
     setImageSize(2048, 2048);
     const packed = frame.packParams([
       { kind: 'crop', aspect: '4:3', rotate90: 0, angle: 0 },
       { kind: 'frame', style: '135' },
     ]);
-    expect(Array.from(packed)).toEqual([0, 1, 0.75, 0]);
+    expect(Array.from(packed)).toEqual([0, 0, 0.125, 1, 0.75, 0, 0, 0]);
     setImageSize(0, 0);
   });
 

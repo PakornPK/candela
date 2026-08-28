@@ -932,6 +932,40 @@ async function main() {
     const downOk = meanOk && flatOk;
     log(`DOWNSCALE EXPORT 256x256 (8x): sRGB mean=${lmean.toFixed(1)} std=${lstd.toFixed(2)} outLin=[${outLin.map((v) => v.toFixed(3))}] srcLin=[${srcMean.map((v) => v.toFixed(3))}]`);
     log(`DOWNSCALE FILTER: ${downOk ? 'PASS' : 'FAIL'} -- box pyramid flattens above-Nyquist stripes at the source's true linear mean (meanOk:${meanOk}, flatOk:${flatOk} std=${lstd.toFixed(1)})`);
+    // 14) FREEFORM CROP OFFSET PROOF (task #58 -- the drag frame). A freeform
+    // crop {x,y,w,h} must sample the SOURCE AT THAT OFFSET, not a centered rect
+    // of the same size. On a vertical-gradient raw (black top -> white bottom)
+    // a crop pinned to the TOP band must export dark and one pinned to the
+    // BOTTOM band bright; a centered fallback would make both mid-gray.
+    const fbl = raw.blackLevel, fwh = raw.whiteLevel;
+    const fLin = (L: number) => Math.round(fbl + L * (fwh - fbl));
+    const fcfa = raw.cfa6;
+    const grad = new Uint16Array(2048 * 2048);
+    for (let y = 0; y < 2048; y++) {
+      const L = y / 2047;
+      for (let x = 0; x < 2048; x++) grad[y * 2048 + x] = fLin(L);
+    }
+    const gradRaw = { width: 2048, height: 2048, effectiveWidth: 2048, effectiveHeight: 2048, leftMargin: 0, topMargin: 0, bayerData: grad, cfa6: fcfa, blackLevel: fbl, whiteLevel: fwh, colorMatrix: raw.colorMatrix, camXyz: raw.camXyz, asShotGains: raw.asShotGains ?? { r: 1, g: 1, b: 1 } } as never;
+    pipe3.load(gradRaw);
+    pipe3.render(synOps as never);
+    const fcrop = (y: number, h: number) => ({ kind: 'crop', aspect: 'original', rotate90: 0, angle: 0, x: 0.5, y, w: 1, h } as never);
+    const gradMean = async (ops: unknown[]) => {
+      pipe3.render(ops as never);
+      const gb = await pipe3.exportImage(ops as never, { format: 'png', bitDepth: 8, longEdge: null });
+      const gbm = await createImageBitmap(gb);
+      const gc = document.createElement('canvas'); gc.width = gbm.width; gc.height = gbm.height;
+      const gx = gc.getContext('2d')!; gx.drawImage(gbm, 0, 0);
+      const gi = gx.getImageData(0, 0, gbm.width, gbm.height).data;
+      let s = 0; const n = gbm.width * gbm.height;
+      for (let i = 0; i < n; i++) s += (gi[i * 4] + gi[i * 4 + 1] + gi[i * 4 + 2]) / 3;
+      return { mean: s / n, w: gbm.width, h: gbm.height };
+    };
+    const top = await gradMean([...synOps, fcrop(0.02, 0.04)]);
+    const mid = await gradMean([...synOps, fcrop(0.5, 0.04)]);
+    const bot = await gradMean([...synOps, fcrop(0.98, 0.04)]);
+    const freeOk = top.w === 2048 && top.h >= 70 && top.h <= 95 && top.mean < 80 && bot.mean > 200 && bot.mean - top.mean > 150;
+    log(`FREEFORM CROP: top-band ${top.w}x${top.h} mean=${top.mean.toFixed(1)} | centered ${mid.w}x${mid.h} mean=${mid.mean.toFixed(1)} | bottom-band ${bot.w}x${bot.h} mean=${bot.mean.toFixed(1)}`);
+    log(`FREEFORM FILTER: ${freeOk ? 'PASS' : 'FAIL'} -- the drag rect samples its own offset (top-dark:${top.mean < 80}, bottom-bright:${bot.mean > 200}, offset-moves:${bot.mean - top.mean > 150})`);
   } catch (e) {
     log('SYNTH test failed: ' + (e as Error).message);
   }
