@@ -956,16 +956,36 @@ async function main() {
       const gc = document.createElement('canvas'); gc.width = gbm.width; gc.height = gbm.height;
       const gx = gc.getContext('2d')!; gx.drawImage(gbm, 0, 0);
       const gi = gx.getImageData(0, 0, gbm.width, gbm.height).data;
-      let s = 0; const n = gbm.width * gbm.height;
-      for (let i = 0; i < n; i++) s += (gi[i * 4] + gi[i * 4 + 1] + gi[i * 4 + 2]) / 3;
-      return { mean: s / n, w: gbm.width, h: gbm.height };
+      let s = 0, rsum = 0, gsum = 0, bsum = 0; const n = gbm.width * gbm.height;
+      for (let i = 0; i < n; i++) { s += (gi[i * 4] + gi[i * 4 + 1] + gi[i * 4 + 2]) / 3; rsum += gi[i * 4]; gsum += gi[i * 4 + 1]; bsum += gi[i * 4 + 2]; }
+      return { mean: s / n, r: rsum / n, g: gsum / n, b: bsum / n, w: gbm.width, h: gbm.height };
     };
     const top = await gradMean([...synOps, fcrop(0.02, 0.04)]);
     const mid = await gradMean([...synOps, fcrop(0.5, 0.04)]);
     const bot = await gradMean([...synOps, fcrop(0.98, 0.04)]);
     const freeOk = top.w === 2048 && top.h >= 70 && top.h <= 95 && top.mean < 80 && bot.mean > 200 && bot.mean - top.mean > 150;
-    log(`FREEFORM CROP: top-band ${top.w}x${top.h} mean=${top.mean.toFixed(1)} | centered ${mid.w}x${mid.h} mean=${mid.mean.toFixed(1)} | bottom-band ${bot.w}x${bot.h} mean=${bot.mean.toFixed(1)}`);
+    log(`FREEFORM CROP: top-band ${top.w}x${top.h} mean=${top.mean.toFixed(1)} | centered ${mid.w}x${mid.h} mean=${mid.mean.toFixed(1)} (rgb ${mid.r.toFixed(0)}/${mid.g.toFixed(0)}/${mid.b.toFixed(0)}) | bottom-band ${bot.w}x${bot.h} mean=${bot.mean.toFixed(1)} (rgb ${bot.r.toFixed(0)}/${bot.g.toFixed(0)}/${bot.b.toFixed(0)})`);
     log(`FREEFORM FILTER: ${freeOk ? 'PASS' : 'FAIL'} -- the drag rect samples its own offset (top-dark:${top.mean < 80}, bottom-bright:${bot.mean > 200}, offset-moves:${bot.mean - top.mean > 150})`);
+    // 15) CANVAS BLIT PROOF (the "render ดำปี๋" regression -- task #58). The
+    // workbench canvas is the ONE path no earlier section exercises:
+    // displayTexture readbacks and exportImage both bypass the canvas blit,
+    // and its uniform was a STALE constant ([1,1,0,0] = the old centered
+    // layout) while blit.wgsl moved to the rect formula -- every pixel sampled
+    // the top-right corner texel, so a dark-cornered photo rendered BLACK.
+    // Render the gradient to a real on-screen canvas; the driver screenshots
+    // it and requires the full gradient (dark top -> bright bottom) to appear
+    // -- a corner-sampling bug flattens it to one color.
+    const vis = document.createElement('canvas');
+    vis.id = 'canvas-vis-proof';
+    vis.width = 256; vis.height = 256;
+    vis.style.cssText = 'position:fixed; top:8px; left:8px; width:256px; height:256px; z-index:99999;';
+    document.body.appendChild(vis);
+    const { Pipeline: VisPipe } = await import('./src/gpu/pipeline');
+    const visPipe = await VisPipe.create(vis);
+    visPipe.load(gradRaw);
+    visPipe.render(synOps as never);
+    (window as any).__canvasReady = true;
+    log('CANVAS GRADIENT RENDERED -- driver screenshots #canvas-vis-proof (full gradient required)');
   } catch (e) {
     log('SYNTH test failed: ' + (e as Error).message);
   }

@@ -2,9 +2,11 @@ import { describe, it, expect } from 'vitest';
 import {
   ASPECT_RATIO,
   cropGeometry,
+  cropHandleAt,
   cropOverlayRect,
   cropRect,
   cropRegion,
+  dragCropRect,
   isFreeformCrop,
   isNeutralCrop,
   packCrop,
@@ -126,5 +128,63 @@ describe('crop', () => {
     expect(ASPECT_RATIO['3:2']).toBe(1.5);
     expect(ASPECT_RATIO['1:1']).toBe(1);
     expect(ASPECT_RATIO['16:9']).toBeCloseTo(1.778, 3);
+  });
+
+  it('hit-tests the crop overlay handles', () => {
+    const r = { x: 100, y: 100, w: 800, h: 600 };
+    // Handle slack scales with the workbench width; at W=1200 it is max(9,5)+4=13.
+    expect(cropHandleAt(r, 140, 140, 1200)).toBe('move');       // interior
+    expect(cropHandleAt(r, 112, 112, 1200)).toBe('nw');         // top-left corner
+    expect(cropHandleAt(r, 888, 112, 1200)).toBe('ne');         // top-right
+    expect(cropHandleAt(r, 900, 700, 1200)).toBe('se');         // bottom-right
+    expect(cropHandleAt(r, 900, 300, 1200)).toBe('e');          // right edge
+    expect(cropHandleAt(r, 500, 700, 1200)).toBe('s');          // bottom edge
+    expect(cropHandleAt(r, 500, 112, 1200)).toBe('n');          // top edge
+    expect(cropHandleAt(r, 87, 400, 1200)).toBe('w');           // left edge
+    expect(cropHandleAt(r, 50, 400, 1200)).toBe(null);          // outside
+    expect(cropHandleAt(r, 500, 800, 1200)).toBe(null);         // outside below
+  });
+
+  it('move drags the rect and clamps it inside the source', () => {
+    // Half-size rect at the source center on a 6000x4000 workbench.
+    const orig = { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }; // 3000x2000, centered
+    const right = dragCropRect('move', orig, 400, 0, W, H, 'original', 0);
+    expect(right.x).toBeCloseTo(0.5667, 3); // (1500+400)/6000
+    expect(right.y).toBe(0.5);
+    expect(right.w).toBe(0.5);
+    // Dragging far right clamps so the right edge stays inside (cx = W - cw/2).
+    const clamped = dragCropRect('move', orig, 50000, 0, W, H, 'original', 0);
+    expect(clamped.x).toBeCloseTo(0.75, 6); // (6000 - 1500)/6000
+  });
+
+  it('aspect-locked corner resize keeps the opposite corner fixed', () => {
+    const orig = { x: 0.5, y: 0.5, w: 0.5, h: 0.5 }; // 3000x2000 on 6000x4000
+    // 3:2 preset -> a=1.5; pulling the SE corner +600,+400 scales to 3600x2400.
+    const se = dragCropRect('se', orig, 600, 400, W, H, '3:2', 0);
+    expect(se.w * W).toBeCloseTo(3600, 3);
+    expect(se.h * H).toBeCloseTo(2400, 3);
+    expect((se.w * W) / (se.h * H)).toBeCloseTo(1.5, 6);
+    // NW corner (cx - cw/2) is unchanged -> the opposite corner stayed fixed.
+    const nwBefore = 0.5 * W - 0.5 * (0.5 * W);
+    const nwAfter = se.x * W - se.w * W / 2;
+    expect(nwAfter).toBeCloseTo(nwBefore, 3);
+  });
+
+  it('90° rotation flips the locked aspect', () => {
+    const orig = { x: 0.5, y: 0.5, w: 0.5, h: 0.5 };
+    // 3:2 rotated 90° -> locked 2:3: a +1000,+1500 pull gives a 3000x4500 rect.
+    const se = dragCropRect('se', orig, 1000, 1500, W, H, '3:2', 1);
+    expect((se.w * W) / (se.h * H)).toBeCloseTo(2 / 3, 6);
+  });
+
+  it('free resize (original aspect) follows the pointer axis and never collapses', () => {
+    const orig = { x: 0.5, y: 0.5, w: 0.5, h: 0.5 };
+    // 'original' aspect = no lock: an edge pull moves one axis only.
+    const e = dragCropRect('e', orig, 600, 0, W, H, 'original', 0);
+    expect(e.w * W).toBeCloseTo(3600, 3);
+    expect(e.h * H).toBe(2000);
+    // Shrinking below the 2% minimum width clamps to it.
+    const s = dragCropRect('s', orig, 0, -100000, W, H, 'original', 0);
+    expect(s.h * H).toBeCloseTo(Math.round(W * 0.02), 6);
   });
 });

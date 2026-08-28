@@ -148,7 +148,13 @@ export class Pipeline {
     this.cfaBuffer = device.createBuffer({ size: 144, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.canvasBlitUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     this.cropBlitUniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
-    this.device.queue.writeBuffer(this.canvasBlitUniform, 0, new Float32Array([1, 1, 0, 0]));
+    // blit.wgsl's cropFrac is an [x,y,w,h] RECT: uv2 = cropFrac.xy + uv*cropFrac.zw.
+    // The canvas shows the FULL texture (identity rect [0,0,1,1]) -- the window
+    // view is crop+bars; the histogram/export blits write the real rect to the
+    // other buffer per-use. ([1,1,0,0] was the OLD centered layout: it mapped
+    // every pixel to the corner -- render ดำปี๋. Regression guard: harness
+    // section 15 scans the actual canvas pixels.)
+    this.device.queue.writeBuffer(this.canvasBlitUniform, 0, new Float32Array([0, 0, 1, 1]));
     this.opUniformBuffers = OP_RENDERERS.map((r) => device.createBuffer({
       size: r.uniformSize,
       usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,

@@ -22,7 +22,7 @@ import { isNeutralPresence, type PresenceParams } from './gpu/presence';
 import { isNeutralVignette, type VignetteParams } from './gpu/vignette';
 import { isNeutralGrain, seedFromPath, setGrainSeed, type GrainParams } from './gpu/grain';
 import { isNeutralLightleak, type LightleakParams } from './gpu/lightleak';
-import { ASPECT_RATIO, cropOverlayRect, isFreeformCrop, isNeutralCrop, type CropParams } from './gpu/crop';
+import { cropHandleAt, cropOverlayRect, dragCropRect, isFreeformCrop, isNeutralCrop, type CropHandleMode, type CropParams } from './gpu/crop';
 import { isNeutralGeometry, type GeometryParams } from './gpu/geometry';
 import { effectiveMask, maskDims, maskHasPaint, maskToBytes, maskToOp, maskToOverlay, opToMask, paintStroke, type DodgeBurnParams } from './gpu/dodge';
 import { BW_FILTERS, BW_TONES, type BwFilterId } from './gpu/bw';
@@ -132,7 +132,6 @@ let cropRotate90 = 0;
 // rect center, w/h = size). null = the centered preset (aspect select). Lives
 // in the crop op as x/y/w/h; restored from history by applyOpsToSliders.
 let cropFreeform: { x: number; y: number; w: number; h: number } | null = null;
-type CropHandleMode = 'move' | 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 let cropDrag: { mode: CropHandleMode; startX: number; startY: number; orig: { x: number; y: number; w: number; h: number } } | null = null;
 const bwTreatmentSelect = document.querySelector<HTMLSelectElement>('#bw-treatment')!;
 const bwControls = document.querySelector<HTMLDivElement>('#bw-controls')!;
@@ -705,74 +704,6 @@ function eventToBufferPt(e: PointerEvent): [number, number] | null {
   const y = (e.clientY - rect.top - offY) / scale;
   if (x < 0 || x > cw || y < 0 || y > ch) return null;
   return [x, y];
-}
-
-// Which crop handle (or move) a buffer-space point is over, if any.
-function cropHandleAt(r: { x: number; y: number; w: number; h: number }, bx: number, by: number, W: number): CropHandleMode | null {
-  const hs = Math.max(9, Math.round(W / 220)) + 4; // handle + slack
-  const pt = { x: bx - r.x, y: by - r.y }; // rect-local (unrotated; angle is tiny for a live drag)
-  if (pt.x >= -hs && pt.x <= r.w + hs && pt.y >= -hs && pt.y <= r.h + hs) {
-    const col = pt.x < hs ? -1 : pt.x > r.w - hs ? 1 : 0;
-    const row = pt.y < hs ? -1 : pt.y > r.h - hs ? 1 : 0;
-    if (col === -1 && row === -1) return 'nw';
-    if (col === 1 && row === -1) return 'ne';
-    if (col === -1 && row === 1) return 'sw';
-    if (col === 1 && row === 1) return 'se';
-    if (col === 0 && row === -1) return 'n';
-    if (col === 0 && row === 1) return 's';
-    if (col === -1 && row === 0) return 'w';
-    if (col === 1 && row === 0) return 'e';
-    return 'move';
-  }
-  return null;
-}
-
-// The aspect the freeform rect must keep while resizing, or null = free.
-// Matches cropRect's preset aspect (incl. the 90° flip).
-function lockedCropAspect(): number | null {
-  const c = readCropParams();
-  if (c.aspect === 'original') return null;
-  let a = ASPECT_RATIO[c.aspect];
-  if (c.rotate90 % 2 === 1) a = 1 / a;
-  return a;
-}
-
-// Apply a drag to the freeform rect (normalized), clamped inside the source.
-// `orig` is the pre-drag rect; `dxPx`/`dyPx` the pointer deltas in buffer px.
-function dragCropRect(mode: CropHandleMode, orig: { x: number; y: number; w: number; h: number }, dxPx: number, dyPx: number): { x: number; y: number; w: number; h: number } {
-  const W = canvas.width, H = canvas.height;
-  const cx = orig.x * W, cy = orig.y * H, cw = orig.w * W, ch = orig.h * H;
-  if (mode === 'move') {
-    // Clamp the stored rect so a re-grab starts from the same place the frame
-    // is drawn (the overlay draws the CLAMPED geometry from cropRect).
-    const ncx = Math.min(Math.max(cx + dxPx, cw / 2), W - cw / 2);
-    const ncy = Math.min(Math.max(cy + dyPx, ch / 2), H - ch / 2);
-    return { x: ncx / W, y: ncy / H, w: orig.w, h: orig.h };
-  }
-  // Resize: the opposite corner stays fixed; the dragged corner follows the
-  // pointer (LrC's aspect-locked corner drag).
-  const dx = mode.includes('e') ? dxPx : mode.includes('w') ? -dxPx : 0;
-  const dy = mode.includes('s') ? dyPx : mode.includes('n') ? -dyPx : 0;
-  let nw = cw + dx, nh = ch + dy;
-  if (mode === 'e' || mode === 'w' || mode === 'n' || mode === 's') {
-    // Edge handles resize one axis only (free mode); locked aspect scales both.
-    const a = lockedCropAspect();
-    if (!a) {
-      nw = cw + dx; nh = ch + dy;
-    } else {
-      nw = Math.max(cw + dx, (ch + dy) * a);
-      nh = nw / a;
-    }
-  }
-  const MIN = Math.round(W * 0.02);
-  nw = Math.max(nw, MIN);
-  nh = Math.max(nh, MIN);
-  const a = lockedCropAspect();
-  if (a) { if (nw / nh > a) nh = nw / a; else nw = nh * a; }
-  // Keep the rect inside the source.
-  const ncx = Math.min(Math.max(cx + dx / 2, nw / 2), W - nw / 2);
-  const ncy = Math.min(Math.max(cy + dy / 2, nh / 2), H - nh / 2);
-  return { x: ncx / W, y: ncy / H, w: nw / W, h: nh / H };
 }
 
 function readDodgeParams(): DodgeBurnParams {
@@ -2060,7 +1991,8 @@ async function init(): Promise<void> {
     const pt = eventToBufferPt(e);
     if (!pt) return;
     e.preventDefault();
-    cropFreeform = dragCropRect(cropDrag.mode, cropDrag.orig, pt[0] - cropDrag.startX, pt[1] - cropDrag.startY);
+    const curCrop = readCropParams();
+    cropFreeform = dragCropRect(cropDrag.mode, cropDrag.orig, pt[0] - cropDrag.startX, pt[1] - cropDrag.startY, canvas.width, canvas.height, curCrop.aspect, curCrop.rotate90);
     onSliderInput();
   });
   const endCropDrag = (): void => {

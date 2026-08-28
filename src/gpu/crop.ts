@@ -69,6 +69,87 @@ export function isNeutralCrop(c: CropParams): boolean {
   return c.x === 0.5 && c.y === 0.5 && c.w === 1 && c.h === 1;
 }
 
+// Crop overlay interaction (the DOM workbench drags the freeform rect):
+// - cropHandleAt: which handle (or move) a pointer is over.
+// - dragCropRect: apply a pointer drag to the freeform rect, aspect-locked to
+//   the preset, clamped inside the source. Pure + unit-tested -- main.ts just
+//   feeds it the pointer delta and the source/crop state.
+export type CropHandleMode = 'move' | 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
+
+export function cropHandleAt(r: { x: number; y: number; w: number; h: number }, bx: number, by: number, W: number): CropHandleMode | null {
+  const hs = Math.max(9, Math.round(W / 220)) + 4; // handle + slack
+  const pt = { x: bx - r.x, y: by - r.y }; // rect-local (unrotated; angle is tiny for a live drag)
+  if (pt.x >= -hs && pt.x <= r.w + hs && pt.y >= -hs && pt.y <= r.h + hs) {
+    const col = pt.x < hs ? -1 : pt.x > r.w - hs ? 1 : 0;
+    const row = pt.y < hs ? -1 : pt.y > r.h - hs ? 1 : 0;
+    if (col === -1 && row === -1) return 'nw';
+    if (col === 1 && row === -1) return 'ne';
+    if (col === -1 && row === 1) return 'sw';
+    if (col === 1 && row === 1) return 'se';
+    if (col === 0 && row === -1) return 'n';
+    if (col === 0 && row === 1) return 's';
+    if (col === -1 && row === 0) return 'w';
+    if (col === 1 && row === 0) return 'e';
+    return 'move';
+  }
+  return null;
+}
+
+// The aspect the freeform rect must keep while resizing, or null = free.
+// Matches cropRect's preset aspect (incl. the 90° flip).
+export function lockedCropAspect(aspect: AspectPreset, rotate90: number): number | null {
+  if (aspect === 'original') return null;
+  let a = ASPECT_RATIO[aspect];
+  if (rotate90 % 2 === 1) a = 1 / a;
+  return a;
+}
+
+// Apply a drag to the freeform rect (normalized), clamped inside the source.
+// `orig` is the pre-drag rect; `dxPx`/`dyPx` the pointer deltas in buffer px.
+// Returns a NEW rect (normalized center + size), never mutates `orig`.
+export function dragCropRect(
+  mode: CropHandleMode,
+  orig: { x: number; y: number; w: number; h: number },
+  dxPx: number,
+  dyPx: number,
+  W: number,
+  H: number,
+  aspect: AspectPreset,
+  rotate90: number,
+): { x: number; y: number; w: number; h: number } {
+  const cx = orig.x * W, cy = orig.y * H, cw = orig.w * W, ch = orig.h * H;
+  if (mode === 'move') {
+    // Clamp the stored rect so a re-grab starts from the same place the frame
+    // is drawn (the overlay draws the CLAMPED geometry from cropRect).
+    const ncx = Math.min(Math.max(cx + dxPx, cw / 2), W - cw / 2);
+    const ncy = Math.min(Math.max(cy + dyPx, ch / 2), H - ch / 2);
+    return { x: ncx / W, y: ncy / H, w: orig.w, h: orig.h };
+  }
+  // Resize: the opposite corner stays fixed; the dragged corner follows the
+  // pointer (LrC's aspect-locked corner drag).
+  const dx = mode.includes('e') ? dxPx : mode.includes('w') ? -dxPx : 0;
+  const dy = mode.includes('s') ? dyPx : mode.includes('n') ? -dyPx : 0;
+  let nw = cw + dx, nh = ch + dy;
+  const a = lockedCropAspect(aspect, rotate90);
+  if (mode === 'e' || mode === 'w' || mode === 'n' || mode === 's') {
+    // Edge handles resize one axis only (free mode); locked aspect scales both.
+    if (!a) {
+      nw = cw + dx; nh = ch + dy;
+    } else {
+      nw = Math.max(cw + dx, (ch + dy) * a);
+      nh = nw / a;
+    }
+  }
+  const MIN = Math.round(W * 0.02);
+  nw = Math.max(nw, MIN);
+  nh = Math.max(nh, MIN);
+  if (a) { if (nw / nh > a) nh = nw / a; else nw = nh * a; }
+  // Keep the rect inside the source.
+  const ncx = Math.min(Math.max(cx + dx / 2, nw / 2), W - nw / 2);
+  const ncy = Math.min(Math.max(cy + dy / 2, nh / 2), H - nh / 2);
+  return { x: ncx / W, y: ncy / H, w: nw / W, h: nh / H };
+}
+
 // Source-space capture rect, in pixels (center + size).
 export function cropRect(c: CropParams, W: number, H: number): { cx: number; cy: number; cw: number; ch: number } {
   if (isFreeformCrop(c)) {
