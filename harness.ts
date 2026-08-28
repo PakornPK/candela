@@ -838,6 +838,73 @@ async function main() {
     const fadeOk = dFade > 0.08; // fade 100 visibly kills the leak's reach
     const leakOk = markerOk && hueOk && fadeOk;
     log(`LEAK FILTER: ${leakOk ? 'PASS' : 'FAIL'} -- vendored textures drive the leak (marker:${markerOk}, hue-blend:${hueOk}, fade:${fadeOk})`);
+
+    // 12) EXPORT DOWNSCALE PROOF (case #5 -- "export presets wreck resolution").
+    // Research: IG/FB preset VALUES are correct (1080/2048 = display caps, JPEG
+    // 92%). The real resolution-wrecker was exportImage's SINGLE bilinear leap
+    // (e.g. 60MP -> 1080px in one interpolating step). Now a box-filter pyramid
+    // halves with exact 2x2 area-averages until within 2x of the export size.
+    // On a PERIOD-4 stripe synthetic (2px on/2px off), an 8x export is entirely
+    // above Nyquist -> correct area-averaging gives a FLAT output whose linear
+    // value (per channel) equals the SOURCE texture's linear mean. A phase-
+    // dependent bilinear samples 0.05/0.45, not the true mix -> mean mismatches.
+    const sbl = raw.blackLevel, swh = raw.whiteLevel;
+    const sLin = (L: number) => Math.round(sbl + L * (swh - sbl));
+    const scfa = raw.cfa6;
+    const spat = new Uint16Array(2048 * 2048);
+    for (let y = 0; y < 2048; y++) {
+      for (let x = 0; x < 2048; x++) {
+        spat[y * 2048 + x] = sLin(((x >> 1) % 2) === 0 ? 0.85 : 0.05);
+      }
+    }
+    const stripeRaw = { width: 2048, height: 2048, effectiveWidth: 2048, effectiveHeight: 2048, leftMargin: 0, topMargin: 0, bayerData: spat, cfa6: scfa, blackLevel: sbl, whiteLevel: swh, colorMatrix: raw.colorMatrix, camXyz: raw.camXyz, asShotGains: raw.asShotGains ?? { r: 1, g: 1, b: 1 } } as never;
+    pipe3.load(stripeRaw);
+    pipe3.render(synOps as never);
+    // Source linear per-channel means (rgba16float displayTexture, rows 0..15 --
+    // the pattern is column-periodic, so a few rows represent the whole image).
+    const dtex = (pipe3 as any).displayTexture as GPUTexture;
+    const dBPR = Math.ceil((dtex.width * 8) / 256) * 256;
+    const ROWS = 16;
+    const dBuf = wbDev.createBuffer({ size: dBPR * ROWS, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const de = wbDev.createCommandEncoder();
+    de.copyTextureToBuffer({ texture: dtex }, { buffer: dBuf, bytesPerRow: dBPR }, { width: dtex.width, height: ROWS });
+    wbDev.queue.submit([de.finish()]);
+    await dBuf.mapAsync(GPUMapMode.READ);
+    const d8 = new Uint8Array(dBuf.getMappedRange());
+    const sR = [0, 0, 0];
+    for (let y = 0; y < ROWS; y++) {
+      for (let x = 0; x < dtex.width; x++) {
+        const o = y * dBPR + x * 8;
+        sR[0] += HALF_LUT[d8[o] | (d8[o + 1] << 8)];
+        sR[1] += HALF_LUT[d8[o + 2] | (d8[o + 3] << 8)];
+        sR[2] += HALF_LUT[d8[o + 4] | (d8[o + 5] << 8)];
+      }
+    }
+    dBuf.unmap(); dBuf.destroy();
+    const srcMean = sR.map((v) => v / (dtex.width * ROWS));
+    // 8x box export: flat, and each channel's linear value == the source mean.
+    const bb = await pipe3.exportImage(synOps as never, { format: 'png', bitDepth: 8, longEdge: 256 });
+    const bm = await createImageBitmap(bb);
+    const cc = document.createElement('canvas'); cc.width = bm.width; cc.height = bm.height;
+    const g2 = cc.getContext('2d')!; g2.drawImage(bm, 0, 0);
+    const im = g2.getImageData(0, 0, bm.width, bm.height).data;
+    const sMean = [0, 0, 0]; let lsum = 0, lsq = 0;
+    const nn = bm.width * bm.height;
+    for (let i = 0; i < nn; i++) {
+      sMean[0] += im[i * 4]; sMean[1] += im[i * 4 + 1]; sMean[2] += im[i * 4 + 2];
+      const l = (im[i * 4] + im[i * 4 + 1] + im[i * 4 + 2]) / 3;
+      lsum += l; lsq += l * l;
+    }
+    const sm = sMean.map((v) => v / nn);
+    const lmean = lsum / nn;
+    const lstd = Math.sqrt(Math.max(0, lsq / nn - lmean * lmean));
+    const toLin = (v: number) => { const x = v / 255; return x <= 0.04045 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); };
+    const outLin = sm.map(toLin);
+    const meanOk = Math.abs(outLin[0] - srcMean[0]) < 0.02 && Math.abs(outLin[1] - srcMean[1]) < 0.02 && Math.abs(outLin[2] - srcMean[2]) < 0.02;
+    const flatOk = lstd < 15; // period-4 above Nyquist at 8x -> averaged flat
+    const downOk = meanOk && flatOk;
+    log(`DOWNSCALE EXPORT 256x256 (8x): sRGB mean=${lmean.toFixed(1)} std=${lstd.toFixed(2)} outLin=[${outLin.map((v) => v.toFixed(3))}] srcLin=[${srcMean.map((v) => v.toFixed(3))}]`);
+    log(`DOWNSCALE FILTER: ${downOk ? 'PASS' : 'FAIL'} -- box pyramid flattens above-Nyquist stripes at the source's true linear mean (meanOk:${meanOk}, flatOk:${flatOk} std=${lstd.toFixed(1)})`);
   } catch (e) {
     log('SYNTH test failed: ' + (e as Error).message);
   }

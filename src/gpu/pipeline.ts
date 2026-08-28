@@ -2,6 +2,7 @@ import unpackShader from '../shaders/unpack.wgsl?raw';
 import demosaicShader from '../shaders/demosaic.wgsl?raw';
 import blitShader from '../shaders/blit.wgsl?raw';
 import export16Shader from '../shaders/export16.wgsl?raw';
+import downscaleShader from '../shaders/downscale.wgsl?raw';
 import { packCfa6, shiftCfa6 } from './uniforms';
 import { OP_RENDERERS, presentOpIndices, setAsShotGains, setCameraColorMatrix, setCameraXyz, setImageSize } from './ops';
 import { cropFracFromOps } from './crop';
@@ -39,6 +40,10 @@ export class Pipeline {
   // OETF'd rgba16uint storage texture. The 8-bit path uses exportBlitPipeline
   // + canvas; 16-bit needs a u16 source the canvas can't produce.
   private readonly export16Pipeline: GPUComputePipeline;
+  // 2x2 box-average halving for export downscale (case #5): exportImage
+  // pyramids with this until within 2x of the export size so a 60MP->1080
+  // export never does one giant bilinear leap.
+  private readonly downscalePipeline: GPUComputePipeline;
 
   private readonly levelsBuffer: GPUBuffer;
   private readonly cfaBuffer: GPUBuffer;
@@ -131,6 +136,10 @@ export class Pipeline {
     this.export16Pipeline = device.createComputePipeline({
       layout: 'auto',
       compute: { module: device.createShaderModule({ code: export16Shader }), entryPoint: 'main' },
+    });
+    this.downscalePipeline = device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: device.createShaderModule({ code: downscaleShader }), entryPoint: 'main' },
     });
 
     this.levelsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -560,6 +569,39 @@ export class Pipeline {
     this.displayTexture = source;
     this.device.queue.writeBuffer(this.cropBlitUniform, 0, new Float32Array([cropFrac[0], cropFrac[1], 0, 0]));
 
+    // Box-filter pyramid (case #5): halve with exact 2x2 box-averages until the
+    // remaining reduction is <= 2x, then the blit/export16 passes do that final
+    // step. Every source texel contributes equally (area-average), where one
+    // bilinear 8x leap smears fine detail and phase-shifts the mean. No halving
+    // for longEdge null (scale 1) -- tw/th equal the source.
+    const intermediates: GPUTexture[] = [];
+    let downSrc = source;
+    let dw = srcW, dh = srcH;
+    while (Math.max(dw, dh) > Math.max(2, Math.max(tw, th) * 2)) {
+      const nw = Math.max(1, Math.ceil(dw / 2));
+      const nh = Math.max(1, Math.ceil(dh / 2));
+      const t = this.device.createTexture({
+        size: [nw, nh],
+        format: 'rgba16float',
+        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+      });
+      const bg = this.device.createBindGroup({
+        layout: this.downscalePipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: downSrc.createView() },
+          { binding: 1, resource: t.createView() },
+        ],
+      });
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(this.downscalePipeline);
+      pass.setBindGroup(0, bg);
+      pass.dispatchWorkgroups(Math.ceil(nw / 8), Math.ceil(nh / 8));
+      pass.end();
+      intermediates.push(t);
+      downSrc = t;
+      dw = nw; dh = nh;
+    }
+
     // 16-bit path: compute pass applies the OETF and writes u16 to a storage
     // texture; the encoders wrap it into a real 16-bit PNG/TIFF.
     if (opts.bitDepth === 16 && opts.format !== 'jpeg') {
@@ -571,7 +613,7 @@ export class Pipeline {
       const bindGroup = this.device.createBindGroup({
         layout: this.export16Pipeline.getBindGroupLayout(0),
         entries: [
-          { binding: 0, resource: source.createView() },
+          { binding: 0, resource: downSrc.createView() },
           { binding: 1, resource: this.blitSampler },
           { binding: 2, resource: { buffer: this.cropBlitUniform } },
           { binding: 3, resource: target.createView() },
@@ -604,6 +646,7 @@ export class Pipeline {
       readBuffer.unmap();
       target.destroy();
       readBuffer.destroy();
+      intermediates.forEach((t) => t.destroy());
       const bytes = opts.format === 'tiff' ? encodeTiff16(out, tw, th) : await encodePng16(out, tw, th);
       return new Blob([bytes], { type: opts.format === 'tiff' ? 'image/tiff' : 'image/png' });
     }
@@ -617,7 +660,7 @@ export class Pipeline {
     const blitBindGroup = this.device.createBindGroup({
       layout: this.exportBlitPipeline.getBindGroupLayout(0),
       entries: [
-        { binding: 0, resource: source.createView() },
+        { binding: 0, resource: downSrc.createView() },
         { binding: 1, resource: this.blitSampler },
         { binding: 2, resource: { buffer: this.cropBlitUniform } },
       ],
@@ -674,6 +717,7 @@ export class Pipeline {
     );
     target.destroy();
     readBuffer.destroy();
+    intermediates.forEach((t) => t.destroy());
     return blob;
   }
 
