@@ -99,8 +99,10 @@ const grainSizeValue = document.querySelector<HTMLOutputElement>('#grain-size-va
 const grainRoughnessValue = document.querySelector<HTMLOutputElement>('#grain-roughness-value')!;
 const lightleakAmountSlider = document.querySelector<HTMLInputElement>('#lightleak-amount')!;
 const lightleakHueSlider = document.querySelector<HTMLInputElement>('#lightleak-hue')!;
+const lightleakFadeSlider = document.querySelector<HTMLInputElement>('#lightleak-fade')!;
 const lightleakAmountValue = document.querySelector<HTMLOutputElement>('#lightleak-amount-value')!;
 const lightleakHueValue = document.querySelector<HTMLOutputElement>('#lightleak-hue-value')!;
+const lightleakFadeValue = document.querySelector<HTMLOutputElement>('#lightleak-fade-value')!;
 const frameStyleSelect = document.querySelector<HTMLSelectElement>('#frame-style')!;
 const cropAspectSelect = document.querySelector<HTMLSelectElement>('#crop-aspect')!;
 const rotateCcwBtn = document.querySelector<HTMLButtonElement>('#rotate-ccw')!;
@@ -306,6 +308,7 @@ const ALL_SLIDERS: SliderConfig[] = [
   // Light leak -- 0..100 sliders, amount 0 off, color 0 = warm (classic).
   { slider: lightleakAmountSlider, output: lightleakAmountValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: lightleakHueSlider, output: lightleakHueValue, neutral: 0, format: (v) => formatSigned(v) },
+  { slider: lightleakFadeSlider, output: lightleakFadeValue, neutral: 0, format: (v) => formatSigned(v) },
   // B&W mix sliders -- only live while Treatment is Black & White (the bw op
   // is emitted only then), but they share the paint/commit loop like the rest.
   { slider: bwMixSliders.red, output: bwMixValues.red, neutral: 0, format: (v) => formatSigned(v) },
@@ -536,6 +539,7 @@ function readLightleakParams(): LightleakParams {
   return {
     amount: Number(lightleakAmountSlider.value),
     hue: Number(lightleakHueSlider.value),
+    fade: Number(lightleakFadeSlider.value),
   };
 }
 
@@ -858,6 +862,7 @@ function applyOpsToSliders(ops: Op[], cameraKey?: string): void {
   grainRoughnessSlider.value = String(grainOp?.roughness ?? 50);
   lightleakAmountSlider.value = String(lightleakOp?.amount ?? 0);
   lightleakHueSlider.value = String(lightleakOp?.hue ?? 0);
+  lightleakFadeSlider.value = String(lightleakOp?.fade ?? 0);
   cropAspectSelect.value = cropOp?.aspect ?? 'original';
   cropRotate90 = cropOp?.rotate90 ?? 0;
   straightenSlider.value = String(cropOp?.angle ?? 0);

@@ -10,6 +10,7 @@ import demosaicShader from './src/shaders/demosaic.wgsl?raw';
 import { packCfa6, shiftCfa6 } from './src/gpu/uniforms';
 import { buildToneLuts, LOG_MIN, LOG_MAX, logToNorm, sampleToneLut } from './src/gpu/tone';
 import { effectiveMask, maskDims, maskToBytes, maskToOp, paintStroke } from './src/gpu/dodge';
+import { setGrainSeed } from './src/gpu/grain';
 
 const out = document.getElementById('out')!;
 const log = (s: string) => { out.textContent += '\n' + s; console.log(s); };
@@ -776,6 +777,67 @@ async function main() {
     log(`FILM-STRIP PROOF row20 (mark): runs=${runs20.map(([a, b]) => `${a}-${b}`).join(', ') || 'none'} (expect 1 run @~1496..1504)`);
     log(`FILM-STRIP PROOF row5 (rebate): runs=${runs5.length} (expect 0)`);
     log(`FILM-STRIP FILTER: ${fsOk ? 'PASS' : 'FAIL'} -- vendored texture drives the 135 band (holes=${holes}==11:${holes === 11}, mark@1500:${mark}, rebate-clean:${clean5})`);
+
+    // 11) LEAK TEXTURE PROOF (case #8 -- procedural gradient blob "fake"). The
+    // light-leak op now samples three VENDORED rgba8unorm textures
+    // (public/leaks/leak-{0,1,2}.png, committed -- no runtime network), adds
+    // their linear additive bytes, rotated so each texture's TOP (entry edge)
+    // aligns with the per-photo edge (seedU % 4). Discriminators baked into
+    // the assets:
+    //   tex0 carries a 32x32 bright-R MARKER block at (512,300) texture-space.
+    //   With seed 0.01 -> seedU32(0.01)=167772, edge 0 (top), the marker maps
+    //   to frame (1024,600) -- frame pixel = 2x texture pixel. tex2 (cool) has
+    //   NO marker. So:
+    //     warm (hue 0, only tex0)  -> R jumps at (1024,600)
+    //     cool (hue 100, only tex2) -> no jump (proves BOTH texture sampling
+    //          AND the hue -> weight blend)
+    //   And the fade envelope: at frame (1024,760) (texture y~380, where tex0
+    //   still has light), fade 0 adds the leak while fade 100 (hard stop by
+    //   LEAK_WIDTH=0.35) kills it -- the leak is visibly darker with fade 100.
+    // A procedural shader could never produce a local R hotspot at one exact
+    // pixel, nor have it vanish when hue goes 0 -> 100.
+    setGrainSeed(0.01); // pins edge 0 for every render below
+    const leakPix = async (tex: GPUTexture, x: number, y: number) => {
+      const lW = tex.width;
+      const lBPR = Math.ceil((lW * 8) / 256) * 256;
+      const lBuf = wbDev.createBuffer({ size: lBPR, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const le = wbDev.createCommandEncoder();
+      le.copyTextureToBuffer({ texture: tex, origin: [0, y] }, { buffer: lBuf, bytesPerRow: lBPR }, { width: lW, height: 1 });
+      wbDev.queue.submit([le.finish()]);
+      await lBuf.mapAsync(GPUMapMode.READ);
+      const l8 = new Uint8Array(lBuf.getMappedRange());
+      const o = x * 8;
+      const rgb = [
+        HALF_LUT[l8[o] | (l8[o + 1] << 8)],
+        HALF_LUT[l8[o + 2] | (l8[o + 3] << 8)],
+        HALF_LUT[l8[o + 4] | (l8[o + 5] << 8)],
+      ];
+      lBuf.unmap(); lBuf.destroy();
+      return rgb;
+    };
+    const leakOps = (leak: unknown) => [...synOps, leak] as never;
+    const MK = { kind: 'lightleak', amount: 100, hue: 0, fade: 0 } as never; // warm -> tex0 (marker)
+    const CK = { kind: 'lightleak', amount: 100, hue: 100, fade: 0 } as never; // cool -> tex2 (no marker)
+    const F0 = { kind: 'lightleak', amount: 100, hue: 0, fade: 0 } as never;
+    const F100 = { kind: 'lightleak', amount: 100, hue: 0, fade: 100 } as never;
+    pipe3.render(synOps as never);
+    const baseR = (await leakPix((pipe3 as any).displayTexture as GPUTexture, 1024, 600))[0];
+    pipe3.render(leakOps(MK));
+    const warm = await leakPix((pipe3 as any).displayTexture as GPUTexture, 1024, 600);
+    pipe3.render(leakOps(CK));
+    const cool = await leakPix((pipe3 as any).displayTexture as GPUTexture, 1024, 600);
+    pipe3.render(leakOps(F0));
+    const f0 = await leakPix((pipe3 as any).displayTexture as GPUTexture, 1024, 760);
+    pipe3.render(leakOps(F100));
+    const f100 = await leakPix((pipe3 as any).displayTexture as GPUTexture, 1024, 760);
+    const dWarm = warm[0] - baseR, dCool = cool[0] - baseR, dFade = f0[0] - f100[0];
+    log(`LEAK PROOF base R@(1024,600)=${baseR.toFixed(3)}, warm R=${warm[0].toFixed(3)} (d=${dWarm.toFixed(3)}), cool R=${cool[0].toFixed(3)} (d=${dCool.toFixed(3)})`);
+    log(`LEAK PROOF fade @(1024,760): fade0 R=${f0[0].toFixed(3)}, fade100 R=${f100[0].toFixed(3)} (d=${dFade.toFixed(3)})`);
+    const markerOk = dWarm > 0.4; // tex0's bright-R marker is sampled (texture-driven)
+    const hueOk = dCool < 0.15; // hue 100 -> tex2, marker gone (weight blend works)
+    const fadeOk = dFade > 0.08; // fade 100 visibly kills the leak's reach
+    const leakOk = markerOk && hueOk && fadeOk;
+    log(`LEAK FILTER: ${leakOk ? 'PASS' : 'FAIL'} -- vendored textures drive the leak (marker:${markerOk}, hue-blend:${hueOk}, fade:${fadeOk})`);
   } catch (e) {
     log('SYNTH test failed: ' + (e as Error).message);
   }

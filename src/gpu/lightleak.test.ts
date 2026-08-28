@@ -3,14 +3,16 @@ import {
   isNeutralLightleak,
   leakAdd,
   leakColor,
+  leakFade,
+  leakWeights,
   packLightleak,
   edgeDistance,
   type LightleakParams,
 } from './lightleak';
 import { seedU32 } from './grain';
 
-const ON = { amount: 80, hue: 0 } satisfies LightleakParams;
-const OFF = { amount: 0, hue: 0 } satisfies LightleakParams;
+const ON = { amount: 80, hue: 0, fade: 0 } satisfies LightleakParams;
+const OFF = { amount: 0, hue: 0, fade: 0 } satisfies LightleakParams;
 
 describe('lightleak', () => {
   it('is neutral at amount 0: adds exactly zero light', () => {
@@ -37,12 +39,12 @@ describe('lightleak', () => {
     const nearSum = leakAdd(...near, ON, seedU32(0.5)).reduce((s, v) => s + v, 0);
     const farSum = leakAdd(...far, ON, seedU32(0.5)).reduce((s, v) => s + v, 0);
     expect(nearSum).toBeGreaterThan(farSum);
-    expect(farSum).toBeLessThan(1e-4); // past the leak width it adds ~nothing
+    expect(farSum).toBeLessThan(1e-4); // past the texture width it adds ~nothing
   });
 
   it('is monotonic in amount (more leak = more added light)', () => {
-    const weak = leakAdd(0.2, 0.5, { amount: 40, hue: 0 }, seedU32(0.5)).reduce((s, v) => s + v, 0);
-    const strong = leakAdd(0.2, 0.5, { amount: 100, hue: 0 }, seedU32(0.5)).reduce((s, v) => s + v, 0);
+    const weak = leakAdd(0.2, 0.5, { amount: 40, hue: 0, fade: 0 }, seedU32(0.5)).reduce((s, v) => s + v, 0);
+    const strong = leakAdd(0.2, 0.5, { amount: 100, hue: 0, fade: 0 }, seedU32(0.5)).reduce((s, v) => s + v, 0);
     expect(strong).toBeGreaterThan(weak);
     expect(weak).toBeGreaterThan(0);
   });
@@ -54,6 +56,44 @@ describe('lightleak', () => {
     expect(cool[2]).toBeGreaterThan(cool[0]); // cyan: b > r
   });
 
+  it('leakWeights picks a single texture at the extremes, blends mid hues', () => {
+    expect(leakWeights(0)).toEqual([1, 0, 0]); // warm tex0
+    expect(leakWeights(100)).toEqual([0, 0, 1]); // cool tex2
+    const mid = leakWeights(50);
+    expect(mid[1]).toBeCloseTo(1, 6); // mid tex1
+    expect(mid[0]).toBeCloseTo(0, 6);
+    expect(mid[2]).toBeCloseTo(0, 6);
+    const mix = leakWeights(25); // half warm, half mid
+    expect(mix[0]).toBeCloseTo(0.5, 6);
+    expect(mix[1]).toBeCloseTo(0.5, 6);
+    expect(mix[2]).toBeCloseTo(0, 6);
+    for (const h of [0, 25, 50, 75, 100]) {
+      const s = leakWeights(h).reduce((a, b) => a + b, 0);
+      expect(s).toBeCloseTo(1, 6); // weights always sum to 1
+    }
+  });
+
+  it('fade scales a distance envelope: 0 = full texture, 100 = dies by LEAK_WIDTH', () => {
+    // fade 0 -> envelope is 1 everywhere (the texture's own falloff governs).
+    expect(leakFade(0, 0.0)).toBe(1);
+    expect(leakFade(0, 0.6)).toBe(1);
+    // fade 100 -> envelope hits ~0 by LEAK_WIDTH (0.35).
+    expect(leakFade(100, 0.0)).toBe(1);
+    expect(leakFade(100, 0.1)).toBeGreaterThan(leakFade(100, 0.3));
+    expect(leakFade(100, 0.36)).toBeLessThan(1e-4);
+    // More fade = less leak at the same mid distance.
+    expect(leakFade(100, 0.2)).toBeLessThan(leakFade(0, 0.2));
+  });
+
+  it('fade reduces the added light at mid distance without touching the edge', () => {
+    const edge = seedU32(0.5) % 4;
+    const mid: [number, number] = edge === 0 ? [0.5, 0.2] : edge === 1 ? [0.8, 0.5] : edge === 2 ? [0.5, 0.8] : [0.2, 0.5];
+    const soft = leakAdd(...mid, { amount: 80, hue: 0, fade: 100 }, seedU32(0.5)).reduce((s, v) => s + v, 0);
+    const full = leakAdd(...mid, { amount: 80, hue: 0, fade: 0 }, seedU32(0.5)).reduce((s, v) => s + v, 0);
+    expect(full).toBeGreaterThan(soft);
+    expect(full).toBeGreaterThan(0);
+  });
+
   it('edgeDistance is 0 on the chosen edge, 1 on the far side', () => {
     expect(edgeDistance(0, 0.5, 0.0)).toBe(0); // top
     expect(edgeDistance(0, 0.5, 1.0)).toBe(1);
@@ -63,8 +103,8 @@ describe('lightleak', () => {
     expect(edgeDistance(3, 0.0, 0.5)).toBe(0); // left
   });
 
-  it('packs 8 f32s (3 values + 5 pad) matching the Lightleak struct', () => {
-    const packed = packLightleak({ amount: 60, hue: 40 }, 0.25);
-    expect(Array.from(packed)).toEqual([60, 40, 0.25, 0, 0, 0, 0, 0]);
+  it('packs 8 f32s (4 values + 4 pad) matching the Lightleak struct', () => {
+    const packed = packLightleak({ amount: 60, hue: 40, fade: 30 }, 0.25);
+    expect(Array.from(packed)).toEqual([60, 40, 30, 0.25, 0, 0, 0, 0]);
   });
 });

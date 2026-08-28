@@ -86,12 +86,15 @@ export class Pipeline {
   // sRGB -> linear, matching the old procedural colors.
   private readonly filmStripTexture: GPUTexture;
   private readonly filmStripSampler: GPUSampler;
+  private readonly leakTextures: GPUTexture[];
+  private readonly leakSampler: GPUSampler;
 
   private constructor(
     private readonly device: GPUDevice,
     private readonly context: GPUCanvasContext,
     private readonly format: GPUTextureFormat,
     filmStripTexture: GPUTexture,
+    leakTextures: GPUTexture[],
   ) {
     this.unpackPipeline = device.createComputePipeline({
       layout: 'auto',
@@ -157,6 +160,8 @@ export class Pipeline {
     this.dodgeMaskSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
     this.filmStripTexture = filmStripTexture;
     this.filmStripSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
+    this.leakTextures = leakTextures;
+    this.leakSampler = device.createSampler({ magFilter: 'linear', minFilter: 'linear' });
   }
 
   static async create(canvas: HTMLCanvasElement): Promise<Pipeline> {
@@ -185,7 +190,8 @@ export class Pipeline {
     }
     const format = navigator.gpu.getPreferredCanvasFormat();
     context.configure({ device, format, alphaMode: 'opaque' });
-    return new Pipeline(device, context, format, await loadFilmStrip(device));
+    const [filmStrip, leaks] = await Promise.all([loadFilmStrip(device), loadLightLeaks(device)]);
+    return new Pipeline(device, context, format, filmStrip, leaks);
   }
 
   // (Re)creates the canvas surface. The develop module hides its canvas
@@ -369,6 +375,16 @@ export class Pipeline {
         entries.push(
           { binding: 3, resource: this.filmStripTexture.createView() },
           { binding: 4, resource: this.filmStripSampler },
+        );
+      }
+      // Light leak carries four: the three vendored leak textures + one shared
+      // linear sampler (lightleak.wgsl binding 3/4/5/6).
+      if (renderer.kind === 'lightleak') {
+        entries.push(
+          { binding: 3, resource: this.leakTextures[0].createView() },
+          { binding: 4, resource: this.leakTextures[1].createView() },
+          { binding: 5, resource: this.leakTextures[2].createView() },
+          { binding: 6, resource: this.leakSampler },
         );
       }
       const bindGroup = this.device.createBindGroup({
@@ -722,6 +738,7 @@ export class Pipeline {
     this.cropBlitUniform.destroy();
     this.dodgeMaskTexture?.destroy();
     this.filmStripTexture.destroy();
+    for (const t of this.leakTextures) t.destroy();
     // Samplers have no destroy() (device-lifetime objects) -- the texture owns
     // the memory.
   }
@@ -738,20 +755,37 @@ export class Pipeline {
 // came out pure black). writeTexture is the deterministic path the rest of the
 // app already uses.
 async function loadFilmStrip(device: GPUDevice): Promise<GPUTexture> {
+  return loadPngTexture(device, '/frames/135-strip.png', 'rgba8unorm-srgb', 'film strip');
+}
+
+// The three vendored light-leak textures. rgba8unorm (NOT -srgb): the bytes
+// are linear additive values, so the shader adds `texture * gain` straight to
+// linear RGB. A missing leak texture falls back to a 1x1 black texel, which
+// samples as 0 -- the leak just adds nothing for that asset.
+async function loadLightLeaks(device: GPUDevice): Promise<GPUTexture[]> {
+  return Promise.all(['leak-0', 'leak-1', 'leak-2'].map((n) => loadPngTexture(device, `/leaks/${n}.png`, 'rgba8unorm', 'light leak')));
+}
+
+// Decode a committed PNG through a 2D canvas and upload via writeTexture --
+// NOT copyExternalImageToTexture, which silently produced an all-zero texture
+// in this headless-Chrome/WebGPU combo (the vendoring rule: these are build
+// assets, not runtime network calls for user data). 1x1 black fallback keeps
+// the op valid if an asset is ever missing.
+async function loadPngTexture(device: GPUDevice, url: string, format: GPUTextureFormat, label: string): Promise<GPUTexture> {
   try {
-    const res = await fetch('/frames/135-strip.png');
+    const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const bitmap = await createImageBitmap(await res.blob());
     const c = document.createElement('canvas');
     c.width = bitmap.width;
     c.height = bitmap.height;
     const cx = c.getContext('2d');
-    if (!cx) throw new Error('no 2d context for film strip decode');
+    if (!cx) throw new Error(`no 2d context for ${label} decode`);
     cx.drawImage(bitmap, 0, 0);
     const pixels = cx.getImageData(0, 0, bitmap.width, bitmap.height).data;
     const tex = device.createTexture({
       size: [bitmap.width, bitmap.height],
-      format: 'rgba8unorm-srgb',
+      format,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
     device.queue.writeTexture(
@@ -762,10 +796,10 @@ async function loadFilmStrip(device: GPUDevice): Promise<GPUTexture> {
     );
     return tex;
   } catch (err) {
-    console.error('[gpu] film strip load failed, using 1x1 fallback:', err);
+    console.error(`[gpu] ${label} load failed, using 1x1 fallback:`, err);
     const tex = device.createTexture({
       size: [1, 1],
-      format: 'rgba8unorm-srgb',
+      format,
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
     device.queue.writeTexture({ texture: tex }, new Uint8Array([0, 0, 0, 255]), {}, [1, 1]);

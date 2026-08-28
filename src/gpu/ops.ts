@@ -237,7 +237,7 @@ export const OP_RENDERERS: OpRenderer[] = [
     uniformSize: 32, // struct Lightleak { 3 f32 + 5 pad }
     packParams: (ops) => {
       const op = ops.find(isLightleakOp);
-      const p: LightleakParams = op ?? { amount: 0, hue: 0 };
+      const p: LightleakParams = op ?? { amount: 0, hue: 0, fade: 0 };
       return packLightleak(p, getGrainSeed());
     },
   },
