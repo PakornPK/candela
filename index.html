@@ -770,29 +770,31 @@
       #contact-grid {
         display: grid;
         grid-template-columns: repeat(6, 1fr);
+        grid-auto-rows: auto;
         gap: 12px;
         max-width: 1160px;
         margin: 0 auto;
       }
       .contact-frame {
         position: relative;
-        aspect-ratio: 3 / 2;
         background: var(--thumb-bg);
         border: 1px solid var(--panel-border);
         border-radius: 3px;
         overflow: hidden;
         cursor: pointer;
+        min-height: 72px; /* floor while the thumbnail loads (before its
+                             natural aspect sizes the cell) */
       }
       .contact-frame:hover {
         border-color: var(--accent);
       }
       .contact-frame img {
+        /* height:auto + display:block = the cell sizes to the frame's TRUE
+           aspect ratio (a 1:1 shows square, 16:9 wide). A proofing sheet
+           forced into 3:2 boxes (the old aspect-ratio:3/2 + object-fit:cover)
+           hid each shot's real composition -- useless for culling. */
         width: 100%;
-        height: 100%;
-        /* contain, not cover: a proofing sheet must show the WHOLE frame --
-           cover crops non-3:2 compositions so you can't judge the shot. The
-           dark cell background letterboxes the rest. */
-        object-fit: contain;
+        height: auto;
         display: block;
       }
       .contact-frame-num {
