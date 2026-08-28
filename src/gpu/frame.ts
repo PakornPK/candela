@@ -24,11 +24,12 @@ export const FRAME_BORDER: Record<FrameStyle, number> = {
   '120': 0.05,
   'print': 0.1,
 };
-// NOTE (case #4): '135' sprocket holes / edge markings are now a vendored
-// film-strip TEXTURE (public/frames/135-strip.png) sampled by frame.wgsl, not
-// procedural geometry -- FRAME_HOLE / inSprocketHole were removed with the old
-// procedural holes. The texture's irregular pattern is what makes it read as
-// real film instead of "ปลอมจัด".
+// NOTE (case #4 -> now): '135' sprocket holes are a vendored film-strip TEXTURE
+// (public/frames/135-strip.png) sampled by frame.wgsl, not procedural geometry.
+// The texture is a clean REGULAR grid of rounded holes -- case #4's irregular +
+// grainy v1 read as messy "dots" ("เห็นมีหลายจุด"), so it went back to a tidy
+// repeating pattern. FRAME_HOLE / inSprocketHole were removed with the old
+// procedural holes.
 
 export function isNeutralFrame(style: FrameStyle): boolean {
   return style === 'none';

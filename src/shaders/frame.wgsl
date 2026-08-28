@@ -11,7 +11,6 @@
 //
 // ponytail: nearest-neighbor downscale (the op chain has no sampler binding --
 // textureLoad only) is fine at a 5-10% shrink; box-average it if jitter shows.
-// Holes are plain rects, no rounding; widths are fixed per style.
 
 struct Frame {
   style: f32,      // 0/1/2/3
@@ -88,11 +87,10 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
 
-  // Rebate band. '135' (style 0) samples a real film-strip edge texture
-  // (irregular sprocket holes + edge markings + grain -- case #4, the old
-  // procedural rects looked "ปลอมจัด"). The band maps to the strip's top /
-  // bottom halves; the photo itself is drawn by the image branch above, never
-  // by the texture. 120 / print keep the plain matte.
+  // Rebate band. '135' (style 0) samples the film-strip edge texture: a clean
+  // regular grid of sprocket holes (public/frames/135-strip.png). The band maps
+  // to the strip's top / bottom halves; the photo itself is drawn by the image
+  // branch above, never by the texture. 120 / print keep the plain matte.
   var color = rebateColor(style);
   if (style == 0u) {
     let px2 = (nx - cropL) / cfx;      // 0..1 across the crop content
