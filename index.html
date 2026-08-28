@@ -464,7 +464,8 @@
         gap: 6px;
         margin: 6px 0;
       }
-      .crop-rotate-row button {
+      .crop-rotate-row button,
+      #crop-toggle {
         flex: 1;
         background: none;
         border: 1px solid var(--panel-border);
@@ -475,7 +476,8 @@
         font: inherit;
         font-size: 12px;
       }
-      .crop-rotate-row button:hover {
+      .crop-rotate-row button:hover,
+      #crop-toggle:hover {
         background: #2f2f34;
       }
       .brush-row {
@@ -1169,6 +1171,9 @@
           </details>
           <details class="panel-section" open>
             <summary>Crop</summary>
+            <div class="crop-rotate-row" style="margin-bottom: 6px">
+              <button id="crop-toggle" type="button">Crop</button>
+            </div>
             <label class="adjust-label" for="crop-aspect">Aspect
               <select id="crop-aspect">
                 <option value="original" selected>Original</option>

@@ -218,6 +218,14 @@ export class Pipeline {
     this.context.configure({ device: this.device, format: this.format, alphaMode: 'opaque' });
   }
 
+  // The canvas blit's crop rect. Identity [0,0,1,1] = the FULL image (the crop
+  // workbench); a crop region = the loupe showing just the crop (LrC's "Done"
+  // refit -- tone/WB edits then continue on the cropped view). render() reads
+  // this every blit, so main.ts just writes it on crop-mode toggles / changes.
+  setCanvasRect(rect: [number, number, number, number]): void {
+    this.device.queue.writeBuffer(this.canvasBlitUniform, 0, new Float32Array(rect));
+  }
+
   // Destroys prior textures before uploading the new file's data — this is
   // what keeps GPU memory stable across repeated file loads.
   load(raw: DecodedRaw): void {

@@ -22,7 +22,7 @@ import { isNeutralPresence, type PresenceParams } from './gpu/presence';
 import { isNeutralVignette, type VignetteParams } from './gpu/vignette';
 import { isNeutralGrain, seedFromPath, setGrainSeed, type GrainParams } from './gpu/grain';
 import { isNeutralLightleak, type LightleakParams } from './gpu/lightleak';
-import { cropHandleAt, cropOverlayRect, dragCropRect, isFreeformCrop, isNeutralCrop, type CropHandleMode, type CropParams } from './gpu/crop';
+import { cropHandleAt, cropOverlayRect, dragCropRect, isFreeformCrop, cropRegion, isNeutralCrop, type CropHandleMode, type CropParams } from './gpu/crop';
 import { isNeutralGeometry, type GeometryParams } from './gpu/geometry';
 import { effectiveMask, maskDims, maskHasPaint, maskToBytes, maskToOp, maskToOverlay, opToMask, paintStroke, type DodgeBurnParams } from './gpu/dodge';
 import { BW_FILTERS, BW_TONES, type BwFilterId } from './gpu/bw';
@@ -107,6 +107,7 @@ const lightleakHueValue = document.querySelector<HTMLOutputElement>('#lightleak-
 const lightleakFadeValue = document.querySelector<HTMLOutputElement>('#lightleak-fade-value')!;
 const frameStyleSelect = document.querySelector<HTMLSelectElement>('#frame-style')!;
 const cropAspectSelect = document.querySelector<HTMLSelectElement>('#crop-aspect')!;
+const cropToggleBtn = document.querySelector<HTMLButtonElement>('#crop-toggle')!;
 const rotateCcwBtn = document.querySelector<HTMLButtonElement>('#rotate-ccw')!;
 const rotateCwBtn = document.querySelector<HTMLButtonElement>('#rotate-cw')!;
 const straightenSlider = document.querySelector<HTMLInputElement>('#straighten')!;
@@ -134,6 +135,16 @@ let cropRotate90 = 0;
 // in the crop op as x/y/w/h; restored from history by applyOpsToSliders.
 let cropFreeform: { x: number; y: number; w: number; h: number } | null = null;
 let cropDrag: { mode: CropHandleMode; startX: number; startY: number; orig: { x: number; y: number; w: number; h: number } } | null = null;
+// LrC-style crop mode: true = the crop workbench (full image + frame overlay);
+// false = "Done" -- the loupe refits to the crop (canvas buffer = the mask
+// bbox, blit samples cropRegion) and later tone/WB edits continue on the
+// cropped view. The Crop/Done button toggles it; the crop controls (aspect,
+// rotate, straighten) re-enter the workbench automatically.
+let cropModeActive = false;
+function setCropMode(active: boolean): void {
+  cropModeActive = active;
+  cropToggleBtn.textContent = active ? 'Done' : 'Crop';
+}
 const bwTreatmentSelect = document.querySelector<HTMLSelectElement>('#bw-treatment')!;
 const bwControls = document.querySelector<HTMLDivElement>('#bw-controls')!;
 const bwFilterSelect = document.querySelector<HTMLSelectElement>('#bw-filter')!;
@@ -288,6 +299,8 @@ interface SliderConfig {
   output: HTMLOutputElement;
   neutral: number;
   format: (v: number) => string;
+  // A crop-tool control (straighten): dragging re-opens the crop workbench.
+  entersCrop?: boolean;
 }
 const ALL_SLIDERS: SliderConfig[] = [
   { slider: exposureSlider, output: exposureValue, neutral: 0, format: (v) => formatSigned(v, 2) },
@@ -331,8 +344,9 @@ const ALL_SLIDERS: SliderConfig[] = [
   { slider: regionDarksSlider, output: regionDarksValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: regionShadowsSlider, output: regionShadowsValue, neutral: 0, format: (v) => formatSigned(v) },
   // Crop straighten -- the aspect select + rotate buttons are separate (mode
-  // switches, not sliders); only the angle is a slider.
-  { slider: straightenSlider, output: straightenValue, neutral: 0, format: (v) => `${formatSigned(v, 1)}°` },
+  // switches, not sliders); only the angle is a slider. entersCrop: dragging
+  // it re-opens the crop workbench (straighten is a crop-tool control).
+  { slider: straightenSlider, output: straightenValue, neutral: 0, format: (v) => `${formatSigned(v, 1)}°`, entersCrop: true },
   // Transform (geometry) -- scale's neutral is 100 (1:1), the rest are 0.
   { slider: geometryVerticalSlider, output: geometryVerticalValue, neutral: 0, format: (v) => formatSigned(v) },
   { slider: geometryHorizontalSlider, output: geometryHorizontalValue, neutral: 0, format: (v) => formatSigned(v) },
@@ -1320,8 +1334,38 @@ async function init(): Promise<void> {
     // The brush mask lives CPU-side (authoritative); push any change to the GPU
     // before the render dispatches the dodgeBurn pass (which samples it).
     syncDodgeMaskToGPU();
+    const W = lastDecoded?.width ?? canvas.width;
+    const H = lastDecoded?.height ?? canvas.height;
+    if (cropModeActive) {
+      // Crop workbench: full image at source size, blit identity, frame overlay.
+      ensureCanvasSize(W, H);
+      pipeline.setCanvasRect([0, 0, 1, 1]);
+    } else {
+      // Done: loupe refits to the crop -- canvas buffer = the mask bbox, blit
+      // samples cropRegion, so edits continue on the cropped view. A neutral
+      // crop is [0,0,1,1] = the full source (no visual change).
+      const [rx, ry, rw, rh] = cropRegion(ops, W, H);
+      ensureCanvasSize(Math.max(1, Math.round(rw * W)), Math.max(1, Math.round(rh * H)));
+      pipeline.setCanvasRect([rx, ry, rw, rh]);
+    }
     pipeline.render(ops);
-    drawCropOverlay(readCropParams());
+    if (cropModeActive) {
+      drawCropOverlay(readCropParams()); // unhides the overlay
+    } else {
+      cropOverlay.hidden = true;
+    }
+  }
+
+  // Resizes the canvas drawing buffer (guarded -- setting width/height resets
+  // the buffer even to the same value) and re-creates the WebGPU surface at the
+  // new size. Chrome ties the drawing buffer to the canvas size at configure()
+  // time, so the blit target must be reconfigured whenever the buffer changes.
+  function ensureCanvasSize(w: number, h: number): void {
+    if (canvas.width !== w || canvas.height !== h) {
+      canvas.width = w;
+      canvas.height = h;
+      pipeline.show();
+    }
   }
 
   const virtualizer = new Virtualizer<HTMLDivElement, HTMLDivElement>({
@@ -1730,6 +1774,8 @@ async function init(): Promise<void> {
     }
     const start = performance.now();
     const promise = (async () => {
+      // Fresh photo opens in the clean loupe, not a stale crop workbench.
+      setCropMode(false);
       const file = await record.handle.getFile();
       const fileBytes = await file.arrayBuffer();
       if (requestId !== openRequestId) return false; // superseded during file read
@@ -1909,6 +1955,8 @@ async function init(): Promise<void> {
       // so the mask texture must re-upload on drag -- renderOps only re-uploads
       // when dodgeMaskDirty is set, and the slider alone doesn't paint.
       if (cfg.slider === dodgeOpacitySlider || cfg.slider === dodgeFeatherSlider) dodgeMaskDirty = true;
+      // Straighten is a crop-tool control: dragging it re-opens the workbench.
+      if (cfg.entersCrop) setCropMode(true);
       paintSliders();
       onSliderInput();
     });
@@ -1968,20 +2016,32 @@ async function init(): Promise<void> {
   // Crop aspect is a discrete pick like profile; the rotate buttons step the
   // quarter-turn state. All three render + commit per change. Picking a preset
   // also drops any freeform drag rect (LrC re-snaps to a centered preset).
+  // The Crop/Done button toggles LrC-style crop mode: "Crop" opens the
+  // workbench (full image + frame), "Done" refits the loupe to the crop and
+  // editing continues on the cropped view. A pure view toggle -- no op change,
+  // so no history commit (the crop op was already committed when it moved).
+  cropToggleBtn.addEventListener('click', () => {
+    if (currentFileId === null) return;
+    setCropMode(!cropModeActive);
+    onSliderInput();
+  });
   cropAspectSelect.addEventListener('change', () => {
     cropFreeform = null;
+    setCropMode(true); // picking a preset re-opens the workbench
     onSliderInput();
     commitCurrentEdit();
   });
   rotateCcwBtn.addEventListener('click', () => {
     if (currentFileId === null) return;
     cropRotate90 = (cropRotate90 + 3) % 4;
+    setCropMode(true);
     onSliderInput();
     commitCurrentEdit();
   });
   rotateCwBtn.addEventListener('click', () => {
     if (currentFileId === null) return;
     cropRotate90 = (cropRotate90 + 1) % 4;
+    setCropMode(true);
     onSliderInput();
     commitCurrentEdit();
   });
