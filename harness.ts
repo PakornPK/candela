@@ -651,7 +651,9 @@ async function main() {
     };
     const isMag = (p: { r: number; g: number; b: number }) => p.r > 200 && p.b > 200 && p.g < 190;
     const isReb = (p: { r: number; g: number; b: number }) => p.r < 60 && p.g < 60 && p.b < 60;
-    const isHole = (p: { r: number; g: number; b: number }) => { const s = p.r + p.g + p.b; return s >= 300 && s <= 430; };
+    // Film band content at this (row,x): neither the magenta image nor pure
+    // rebate -- the real strip's holes/branding read as dark-red midtones here.
+    const isFilm = (p: { r: number; g: number; b: number }) => !isMag(p) && !isReb(p);
     // (a) crop only -> the whole export is magenta (no frame).
     const A = await renderImg([...synOps, cfCrop]);
     const Aok = isMag(cnum(A.im, A.W, 100)) && isMag(cnum(A.im, A.W, 700)) && isMag(cnum(A.im, A.W, 1400));
@@ -664,14 +666,14 @@ async function main() {
     const Bok = isReb(cnum(B.im, B.W, 5)) && isMag(cnum(B.im, B.W, 1000)) && isReb(cnum(B.im, B.W, 2043));
     log(`CROP-FRAME PROOF B (frame only): 5=${c(B.im, B.W, 5)} 1000=${c(B.im, B.W, 1000)} 2043=${c(B.im, B.W, 2043)} -> ${Bok ? 'rebate+magenta+rebate' : 'layout-wrong'}`);
     // (c) crop + frame -> the decisive layout (export 2048x1536, the crop
-    // rect): rebate [0,28], holes [28,65], rebate [65,92], image [92,1444],
-    // rebate [1444,1536] with holes [1471,1508].
+    // rect): rebate [0,28], film [28,65], rebate [65,92], image [92,1444],
+    // rebate [1444,1536] with film [1471,1508].
     const C = await renderImg([...synOps, cfCrop, cfFrame]);
     const Crows = [15, 46, 200, 700, 1200, 1500, 1520];
     log('CROP-FRAME PROOF C rows: ' + Crows.map((y) => `${y}:${c(C.im, C.W, y)}`).join(' '));
     const cC = Crows.map((y) => cnum(C.im, C.W, y));
-    const Cok = isReb(cC[0]) && isHole(cC[1]) && isMag(cC[2]) && isMag(cC[3]) && isMag(cC[4]) && isHole(cC[5]) && isReb(cC[6]);
-    log(`CROP-FRAME FILTER: ${Cok ? 'PASS' : 'FAIL'} -- frame wraps the crop rect (rebate+holes+magenta at expected export rows). Aok=${Aok} Bok=${Bok}`);
+    const Cok = isReb(cC[0]) && isFilm(cC[1]) && isMag(cC[2]) && isMag(cC[3]) && isMag(cC[4]) && isFilm(cC[5]) && isReb(cC[6]);
+    log(`CROP-FRAME FILTER: ${Cok ? 'PASS' : 'FAIL'} -- frame wraps the crop rect (rebate+film+magenta at expected export rows). Aok=${Aok} Bok=${Bok}`);
 
     // 9) CROP WORKBENCH PROOF (case #2 -- "crop/rotate zooms in"). The VIEW
     // (canvas blit [1,1]) shows the FULL texture, so a crop that bakes black
@@ -717,86 +719,105 @@ async function main() {
     log(`CROP WORKBENCH FILTER: ${wbOk ? 'PASS' : 'FAIL'} -- aspect-only crop keeps the full image in the view (black rows ${ctl.blackRows}/${dt.height}).`);
 
     // 10) FILM-STRIP PROOF (case #4 -- procedural sprockets "ปลอมจัด"). The
-    // '135' frame band now samples the VENDORED film-strip texture
-    // (public/frames/135-strip.png, committed -- no runtime network). On the
-    // 2048x2048 flat magenta the top rebate band (b=0.06, rows 0..123) maps to
-    // the strip's top 128 rows 1:1 in x and ~1:1 in y (frame row ~= strip row).
-    // Discriminators baked into the asset:
-    //   row 60 -> exactly 11 bright runs (the irregular holes, strip rows 38..90)
-    //   row 20 -> exactly 1 bright run centered ~x=1500 (the edge-code MARK,
-    //             strip rows 8..32; holes start at frame row ~37)
-    //   row 5  -> 0 bright runs (pure rebate, ~0.02 linear; grain is +/-5 sRGB)
-    // A procedural-rect frame would show a periodic grid, not these 11
-    // irregular runs; a missing texture would show all-rebate (0 runs).
-    const filmRow = async (tex: GPUTexture, y: number) => {
-      const fW = tex.width;
-      const fBPR = Math.ceil((fW * 8) / 256) * 256;
-      const fBuf = wbDev.createBuffer({ size: fBPR, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-      const fe = wbDev.createCommandEncoder();
-      fe.copyTextureToBuffer({ texture: tex, origin: [0, y] }, { buffer: fBuf, bytesPerRow: fBPR }, { width: fW, height: 1 });
-      wbDev.queue.submit([fe.finish()]);
-      await fBuf.mapAsync(GPUMapMode.READ);
-      const f8 = new Uint8Array(fBuf.getMappedRange());
-      const lums = new Float32Array(fW);
-      let fo = 0;
-      for (let x = 0; x < fW; x++) {
-        lums[x] = (HALF_LUT[f8[fo] | (f8[fo + 1] << 8)] + HALF_LUT[f8[fo + 2] | (f8[fo + 3] << 8)] + HALF_LUT[f8[fo + 4] | (f8[fo + 5] << 8)]) / 3;
-        fo += 8;
-      }
-      fBuf.unmap(); fBuf.destroy();
-      return lums;
+    // '135' frame band now samples the COMMITTED film-strip texture
+    // (public/frames/135-strip.png -- a real 35mm negative-scan edge downloaded
+    // from Unsplash, permissive license, no runtime network). Proof = the
+    // rendered band's linear pixels EQUAL the committed PNG's pixels, mirrored
+    // through the shader's exact uv mapping + sRGB decode + bilinear. A
+    // procedural shader can't reproduce the PNG's real grain/sprockets; a
+    // missing texture reads flat rebate.
+    const decodeImg = async (url: string) => {
+      const bmp = await createImageBitmap(await (await fetch(url)).blob());
+      const cv = document.createElement('canvas'); cv.width = bmp.width; cv.height = bmp.height;
+      const g = cv.getContext('2d')!; g.drawImage(bmp, 0, 0);
+      const im = g.getImageData(0, 0, cv.width, cv.height);
+      return { w: cv.width, h: cv.height, data: im.data };
     };
-    const brightRuns = (lums: Float32Array, thresh = 0.08) => {
-      const runs: [number, number][] = [];
-      let st = -1;
-      for (let x = 0; x < lums.length; x++) {
-        if (lums[x] > thresh && st < 0) st = x;
-        else if (lums[x] <= thresh && st >= 0) { runs.push([st, x - 1]); st = -1; }
-      }
-      if (st >= 0) runs.push([st, lums.length - 1]);
-      // Merge runs separated by a small gap (<=5px): the generator's mid-tone
-      // soft rim on a hole edge + grain can dip 1-3px below the 0.08 threshold,
-      // splitting one hole into two runs. A real hole is 90px+; a 5px merge
-      // keeps each hole as one run without gluing holes together (pitch >=150).
-      const merged: [number, number][] = [];
-      for (const r of runs) {
-        const last = merged[merged.length - 1];
-        if (last && r[0] - last[1] <= 5) last[1] = r[1];
-        else merged.push([r[0], r[1]]);
-      }
-      return merged;
+    const srgbLin = (v: number) => { const x = v / 255; return x <= 0.04045 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); };
+    const strip = await decodeImg('/frames/135-strip.png'); // 2048x256 sRGB bytes
+    const stripLin = new Float32Array(strip.w * strip.h * 3);
+    for (let i = 0; i < strip.w * strip.h; i++) {
+      for (let c = 0; c < 3; c++) stripLin[i * 3 + c] = srgbLin(strip.data[i * 4 + c]);
+    }
+    // Mirror of frame.wgsl's '135' band sampling at no-crop (cfx=cfy=1):
+    // px2 = nx, band = py/0.06, uv.y = band*0.5 (top band), then sRGB->linear.
+    const frameSample = (fx: number, fy: number, ch: number) => {
+      const ny = (fy + 0.5) / 2048;
+      if (ny >= 0.06) return null; // outside the top rebate band
+      const u = (fx + 0.5) / 2048;
+      const v = (ny / 0.06) * 0.5;
+      let tx = u * strip.w - 0.5, ty = v * strip.h - 0.5;
+      const x0 = Math.max(0, Math.floor(tx)), y0 = Math.max(0, Math.floor(ty));
+      const x1 = Math.min(strip.w - 1, x0 + 1), y1 = Math.min(strip.h - 1, y0 + 1);
+      const wx = tx - x0, wy = ty - y0;
+      const at = (xx: number, yy: number) => stripLin[(yy * strip.w + xx) * 3 + ch];
+      return at(x0, y0) * (1 - wx) * (1 - wy) + at(x1, y0) * wx * (1 - wy) + at(x0, y1) * (1 - wx) * wy + at(x1, y1) * wx * wy;
     };
     pipe3.render([...synOps, { kind: 'frame', style: '135' }] as never);
     const fTex = (pipe3 as any).displayTexture as GPUTexture;
-    const [r60, r20, r5] = await Promise.all([filmRow(fTex, 60), filmRow(fTex, 20), filmRow(fTex, 5)]);
-    const runs60 = brightRuns(r60), runs20 = brightRuns(r20), runs5 = brightRuns(r5);
-    const holes = runs60.length;
-    const mark = runs20.length === 1 && runs20[0][0] <= 1510 && runs20[0][1] >= 1490;
-    const clean5 = runs5.length === 0;
-    const fsOk = holes === 11 && mark && clean5;
-    log(`FILM-STRIP PROOF row60 (holes): ${runs60.map(([a, b]) => `${a}-${b}`).join(', ')} (n=${holes})`);
-    log(`FILM-STRIP PROOF row20 (mark): runs=${runs20.map(([a, b]) => `${a}-${b}`).join(', ') || 'none'} (expect 1 run @~1496..1504)`);
-    log(`FILM-STRIP PROOF row5 (rebate): runs=${runs5.length} (expect 0)`);
-    log(`FILM-STRIP FILTER: ${fsOk ? 'PASS' : 'FAIL'} -- vendored texture drives the 135 band (holes=${holes}==11:${holes === 11}, mark@1500:${mark}, rebate-clean:${clean5})`);
+    const fW2 = fTex.width, fBPR2 = Math.ceil((fW2 * 8) / 256) * 256;
+    const fBuf2 = wbDev.createBuffer({ size: fBPR2, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const fe2 = wbDev.createCommandEncoder();
+    fe2.copyTextureToBuffer({ texture: fTex, origin: [0, 60] }, { buffer: fBuf2, bytesPerRow: fBPR2 }, { width: fW2, height: 1 });
+    wbDev.queue.submit([fe2.finish()]);
+    await fBuf2.mapAsync(GPUMapMode.READ);
+    const f8 = new Uint8Array(fBuf2.getMappedRange());
+    let maxDelta = 0, maxBand = 0;
+    for (let x = 400; x < 1600; x++) {
+      const o = x * 8;
+      const lin = [HALF_LUT[f8[o] | (f8[o + 1] << 8)], HALF_LUT[f8[o + 2] | (f8[o + 3] << 8)], HALF_LUT[f8[o + 4] | (f8[o + 5] << 8)]];
+      for (let c = 0; c < 3; c++) {
+        const exp = frameSample(x, 60, c)!;
+        maxDelta = Math.max(maxDelta, Math.abs(lin[c] - exp));
+      }
+      maxBand = Math.max(maxBand, lin[0]);
+    }
+    fBuf2.unmap(); fBuf2.destroy();
+    const bandMatch = maxDelta < 0.03;
+    const hasHoles = maxBand > 0.06; // the real sprocket holes read (not all rebate)
+    const fsOk = bandMatch && hasHoles;
+    log(`FILM-STRIP PROOF row 60: max |rendered - committed-PNG| = ${maxDelta.toFixed(4)} (3 ch, x 400..1600), max band lum = ${maxBand.toFixed(3)}`);
+    log(`FILM-STRIP FILTER: ${fsOk ? 'PASS' : 'FAIL'} -- the 135 band IS the committed film scan (bandMatch:${bandMatch}, holes-read:${hasHoles})`);
 
     // 11) LEAK TEXTURE PROOF (case #8 -- procedural gradient blob "fake"). The
-    // light-leak op now samples three VENDORED rgba8unorm textures
-    // (public/leaks/leak-{0,1,2}.png, committed -- no runtime network), adds
-    // their linear additive bytes, rotated so each texture's TOP (entry edge)
-    // aligns with the per-photo edge (seedU % 4). Discriminators baked into
-    // the assets:
-    //   tex0 carries a 32x32 bright-R MARKER block at (512,300) texture-space.
-    //   With seed 0.01 -> seedU32(0.01)=167772, edge 0 (top), the marker maps
-    //   to frame (1024,600) -- frame pixel = 2x texture pixel. tex2 (cool) has
-    //   NO marker. So:
-    //     warm (hue 0, only tex0)  -> R jumps at (1024,600)
-    //     cool (hue 100, only tex2) -> no jump (proves BOTH texture sampling
-    //          AND the hue -> weight blend)
-    //   And the fade envelope: at frame (1024,760) (texture y~380, where tex0
-    //   still has light), fade 0 adds the leak while fade 100 (hard stop by
-    //   LEAK_WIDTH=0.35) kills it -- the leak is visibly darker with fade 100.
-    // A procedural shader could never produce a local R hotspot at one exact
-    // pixel, nor have it vanish when hue goes 0 -> 100.
+    // light-leak op samples the three COMMITTED rgba8unorm textures (real
+    // photos, Unsplash permissive, no runtime network) and ADDS their linear
+    // bytes, rotated so each texture's TOP aligns with the per-photo edge
+    // (seedU % 4). Proof = the rendered pixel EXACTLY equals base + bilinear
+    // (committed PNG) under the shader's uv mapping, at three hues (one
+    // texture each) and with the fade envelope. A procedural shader can't
+    // reproduce the PNGs' pixels.
+    const leakTexs = await Promise.all(['/leaks/leak-0.png', '/leaks/leak-1.png', '/leaks/leak-2.png'].map(decodeImg));
+    const leakLin = leakTexs.map((L) => {
+      const f = new Float32Array(L.w * L.h * 3);
+      for (let i = 0; i < L.w * L.h; i++) for (let c = 0; c < 3; c++) f[i * 3 + c] = L.data[i * 4 + c] / 255; // unorm: bytes ARE linear
+      return f;
+    });
+    const bilin = (img: Float32Array, W: number, H: number, u: number, v: number, ch: number) => {
+      let tx = u * W - 0.5, ty = v * H - 0.5;
+      const x0 = Math.max(0, Math.floor(tx)), y0 = Math.max(0, Math.floor(ty));
+      const x1 = Math.min(W - 1, x0 + 1), y1 = Math.min(H - 1, y0 + 1);
+      const wx = tx - x0, wy = ty - y0;
+      const at = (xx: number, yy: number) => img[(yy * W + xx) * 3 + ch];
+      return at(x0, y0) * (1 - wx) * (1 - wy) + at(x1, y0) * wx * (1 - wy) + at(x0, y1) * (1 - wx) * wy + at(x1, y1) * wx * wy;
+    };
+    const smoothstep = (e0: number, e1: number, x: number) => { const t = Math.min(1, Math.max(0, (x - e0) / (e1 - e0))); return t * t * (3 - 2 * t); };
+    const leakWeights = (hue01: number) => {
+      const h = hue01 * 2;
+      const w = [Math.min(1, Math.max(0, 1 - h)), Math.max(0, 1 - Math.abs(h - 1)), Math.min(1, Math.max(0, h - 1))];
+      const s = w[0] + w[1] + w[2];
+      return w.map((x) => x / s);
+    };
+    // Mirror of lightleak.wgsl with seed 0.01 -> seedU=167772 -> edge 0 (top):
+    // uv=(nx,ny), tex = sum w_i * bilin(leak_i), gain = amount*0.01 * fadeGain.
+    const expectedLeak = (x: number, y: number, hue: number, fade: number, ch: number) => {
+      const nx = (x + 0.5) / 2048, ny = (y + 0.5) / 2048;
+      const w = leakWeights(Math.min(1, Math.max(0, hue * 0.01)));
+      let tex = 0;
+      for (let i = 0; i < 3; i++) tex += bilin(leakLin[i], leakTexs[i].w, leakTexs[i].h, nx, ny, ch) * w[i];
+      const fadeGain = 1 - smoothstep(0, 0.35, ny); // fade 100: 1-smoothstep(0,LEAK_WIDTH,d)
+      return tex * (fade === 100 ? fadeGain : 1);
+    };
     setGrainSeed(0.01); // pins edge 0 for every render below
     const leakPix = async (tex: GPUTexture, x: number, y: number) => {
       const lW = tex.width;
@@ -817,28 +838,33 @@ async function main() {
       return rgb;
     };
     const leakOps = (leak: unknown) => [...synOps, leak] as never;
-    const MK = { kind: 'lightleak', amount: 100, hue: 0, fade: 0 } as never; // warm -> tex0 (marker)
-    const CK = { kind: 'lightleak', amount: 100, hue: 100, fade: 0 } as never; // cool -> tex2 (no marker)
-    const F0 = { kind: 'lightleak', amount: 100, hue: 0, fade: 0 } as never;
-    const F100 = { kind: 'lightleak', amount: 100, hue: 0, fade: 100 } as never;
-    pipe3.render(synOps as never);
-    const baseR = (await leakPix((pipe3 as any).displayTexture as GPUTexture, 1024, 600))[0];
-    pipe3.render(leakOps(MK));
-    const warm = await leakPix((pipe3 as any).displayTexture as GPUTexture, 1024, 600);
-    pipe3.render(leakOps(CK));
-    const cool = await leakPix((pipe3 as any).displayTexture as GPUTexture, 1024, 600);
-    pipe3.render(leakOps(F0));
-    const f0 = await leakPix((pipe3 as any).displayTexture as GPUTexture, 1024, 760);
-    pipe3.render(leakOps(F100));
-    const f100 = await leakPix((pipe3 as any).displayTexture as GPUTexture, 1024, 760);
-    const dWarm = warm[0] - baseR, dCool = cool[0] - baseR, dFade = f0[0] - f100[0];
-    log(`LEAK PROOF base R@(1024,600)=${baseR.toFixed(3)}, warm R=${warm[0].toFixed(3)} (d=${dWarm.toFixed(3)}), cool R=${cool[0].toFixed(3)} (d=${dCool.toFixed(3)})`);
-    log(`LEAK PROOF fade @(1024,760): fade0 R=${f0[0].toFixed(3)}, fade100 R=${f100[0].toFixed(3)} (d=${dFade.toFixed(3)})`);
-    const markerOk = dWarm > 0.4; // tex0's bright-R marker is sampled (texture-driven)
-    const hueOk = dCool < 0.15; // hue 100 -> tex2, marker gone (weight blend works)
-    const fadeOk = dFade > 0.08; // fade 100 visibly kills the leak's reach
-    const leakOk = markerOk && hueOk && fadeOk;
-    log(`LEAK FILTER: ${leakOk ? 'PASS' : 'FAIL'} -- vendored textures drive the leak (marker:${markerOk}, hue-blend:${hueOk}, fade:${fadeOk})`);
+    const LEAKP = 1024, LEAKY = 120; // near the top edge where the leaks are strong
+    const leakRender = async (leak: unknown, x: number, y: number) => {
+      pipe3.render(leak ? leakOps(leak) : (synOps as never));
+      return leakPix((pipe3 as any).displayTexture as GPUTexture, x, y);
+    };
+    const base = await leakRender(null, LEAKP, LEAKY);
+    const hueGot = await Promise.all([0, 50, 100].map((hue) => leakRender({ kind: 'lightleak', amount: 100, hue, fade: 0 } as never, LEAKP, LEAKY)));
+    let maxLeakDelta = 0;
+    for (let i = 0; i < 3; i++) for (let c = 0; c < 3; c++) {
+      const exp = base[c] + expectedLeak(LEAKP, LEAKY, i * 50, 0, c);
+      maxLeakDelta = Math.max(maxLeakDelta, Math.abs(hueGot[i][c] - exp));
+    }
+    // fade: at a deep pixel (ny > LEAK_WIDTH) fade 100 must kill the leak exactly
+    const FY = 900;
+    const baseF = await leakRender(null, LEAKP, FY);
+    const f0 = await leakRender({ kind: 'lightleak', amount: 100, hue: 0, fade: 0 } as never, LEAKP, FY);
+    const f100 = await leakRender({ kind: 'lightleak', amount: 100, hue: 0, fade: 100 } as never, LEAKP, FY);
+    let maxFadeDelta = 0;
+    for (let c = 0; c < 3; c++) {
+      maxFadeDelta = Math.max(maxFadeDelta, Math.abs(f0[c] - (baseF[c] + expectedLeak(LEAKP, FY, 0, 0, c))));
+      maxFadeDelta = Math.max(maxFadeDelta, Math.abs(f100[c] - baseF[c]));
+    }
+    const hueMoves = Math.abs(hueGot[0][0] - hueGot[2][0]) > 0.05; // warm vs cool textures genuinely differ
+    const leakOk = maxLeakDelta < 0.04 && maxFadeDelta < 0.04 && hueMoves;
+    log(`LEAK PROOF @(${LEAKP},${LEAKY}) base R=${base[0].toFixed(3)} | hue0 R=${hueGot[0][0].toFixed(3)} hue50=${hueGot[1][0].toFixed(3)} hue100=${hueGot[2][0].toFixed(3)} (max |rendered-expect|=${maxLeakDelta.toFixed(4)})`);
+    log(`LEAK PROOF fade @(${LEAKP},${FY}) base R=${baseF[0].toFixed(3)}, fade0 R=${f0[0].toFixed(3)}, fade100 R=${f100[0].toFixed(3)} (max |fade-expect|=${maxFadeDelta.toFixed(4)})`);
+    log(`LEAK FILTER: ${leakOk ? 'PASS' : 'FAIL'} -- committed textures drive the leak (pixels-match:${maxLeakDelta < 0.04}, fade-kill:${maxFadeDelta < 0.04}, hue-moves:${hueMoves})`);
 
     // 12) EXPORT DOWNSCALE PROOF (case #5 -- "export presets wreck resolution").
     // Research: IG/FB preset VALUES are correct (1080/2048 = display caps, JPEG
