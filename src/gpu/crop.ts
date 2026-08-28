@@ -76,8 +76,11 @@ export function isNeutralCrop(c: CropParams): boolean {
 //   feeds it the pointer delta and the source/crop state.
 export type CropHandleMode = 'move' | 'nw' | 'n' | 'ne' | 'e' | 'se' | 's' | 'sw' | 'w';
 
-export function cropHandleAt(r: { x: number; y: number; w: number; h: number }, bx: number, by: number, W: number): CropHandleMode | null {
-  const hs = Math.max(9, Math.round(W / 220)) + 4; // handle + slack
+// `hs` = handle radius in buffer px. The caller derives it from the DISPLAY
+// scale (fixed CSS px / dispScale) so the grab zone stays grabbable at any
+// buffer resolution -- a 6k photo shows the buffer at ~0.07x, which turned
+// the old W-derived radius into a ~2 CSS px target (the "ย่อขยายไม่ได้" report).
+export function cropHandleAt(r: { x: number; y: number; w: number; h: number }, bx: number, by: number, hs: number): CropHandleMode | null {
   const pt = { x: bx - r.x, y: by - r.y }; // rect-local (unrotated; angle is tiny for a live drag)
   if (pt.x >= -hs && pt.x <= r.w + hs && pt.y >= -hs && pt.y <= r.h + hs) {
     const col = pt.x < hs ? -1 : pt.x > r.w - hs ? 1 : 0;

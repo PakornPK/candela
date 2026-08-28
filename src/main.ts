@@ -630,11 +630,11 @@ function drawDodgeOverlay(): void {
 // #2 workbench crop overlay: the crop is a rect + dim SELECTION over the full
 // image (which the identity-crop op keeps on screen), not baked bars. Drawn in
 // canvas-buffer space -- the overlay shares #canvas's object-fit:contain
-// letterbox, so buffer-space rects land on the displayed image. Hidden when
-// there is no crop. Redrawn from renderOps, the single render gate.
-function drawCropOverlay(ops: Op[]): void {
-  const crop = ops.find(isCropOp);
-  if (!crop || isNeutralCrop(crop) || canvas.width === 0) {
+// letterbox, so buffer-space rects land on the displayed image. Always drawn
+// once an image is loaded: the default 'original' state is a full-image frame
+// you can grab and drag freely (a crop starts by dragging, no preset needed).
+function drawCropOverlay(curCrop: CropParams): void {
+  if (canvas.width === 0) {
     cropOverlay.hidden = true;
     return;
   }
@@ -642,9 +642,10 @@ function drawCropOverlay(ops: Op[]): void {
   cropOverlay.height = canvas.height;
   const ctx = cropOverlayCtx;
   ctx.clearRect(0, 0, cropOverlay.width, cropOverlay.height);
-  const r = cropOverlayRect(crop, canvas.width, canvas.height);
+  const r = cropOverlayRect(curCrop, canvas.width, canvas.height);
   // Dim everything outside the crop rect, then punch a clear hole through the
-  // rotated rect so the photo shows through it.
+  // rotated rect so the photo shows through it. (A full-image frame punches the
+  // whole canvas -> no visible dim.)
   ctx.fillStyle = 'rgba(0,0,0,0.45)';
   ctx.fillRect(0, 0, cropOverlay.width, cropOverlay.height);
   ctx.save();
@@ -655,12 +656,18 @@ function drawCropOverlay(ops: Op[]): void {
   ctx.fillRect(-r.w / 2, -r.h / 2, r.w, r.h);
   ctx.restore();
   ctx.globalCompositeOperation = 'source-over';
-  // Crop rect outline + rule-of-thirds grid (white rules, scaled to the buffer
-  // so they read at any zoom). Inside the rotated rect's local space.
+  // Crop rect outline + rule-of-thirds grid. The overlay is BUFFER-res, so
+  // stroke/handle sizes scale by 1/dispScale (dispScale = CSS px per buffer
+  // px) to stay a fixed CSS px at any resolution -- a 6k photo shown ~0.07x
+  // otherwise collapses them to sub-pixel (invisible frame, ungrabbable
+  // handles = the "ซูม/ย่อขยายไม่ได้" reports). Inside the rotated rect's
+  // local space.
+  const rect = canvas.getBoundingClientRect();
+  const dispScale = rect.width > 0 ? rect.width / canvas.width : 1;
   ctx.save();
   ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
   ctx.rotate(r.angle);
-  const lw = Math.max(2, Math.round(canvas.width / 1500));
+  const lw = Math.max(1, 1.5 / dispScale);
   ctx.lineWidth = lw;
   ctx.strokeStyle = 'rgba(255,255,255,0.9)';
   ctx.strokeRect(-r.w / 2, -r.h / 2, r.w, r.h);
@@ -674,7 +681,7 @@ function drawCropOverlay(ops: Op[]): void {
   }
   ctx.stroke();
   // 8 drag handles (LrC-style white squares at the corners + edge midpoints).
-  const hs = Math.max(9, Math.round(canvas.width / 220));
+  const hs = Math.max(8, 12 / dispScale);
   ctx.fillStyle = 'rgba(255,255,255,0.95)';
   ctx.strokeStyle = 'rgba(0,0,0,0.6)';
   const corners: [number, number][] = [
@@ -1314,7 +1321,7 @@ async function init(): Promise<void> {
     // before the render dispatches the dodgeBurn pass (which samples it).
     syncDodgeMaskToGPU();
     pipeline.render(ops);
-    drawCropOverlay(ops);
+    drawCropOverlay(readCropParams());
   }
 
   const virtualizer = new Virtualizer<HTMLDivElement, HTMLDivElement>({
@@ -1988,10 +1995,12 @@ async function init(): Promise<void> {
     if (currentFileId === null) return;
     const pt = eventToBufferPt(e);
     if (!pt) return;
-    const ops = currentOpsFromSliders();
-    const crop = ops.find(isCropOp);
-    const r = cropOverlayRect(crop ?? { aspect: 'original', rotate90: 0, angle: 0 }, canvas.width, canvas.height);
-    const mode = cropHandleAt(r, pt[0], pt[1], canvas.width);
+    const curCrop = readCropParams();
+    const r = cropOverlayRect(curCrop, canvas.width, canvas.height);
+    // Same display-scaled radius as drawCropOverlay draws (fixed CSS px).
+    const rect = canvas.getBoundingClientRect();
+    const dispScale = rect.width > 0 ? rect.width / canvas.width : 1;
+    const mode = cropHandleAt(r, pt[0], pt[1], Math.max(8, 12 / dispScale));
     if (!mode) return;
     e.preventDefault();
     cropOverlay.setPointerCapture(e.pointerId);

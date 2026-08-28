@@ -132,17 +132,24 @@ describe('crop', () => {
 
   it('hit-tests the crop overlay handles', () => {
     const r = { x: 100, y: 100, w: 800, h: 600 };
-    // Handle slack scales with the workbench width; at W=1200 it is max(9,5)+4=13.
-    expect(cropHandleAt(r, 140, 140, 1200)).toBe('move');       // interior
-    expect(cropHandleAt(r, 112, 112, 1200)).toBe('nw');         // top-left corner
-    expect(cropHandleAt(r, 888, 112, 1200)).toBe('ne');         // top-right
-    expect(cropHandleAt(r, 900, 700, 1200)).toBe('se');         // bottom-right
-    expect(cropHandleAt(r, 900, 300, 1200)).toBe('e');          // right edge
-    expect(cropHandleAt(r, 500, 700, 1200)).toBe('s');          // bottom edge
-    expect(cropHandleAt(r, 500, 112, 1200)).toBe('n');          // top edge
-    expect(cropHandleAt(r, 87, 400, 1200)).toBe('w');           // left edge
-    expect(cropHandleAt(r, 50, 400, 1200)).toBe(null);          // outside
-    expect(cropHandleAt(r, 500, 800, 1200)).toBe(null);         // outside below
+    // hs = the handle radius in buffer px (the caller derives it from the
+    // display scale). 13 = the old W=1200 value for parity.
+    expect(cropHandleAt(r, 140, 140, 13)).toBe('move');       // interior
+    expect(cropHandleAt(r, 112, 112, 13)).toBe('nw');         // top-left corner
+    expect(cropHandleAt(r, 888, 112, 13)).toBe('ne');         // top-right
+    expect(cropHandleAt(r, 900, 700, 13)).toBe('se');         // bottom-right
+    expect(cropHandleAt(r, 900, 300, 13)).toBe('e');          // right edge
+    expect(cropHandleAt(r, 500, 700, 13)).toBe('s');          // bottom edge
+    expect(cropHandleAt(r, 500, 112, 13)).toBe('n');          // top edge
+    expect(cropHandleAt(r, 87, 400, 13)).toBe('w');           // left edge
+    expect(cropHandleAt(r, 50, 400, 13)).toBe(null);          // outside
+    expect(cropHandleAt(r, 500, 800, 13)).toBe(null);         // outside below
+    // Real-photo scale: a 6000px buffer shown ~0.067x gives hs ~180 buffer px.
+    // The grab zone grows with the display scale, so the handles stay a fixed
+    // CSS size even when the buffer is huge (the "ย่อขยายไม่ได้" report).
+    expect(cropHandleAt(r, 0, 0, 180)).toBe('nw');            // far corner within the scaled radius
+    expect(cropHandleAt(r, 500, 400, 180)).toBe('move');      // interior still moves
+    expect(cropHandleAt(r, 500, 800, 180)).toBe('s');         // bottom edge
   });
 
   it('move drags the rect and clamps it inside the source', () => {
