@@ -250,6 +250,22 @@ describe('OP_RENDERERS packParams', () => {
     expect(Array.from(frame.packParams([{ kind: 'frame', style: 'print' }]))).toEqual([2, 1, 1, 0]);
   });
 
+  it('frame packs the CROP rect cropFrac when a crop op is present (#6 regression)', () => {
+    // Regression: the pre-fix packParams packed only the style id -- cropFrac
+    // stayed 0 in the uniform -> frame.wgsl's cfx collapsed to 1e-3 and the
+    // framed image sampled a sliver -> "crop after frame = ภาพจะพัง". A 4:3
+    // crop on a 2048x2048 source must now arrive as cropFrac [1, 0.75], the
+    // exact mask the crop.wgsl bbox occupies.
+    const frame = OP_RENDERERS[13];
+    setImageSize(2048, 2048);
+    const packed = frame.packParams([
+      { kind: 'crop', aspect: '4:3', rotate90: 0, angle: 0 },
+      { kind: 'frame', style: '135' },
+    ]);
+    expect(Array.from(packed)).toEqual([0, 1, 0.75, 0]);
+    setImageSize(0, 0);
+  });
+
   it('crop packs geometry for a 1:1 crop (fits the source dims)', () => {
     const crop = OP_RENDERERS[9];
     expect(crop.kind).toBe('crop');
