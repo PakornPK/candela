@@ -712,8 +712,12 @@ function drawCropOverlay(curCrop: CropParams): void {
 }
 
 // Pointer -> canvas-buffer coords (the overlay's drawing space), accounting for
-// the CSS object-fit:contain letterbox. null outside the visible image.
-function eventToBufferPt(e: PointerEvent): [number, number] | null {
+// the CSS object-fit:contain letterbox. null outside the visible image, except
+// `margin` buffer px beyond it -- the crop frame's edge handles sit ON the
+// image edge (half the handle is clipped by the buffer), so the pointer must
+// be allowed a handle-radius outside or a flush frame is impossible to grab
+// (the "ติดขอบลากยาก" report).
+function eventToBufferPt(e: PointerEvent, margin = 0): [number, number] | null {
   const rect = canvas.getBoundingClientRect();
   const cw = canvas.width;
   const ch = canvas.height;
@@ -725,7 +729,7 @@ function eventToBufferPt(e: PointerEvent): [number, number] | null {
   const offY = (rect.height - dispH) / 2;
   const x = (e.clientX - rect.left - offX) / scale;
   const y = (e.clientY - rect.top - offY) / scale;
-  if (x < 0 || x > cw || y < 0 || y > ch) return null;
+  if (x < -margin || x > cw + margin || y < -margin || y > ch + margin) return null;
   return [x, y];
 }
 
@@ -2053,14 +2057,16 @@ async function init(): Promise<void> {
   // free drag. The overlay canvas only captures events for the drag.
   cropOverlay.addEventListener('pointerdown', (e) => {
     if (currentFileId === null) return;
-    const pt = eventToBufferPt(e);
+    const rect = canvas.getBoundingClientRect();
+    const dispScale = rect.width > 0 ? rect.width / canvas.width : 1;
+    // Same display-scaled radius as drawCropOverlay draws (fixed CSS px);
+    // the margin lets a flush-edge handle's clipped outer half be grabbed.
+    const hs = Math.max(8, 12 / dispScale);
+    const pt = eventToBufferPt(e, hs);
     if (!pt) return;
     const curCrop = readCropParams();
     const r = cropOverlayRect(curCrop, canvas.width, canvas.height);
-    // Same display-scaled radius as drawCropOverlay draws (fixed CSS px).
-    const rect = canvas.getBoundingClientRect();
-    const dispScale = rect.width > 0 ? rect.width / canvas.width : 1;
-    const mode = cropHandleAt(r, pt[0], pt[1], Math.max(8, 12 / dispScale));
+    const mode = cropHandleAt(r, pt[0], pt[1], hs);
     if (!mode) return;
     e.preventDefault();
     cropOverlay.setPointerCapture(e.pointerId);
@@ -2069,7 +2075,11 @@ async function init(): Promise<void> {
   });
   cropOverlay.addEventListener('pointermove', (e) => {
     if (!cropDrag) return;
-    const pt = eventToBufferPt(e);
+    // Same margin as pointerdown so a drag can push a frame flush to the edge
+    // (the pointer rides a handle-radius outside the image).
+    const rect = canvas.getBoundingClientRect();
+    const dispScale = rect.width > 0 ? rect.width / canvas.width : 1;
+    const pt = eventToBufferPt(e, Math.max(8, 12 / dispScale));
     if (!pt) return;
     e.preventDefault();
     const curCrop = readCropParams();

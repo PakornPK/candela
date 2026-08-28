@@ -57,11 +57,15 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     return;
   }
 
-  // Inverse rotation: src = R(-angle) · (o / zoom) + center. A pure 90°
-  // rotation has exact cos/sin in f32; straighten is f32-accurate.
+  // Inverse rotation: src = R(-angle) · (o · zoom) + center. The mask is the
+  // rotated bbox scaled DOWN by zoom to fit the source, so its boundary maps
+  // back to the FULL crop rect via o·zoom -- dividing (o/zoom) sampled only a
+  // center slice at 90° (a 1.8x zoom-in, the "rotate 90 ซูม" bug). At zoom=1
+  // (every ≤5° straighten, unrotated presets) the two forms are identical.
+  // A pure 90° rotation has exact cos/sin in f32; straighten is f32-accurate.
   let ca = cos(p.angle);
   let sa = sin(p.angle);
-  let r = o / p.zoom;
+  let r = o * p.zoom;
   let sx = r.x * ca + r.y * sa + center.x;  // R(-angle) row 0: [cos, sin]
   let sy = -r.x * sa + r.y * ca + center.y; // R(-angle) row 1: [-sin, cos]
 
