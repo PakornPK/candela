@@ -14,6 +14,7 @@ import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog
 import { parsePreset, serializePreset, PRESET_FILE_EXT } from './catalog/presetFiles';
 import { commitEdit, undo, redo, currentOps, createEditState } from './catalog/editHistory';
 import { getOrExtractThumbnail } from './catalog/thumbnails';
+import { buildContactSheets, CONTACT_SHEET_SIZE } from './app/contactSheet';
 import { isExposureOp, isBwOp, isCropOp, isDodgeBurnOp, isFrameOp, isGeometryOp, isGrainOp, isLightleakOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type FrameStyle, type AspectPreset, type WbGains, type BwMix, type BwToneId } from './catalog/types';
 import { FILM_STOCKS } from './gpu/film';
 import { buildParametricToneLut, buildToneCurveLut, fitRegionParams, isNeutralTone, parametricControlPoints, TONE_LUT_SIZE, type ToneParams } from './gpu/tone';
@@ -1148,8 +1149,8 @@ async function init(): Promise<void> {
   let folderFilter: number | null = null;
   let gridEntries: GridEntry[] = [];
 
-  // Culling filter state. Filtering is grid-only: allFiles (filmstrip + arrow
-  // navigation) is always unfiltered, Lightroom-style.
+  // Culling filter state. The grid and the contact sheet follow it; allFiles
+  // (filmstrip + arrow navigation) is always unfiltered, Lightroom-style.
   let cullFilter = { hideRejected: true, pickedOnly: false, minRating: 0 };
 
   function matchesCullFilter(f: FileRecord): boolean {
@@ -1176,6 +1177,10 @@ async function init(): Promise<void> {
     virtualizer.measure();
     renderVisibleRows();
     updateFooter();
+    // A cull/filter change that rebuilds the grid must also rebuild the contact
+    // sheet (it follows the same cull filter). Only when visible -- renderContactSheet
+    // reads module DOM, which is cheap but pointless while the sheet is hidden.
+    if (getState().module === 'contact') renderContactSheet();
   }
 
   // Multi-selection: the anchor for shift+click range selection. Plain clicks
@@ -2298,17 +2303,15 @@ async function init(): Promise<void> {
 
   // ---- Contact sheet ----
   // One folder = one film roll: frames lay out as 35mm-style contact sheets,
-  // 36 per sheet (fewer on the last), overflow starts a new sheet. No culling
-  // filters -- a contact sheet shows the whole roll, rejects included.
-  const CONTACT_SHEET_SIZE = 36;
-  let contactFiles: FileRecord[] = [];
+  // 36 per sheet (fewer on the last), overflow starts a new sheet. The sheet
+  // follows the same cull filter as the grid (rejects hidden / picks only /
+  // min rating) -- a proofing sheet that showed frames the grid had hidden
+  // would be useless for culling.
   let contactSheetIdx = 0;
 
   function renderContactSheet(): void {
-    const sheets: FileRecord[][] = [];
-    for (let i = 0; i < contactFiles.length; i += CONTACT_SHEET_SIZE) {
-      sheets.push(contactFiles.slice(i, i + CONTACT_SHEET_SIZE));
-    }
+    const scope = folderFilter !== null ? allFiles.filter((f) => f.folderId === folderFilter) : [...allFiles];
+    const sheets = buildContactSheets(scope, cullFilter);
     contactSheetIdx = Math.min(Math.max(contactSheetIdx, 0), Math.max(sheets.length - 1, 0));
     contactSheetLabel.textContent = sheets.length ? `Sheet ${contactSheetIdx + 1} / ${sheets.length}` : 'No frames';
     contactPrev.disabled = contactSheetIdx === 0;
@@ -2398,9 +2401,9 @@ async function init(): Promise<void> {
     root: document.querySelector('#module-contact')!,
     onShow: () => {
       // The current folder is the roll; with no folder selected, all files
-      // chunk across sheets. Rebuilt on entry so a folder change shows up
-      // next time the sheet is opened.
-      contactFiles = folderFilter !== null ? allFiles.filter((f) => f.folderId === folderFilter) : [...allFiles];
+      // chunk across sheets. renderContactSheet derives the roll scope from
+      // folderFilter + cullFilter itself, so a folder or cull change shows up
+      // the next time the sheet is rendered.
       contactRollLabel.textContent = folderFilter !== null
         ? (folders.find((f) => f.id === folderFilter)?.name ?? 'Roll')
         : 'All folders';

@@ -789,7 +789,10 @@
       .contact-frame img {
         width: 100%;
         height: 100%;
-        object-fit: cover;
+        /* contain, not cover: a proofing sheet must show the WHOLE frame --
+           cover crops non-3:2 compositions so you can't judge the shot. The
+           dark cell background letterboxes the rest. */
+        object-fit: contain;
         display: block;
       }
       .contact-frame-num {

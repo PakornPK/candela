@@ -11,6 +11,7 @@ import { packCfa6, shiftCfa6 } from './src/gpu/uniforms';
 import { buildToneLuts, LOG_MIN, LOG_MAX, logToNorm, sampleToneLut } from './src/gpu/tone';
 import { effectiveMask, maskDims, maskToBytes, maskToOp, paintStroke } from './src/gpu/dodge';
 import { setGrainSeed } from './src/gpu/grain';
+import type { FileRecord } from './src/catalog/types';
 
 const out = document.getElementById('out')!;
 const log = (s: string) => { out.textContent += '\n' + s; console.log(s); };
@@ -907,6 +908,34 @@ async function main() {
     log(`DOWNSCALE FILTER: ${downOk ? 'PASS' : 'FAIL'} -- box pyramid flattens above-Nyquist stripes at the source's true linear mean (meanOk:${meanOk}, flatOk:${flatOk} std=${lstd.toFixed(1)})`);
   } catch (e) {
     log('SYNTH test failed: ' + (e as Error).message);
+  }
+  // ---- 13. CONTACT SHEET FOLLOWS THE CULL FILTER (logic proof) ----
+  // The contact module's DOM isn't mountable headless (no FileSystem handles),
+  // so this proves the exact function the module now renders with: the same
+  // cull filter as the grid, 36 frames/sheet, roll order preserved.
+  try {
+    const cs = await import('./src/app/contactSheet');
+    const F = (id: number, flag?: boolean, rating?: number): FileRecord => ({
+      id, folderId: 1, path: `img${id}.cr3`, name: `img${id}.cr3`,
+      handle: {} as FileSystemFileHandle, size: 0, lastModified: 0, flag, rating,
+    });
+    const roll = [F(1), F(2, false), F(3, true), F(4, undefined, 4), F(5, true, 2)];
+    const N = { hideRejected: false, pickedOnly: false, minRating: 0 };
+    const ids = (sheets: FileRecord[][]) => sheets[0].map((f) => f.id);
+    const hideRej = ids(cs.buildContactSheets(roll, { ...N, hideRejected: true }));
+    const picked = ids(cs.buildContactSheets(roll, { ...N, pickedOnly: true }));
+    const minR = ids(cs.buildContactSheets(roll, { ...N, minRating: 3 }));
+    const big = Array.from({ length: cs.CONTACT_SHEET_SIZE + 4 }, (_, i) => F(i + 1));
+    const chunked = cs.buildContactSheets(big, N);
+    const hideOk = JSON.stringify(hideRej) === JSON.stringify([1, 3, 4, 5]);
+    const pickOk = JSON.stringify(picked) === JSON.stringify([3, 5]);
+    const minOk = JSON.stringify(minR) === JSON.stringify([4]);
+    const chunkOk = chunked.length === 2 && chunked[0].length === cs.CONTACT_SHEET_SIZE && chunked[1].length === 4;
+    const cOk = hideOk && pickOk && minOk && chunkOk;
+    log(`CONTACT SHEET cull: hideRejected→[${hideRej}] pickedOnly→[${picked}] minRating3→[${minR}] chunked ${chunked.length} sheets`);
+    log(`CONTACT FILTER: ${cOk ? 'PASS' : 'FAIL'} -- sheet excludes the same frames the grid hides, 36/sheet, order preserved (hideRej:${hideOk}, picked:${pickOk}, minR:${minOk}, chunk:${chunkOk})`);
+  } catch (e) {
+    log('CONTACT test failed: ' + (e as Error).message);
   }
   log('DONE');
 }
