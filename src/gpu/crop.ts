@@ -85,6 +85,24 @@ export function packCrop(c: CropParams, W: number, H: number): Float32Array {
   return new Float32Array([g.angle, g.zoom, g.halfW, g.halfH, 0, 0, 0, 0]);
 }
 
+// The crop selection as a screen-space rect (texture pixels): the mask bbox
+// centered in the source, rotated by the straighten angle. The DOM crop
+// overlay (#2 workbench) draws exactly this -- rect + dim outside -- so the
+// view shows the FULL image with a live crop selection instead of baked
+// letterbox bars.
+export interface CropOverlayRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  angle: number; // radians, matches the packed crop uniform
+}
+
+export function cropOverlayRect(c: CropParams, W: number, H: number): CropOverlayRect {
+  const g = cropGeometry(c, W, H);
+  return { x: (W - g.maskW) / 2, y: (H - g.maskH) / 2, w: g.maskW, h: g.maskH, angle: g.angle };
+}
+
 // Fraction of the texture the crop mask occupies — the vignette's post-crop
 // frame, the frame's inner rect, and the export/histogram blit region. (1,1)
 // when no crop op is present = identity. Guarded for unloaded sizes so the

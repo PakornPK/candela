@@ -21,7 +21,7 @@ import { isNeutralPresence, type PresenceParams } from './gpu/presence';
 import { isNeutralVignette, type VignetteParams } from './gpu/vignette';
 import { isNeutralGrain, seedFromPath, setGrainSeed, type GrainParams } from './gpu/grain';
 import { isNeutralLightleak, type LightleakParams } from './gpu/lightleak';
-import { isNeutralCrop, type CropParams } from './gpu/crop';
+import { cropOverlayRect, isNeutralCrop, type CropParams } from './gpu/crop';
 import { isNeutralGeometry, type GeometryParams } from './gpu/geometry';
 import { effectiveMask, maskDims, maskHasPaint, maskToBytes, maskToOp, maskToOverlay, opToMask, paintStroke, type DodgeBurnParams } from './gpu/dodge';
 import { BW_FILTERS, BW_TONES, type BwFilterId } from './gpu/bw';
@@ -214,6 +214,8 @@ const dodgeFeatherValue = document.querySelector<HTMLOutputElement>('#dodge-feat
 const dodgeOverlayColor = document.querySelector<HTMLInputElement>('#dodge-overlay-color')!;
 const maskOverlay = document.querySelector<HTMLCanvasElement>('#mask-overlay')!;
 const maskOverlayCtx = maskOverlay.getContext('2d')!;
+const cropOverlay = document.querySelector<HTMLCanvasElement>('#crop-overlay')!;
+const cropOverlayCtx = cropOverlay.getContext('2d')!;
 
 function showError(message: string, detail?: string): void {
   errorMessageEl.textContent = message;
@@ -609,6 +611,46 @@ function drawDodgeOverlay(): void {
   ];
   maskOverlayCtx.putImageData(new ImageData(maskToOverlay(paintMask, color), paintMaskW, paintMaskH), 0, 0);
   maskOverlay.hidden = false;
+}
+
+// #2 workbench crop overlay: the crop is a rect + dim SELECTION over the full
+// image (which the identity-crop op keeps on screen), not baked bars. Drawn in
+// canvas-buffer space -- the overlay shares #canvas's object-fit:contain
+// letterbox, so buffer-space rects land on the displayed image. Hidden when
+// there is no crop. Redrawn from renderOps, the single render gate.
+function drawCropOverlay(ops: Op[]): void {
+  const crop = ops.find(isCropOp);
+  if (!crop || isNeutralCrop(crop) || canvas.width === 0) {
+    cropOverlay.hidden = true;
+    return;
+  }
+  cropOverlay.width = canvas.width;
+  cropOverlay.height = canvas.height;
+  const ctx = cropOverlayCtx;
+  ctx.clearRect(0, 0, cropOverlay.width, cropOverlay.height);
+  const r = cropOverlayRect(crop, canvas.width, canvas.height);
+  // Dim everything outside the crop rect, then punch a clear hole through the
+  // rotated rect so the photo shows through it.
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fillRect(0, 0, cropOverlay.width, cropOverlay.height);
+  ctx.save();
+  ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
+  ctx.rotate(r.angle);
+  ctx.globalCompositeOperation = 'destination-out';
+  ctx.fillStyle = 'rgba(0,0,0,1)';
+  ctx.fillRect(-r.w / 2, -r.h / 2, r.w, r.h);
+  ctx.restore();
+  ctx.globalCompositeOperation = 'source-over';
+  // Crop rect outline (white rule, scaled to the buffer so it reads at any
+  // zoom).
+  ctx.save();
+  ctx.translate(r.x + r.w / 2, r.y + r.h / 2);
+  ctx.rotate(r.angle);
+  ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+  ctx.lineWidth = Math.max(2, Math.round(canvas.width / 1500));
+  ctx.strokeRect(-r.w / 2, -r.h / 2, r.w, r.h);
+  ctx.restore();
+  cropOverlay.hidden = false;
 }
 
 function readDodgeParams(): DodgeBurnParams {
@@ -1205,6 +1247,7 @@ async function init(): Promise<void> {
     // before the render dispatches the dodgeBurn pass (which samples it).
     syncDodgeMaskToGPU();
     pipeline.render(ops);
+    drawCropOverlay(ops);
   }
 
   const virtualizer = new Virtualizer<HTMLDivElement, HTMLDivElement>({

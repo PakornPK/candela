@@ -36,6 +36,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let id = vec2<f32>(pos);
   let center = vec2<f32>(dims) * 0.5;
 
+  // ponytail: a pure aspect crop (no 90° turn, no straighten) is the workbench
+  // identity -- the FULL image stays on screen and the crop is a DOM rect+dim
+  // overlay (#2). No-rotation crops never needed the letterbox bars in the
+  // view (that was the "crop refits / zooms in" jump); the export, frame,
+  // vignette and histogram all sample the cropFrac region themselves. Any
+  // rotation (angle != 0) keeps the transform below -- the export must rotate.
+  if (abs(p.angle) < 1e-6) {
+    textureStore(dstTex, pos, textureLoad(srcTex, pos, 0));
+    return;
+  }
+
   // Output-space offset from the texture center (the crop is centered).
   let o = id - center;
 

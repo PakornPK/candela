@@ -3,6 +3,7 @@ import {
   ASPECT_RATIO,
   cropFracFromOps,
   cropGeometry,
+  cropOverlayRect,
   cropRect,
   isNeutralCrop,
   packCrop,
@@ -62,6 +63,26 @@ describe('crop', () => {
     expect(packed[0]).toBe(0); // angle
     expect(packed[1]).toBe(1); // zoom
     expect(packed[4]).toBe(0);
+  });
+
+  it('cropOverlayRect is the centered mask the DOM overlay draws', () => {
+    // 4:3 on a square source: mask 200x150, top at 25 (the crop is a pure
+    // selection overlay now -- no baked bars).
+    expect(cropOverlayRect(crop({ aspect: '4:3' }), 200, 200))
+      .toEqual({ x: 0, y: 25, w: 200, h: 150, angle: 0 });
+    // 16:9 on 200x200: full-width 200x112.5, vertical letterbox split 43.75.
+    const o = cropOverlayRect(crop({ aspect: '16:9' }), 200, 200);
+    expect(o.x).toBe(0); expect(o.w).toBe(200);
+    expect(o.y).toBeCloseTo(43.75, 6); expect(o.h).toBeCloseTo(112.5, 6);
+    // 90° turn of the full frame: vertical 200x300 content is zoomed 1.5 into
+    // the landscape 300x200 texture -> mask 133.3x200, rect re-orients (PI/2).
+    const r = cropOverlayRect(crop({ rotate90: 1 }), 300, 200);
+    expect(r.w).toBeCloseTo(133.33, 2); expect(r.h).toBe(200);
+    expect(r.x).toBeCloseTo(83.33, 2); expect(r.angle).toBeCloseTo(Math.PI / 2, 6);
+    // Straighten tilts the overlay rect, same angle the shader applies.
+    const s = cropOverlayRect(crop({ angle: 3 }), W, H);
+    expect(s.angle).toBeCloseTo((3 * Math.PI) / 180, 6);
+    expect(s.x).toBeCloseTo((W - s.w) / 2, 6);
   });
 
   it('reports the crop mask as a fraction of the texture', () => {

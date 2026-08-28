@@ -332,6 +332,26 @@
         object-fit: contain;
         display: block;
       }
+      /* #2 workbench: a fixed gray loupe -- the photo floats on it and the crop
+         is a rect+dim overlay (#crop-overlay), so cropping never refits. */
+      #module-develop .content {
+        background: #2e2e33;
+      }
+      /* Crop selection overlay: the crop rect (position/rotation from
+         cropOverlayRect) with the outside dimmed. Same letterbox as #canvas, so
+         buffer-space rects land on the displayed image; pointer-events:none. */
+      #crop-overlay {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: contain;
+        pointer-events: none;
+        z-index: 1;
+      }
+      #crop-overlay[hidden] {
+        display: none;
+      }
       /* Dodge & Burn brush mask overlay: an LrC-style red mask above #canvas
          while brushing. Buffer = mask dims (same aspect as the image), so the
          same object-fit:contain letterboxes it in step with #canvas; pointer-
@@ -932,6 +952,7 @@
         </aside>
         <main class="content">
           <canvas id="canvas"></canvas>
+          <canvas id="crop-overlay" hidden></canvas>
           <canvas id="mask-overlay" hidden></canvas>
         </main>
         <aside class="panel right">
