@@ -28,14 +28,6 @@ fn borderF(style: u32) -> f32 {
   return 0.06;
 }
 
-// Sprocket-hole row height as a fraction of the frame; 0 = no holes.
-fn holeF(style: u32) -> f32 {
-  if (style == 3u) { return 0.0; }
-  if (style == 2u) { return 0.0; }
-  if (style == 1u) { return 0.0; }
-  return 0.018;
-}
-
 // Rebate color per style: near-black for film, off-white for the print matte.
 fn rebateColor(style: u32) -> vec3<f32> {
   if (style == 2u) { return vec3<f32>(0.96, 0.96, 0.96); }
@@ -45,6 +37,8 @@ fn rebateColor(style: u32) -> vec3<f32> {
 @group(0) @binding(0) var inTex: texture_2d<f32>;
 @group(0) @binding(1) var outTex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> p: Frame;
+@group(0) @binding(3) var filmTex: texture_2d<f32>; // '135' film-strip edge
+@group(0) @binding(4) var filmSamp: sampler;
 
 @compute @workgroup_size(8, 8)
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
@@ -90,23 +84,20 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
 
-  // Rebate band. Sprocket holes read as lighter than the black rebate (light
-  // passes through), so a pixel inside a hole is repainted light. Hole pitch
-  // is relative to the crop content so it scales with the framed image.
+  // Rebate band. '135' (style 0) samples a real film-strip edge texture
+  // (irregular sprocket holes + edge markings + grain -- case #4, the old
+  // procedural rects looked "ปลอมจัด"). The band maps to the strip's top /
+  // bottom halves; the photo itself is drawn by the image branch above, never
+  // by the texture. 120 / print keep the plain matte.
   var color = rebateColor(style);
-  let hole = holeF(style);
-  if (hole > 0.0) {
-    let px = (nx - cropL) / cfx;
-    let phase = px / 0.055 - floor(px / 0.055);
-    let inCell = phase < 0.6;
-    if (inCell) {
-      let half = hole * 0.5;
-      let topBand = abs(ny - (cropT + by * 0.5)) < half;
-      let bottomBand = abs(ny - (cropT + cfy - by * 0.5)) < half;
-      if (topBand || bottomBand) {
-        color = vec3<f32>(0.18, 0.18, 0.22); // hole: light spills through
-      }
-    }
+  if (style == 0u) {
+    let px2 = (nx - cropL) / cfx;      // 0..1 across the crop content
+    var py = (ny - cropT) / cfy;
+    let top = py < b;
+    if (!top) { py = 1.0 - py; }
+    let band = clamp(py / b, 0.0, 1.0); // 0..1 across the band thickness
+    let uv = vec2<f32>(px2, select(band * 0.5 + 0.5, band * 0.5, top));
+    color = textureSampleLevel(filmTex, filmSamp, uv, 0.0).rgb;
   }
   textureStore(outTex, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
 }

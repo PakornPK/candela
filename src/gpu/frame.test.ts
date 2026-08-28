@@ -1,10 +1,8 @@
 import { describe, it, expect } from 'vitest';
 import {
   FRAME_BORDER,
-  FRAME_HOLE,
   frameStyleId,
   imageSource,
-  inSprocketHole,
   isNeutralFrame,
   packFrame,
 } from './frame';
@@ -35,22 +33,6 @@ describe('frame', () => {
     // Far outside clamps rather than sampling past the source.
     expect(imageSource(0, b)).toBe(0);
     expect(imageSource(1, b)).toBe(1);
-  });
-
-  it('only 135 punches sprocket holes, in the top/bottom rebate bands', () => {
-    expect(FRAME_HOLE['120']).toBe(0);
-    expect(FRAME_HOLE.print).toBe(0);
-    const b = FRAME_BORDER['135'];
-    // A pixel centered in the top rebate band, within a hole cell.
-    expect(inSprocketHole(0.03, b / 2, '135')).toBe(true);
-    // Same row but in the gap between holes (phase >= 0.6 of the 0.055 cell).
-    expect(inSprocketHole(0.05, b / 2, '135')).toBe(false);
-    // The far band and the image interior are not holes.
-    expect(inSprocketHole(0.03, 0.5, '135')).toBe(false);
-    expect(inSprocketHole(0.03, 1 - b / 2, '135')).toBe(true); // bottom band yes
-    // 120/print have no holes anywhere.
-    expect(inSprocketHole(0.03, b / 2, '120')).toBe(false);
-    expect(inSprocketHole(0.03, b / 2, 'print')).toBe(false);
   });
 
   it('style ids are stable for the shader', () => {

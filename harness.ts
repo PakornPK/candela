@@ -13,6 +13,10 @@ import { effectiveMask, maskDims, maskToBytes, maskToOp, paintStroke } from './s
 
 const out = document.getElementById('out')!;
 const log = (s: string) => { out.textContent += '\n' + s; console.log(s); };
+// Tee the GPU device's uncaptured errors (pipeline has its own device + its
+// own listener that console.errors) into #out so the driver sees them.
+const _origErr = console.error.bind(console);
+console.error = (msg, ...rest) => { out.textContent += '\n[console.error] ' + String(msg) + (rest.length ? ' ' + rest.join(' ') : ''); _origErr(msg, ...rest); };
 
 // Half-float -> f32 via a 64K-entry LUT (Math.pow per channel for 104M
 // channels was the harness bottleneck).
@@ -650,11 +654,13 @@ async function main() {
     const A = await renderImg([...synOps, cfCrop]);
     const Aok = isMag(cnum(A.im, A.W, 100)) && isMag(cnum(A.im, A.W, 700)) && isMag(cnum(A.im, A.W, 1400));
     log(`CROP-FRAME PROOF A (crop only): 100=${c(A.im, A.W, 100)} 700=${c(A.im, A.W, 700)} 1400=${c(A.im, A.W, 1400)} -> ${Aok ? 'all-magenta' : 'NOT-magenta'}`);
-    // (b) frame only -> full 2048x2048, rebate [0,43]+[2005,2048] (holes at
-    // [43,80] top / [1968,2005] bottom), image magenta in between.
+    // (b) frame only -> full 2048x2048, rebate band rows [0,123]+[1925,2048]
+    // (the vendored strip renders holes/mark inside the band -- check the pure
+    // rebate rows 5/2043, above/below the strip's holes+mark), image magenta
+    // in between.
     const B = await renderImg([...synOps, cfFrame]);
-    const Bok = isReb(cnum(B.im, B.W, 20)) && isMag(cnum(B.im, B.W, 1000)) && isReb(cnum(B.im, B.W, 2010));
-    log(`CROP-FRAME PROOF B (frame only): 20=${c(B.im, B.W, 20)} 1000=${c(B.im, B.W, 1000)} 2010=${c(B.im, B.W, 2010)} -> ${Bok ? 'rebate+magenta+rebate' : 'layout-wrong'}`);
+    const Bok = isReb(cnum(B.im, B.W, 5)) && isMag(cnum(B.im, B.W, 1000)) && isReb(cnum(B.im, B.W, 2043));
+    log(`CROP-FRAME PROOF B (frame only): 5=${c(B.im, B.W, 5)} 1000=${c(B.im, B.W, 1000)} 2043=${c(B.im, B.W, 2043)} -> ${Bok ? 'rebate+magenta+rebate' : 'layout-wrong'}`);
     // (c) crop + frame -> the decisive layout (export 2048x1536, the crop
     // rect): rebate [0,28], holes [28,65], rebate [65,92], image [92,1444],
     // rebate [1444,1536] with holes [1471,1508].
@@ -707,6 +713,69 @@ async function main() {
     log(`CROP WORKBENCH control: no-crop blackRows=${ctl0.blackRows} (${ctl0.means[0].toFixed(3)}..${ctl0.means[dt.height - 1].toFixed(3)}), crop blackRows=${ctl.blackRows} (row256=${ctl.means[256].toFixed(3)} row1000=${ctl.means[1000].toFixed(3)} row1800=${ctl.means[1800].toFixed(3)})`);
     const wbOk = ctl.blackRows === 0;
     log(`CROP WORKBENCH FILTER: ${wbOk ? 'PASS' : 'FAIL'} -- aspect-only crop keeps the full image in the view (black rows ${ctl.blackRows}/${dt.height}).`);
+
+    // 10) FILM-STRIP PROOF (case #4 -- procedural sprockets "ปลอมจัด"). The
+    // '135' frame band now samples the VENDORED film-strip texture
+    // (public/frames/135-strip.png, committed -- no runtime network). On the
+    // 2048x2048 flat magenta the top rebate band (b=0.06, rows 0..123) maps to
+    // the strip's top 128 rows 1:1 in x and ~1:1 in y (frame row ~= strip row).
+    // Discriminators baked into the asset:
+    //   row 60 -> exactly 11 bright runs (the irregular holes, strip rows 38..90)
+    //   row 20 -> exactly 1 bright run centered ~x=1500 (the edge-code MARK,
+    //             strip rows 8..32; holes start at frame row ~37)
+    //   row 5  -> 0 bright runs (pure rebate, ~0.02 linear; grain is +/-5 sRGB)
+    // A procedural-rect frame would show a periodic grid, not these 11
+    // irregular runs; a missing texture would show all-rebate (0 runs).
+    const filmRow = async (tex: GPUTexture, y: number) => {
+      const fW = tex.width;
+      const fBPR = Math.ceil((fW * 8) / 256) * 256;
+      const fBuf = wbDev.createBuffer({ size: fBPR, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const fe = wbDev.createCommandEncoder();
+      fe.copyTextureToBuffer({ texture: tex, origin: [0, y] }, { buffer: fBuf, bytesPerRow: fBPR }, { width: fW, height: 1 });
+      wbDev.queue.submit([fe.finish()]);
+      await fBuf.mapAsync(GPUMapMode.READ);
+      const f8 = new Uint8Array(fBuf.getMappedRange());
+      const lums = new Float32Array(fW);
+      let fo = 0;
+      for (let x = 0; x < fW; x++) {
+        lums[x] = (HALF_LUT[f8[fo] | (f8[fo + 1] << 8)] + HALF_LUT[f8[fo + 2] | (f8[fo + 3] << 8)] + HALF_LUT[f8[fo + 4] | (f8[fo + 5] << 8)]) / 3;
+        fo += 8;
+      }
+      fBuf.unmap(); fBuf.destroy();
+      return lums;
+    };
+    const brightRuns = (lums: Float32Array, thresh = 0.08) => {
+      const runs: [number, number][] = [];
+      let st = -1;
+      for (let x = 0; x < lums.length; x++) {
+        if (lums[x] > thresh && st < 0) st = x;
+        else if (lums[x] <= thresh && st >= 0) { runs.push([st, x - 1]); st = -1; }
+      }
+      if (st >= 0) runs.push([st, lums.length - 1]);
+      // Merge runs separated by a small gap (<=5px): the generator's mid-tone
+      // soft rim on a hole edge + grain can dip 1-3px below the 0.08 threshold,
+      // splitting one hole into two runs. A real hole is 90px+; a 5px merge
+      // keeps each hole as one run without gluing holes together (pitch >=150).
+      const merged: [number, number][] = [];
+      for (const r of runs) {
+        const last = merged[merged.length - 1];
+        if (last && r[0] - last[1] <= 5) last[1] = r[1];
+        else merged.push([r[0], r[1]]);
+      }
+      return merged;
+    };
+    pipe3.render([...synOps, { kind: 'frame', style: '135' }] as never);
+    const fTex = (pipe3 as any).displayTexture as GPUTexture;
+    const [r60, r20, r5] = await Promise.all([filmRow(fTex, 60), filmRow(fTex, 20), filmRow(fTex, 5)]);
+    const runs60 = brightRuns(r60), runs20 = brightRuns(r20), runs5 = brightRuns(r5);
+    const holes = runs60.length;
+    const mark = runs20.length === 1 && runs20[0][0] <= 1510 && runs20[0][1] >= 1490;
+    const clean5 = runs5.length === 0;
+    const fsOk = holes === 11 && mark && clean5;
+    log(`FILM-STRIP PROOF row60 (holes): ${runs60.map(([a, b]) => `${a}-${b}`).join(', ')} (n=${holes})`);
+    log(`FILM-STRIP PROOF row20 (mark): runs=${runs20.map(([a, b]) => `${a}-${b}`).join(', ') || 'none'} (expect 1 run @~1496..1504)`);
+    log(`FILM-STRIP PROOF row5 (rebate): runs=${runs5.length} (expect 0)`);
+    log(`FILM-STRIP FILTER: ${fsOk ? 'PASS' : 'FAIL'} -- vendored texture drives the 135 band (holes=${holes}==11:${holes === 11}, mark@1500:${mark}, rebate-clean:${clean5})`);
   } catch (e) {
     log('SYNTH test failed: ' + (e as Error).message);
   }

@@ -24,15 +24,11 @@ export const FRAME_BORDER: Record<FrameStyle, number> = {
   '120': 0.05,
   'print': 0.1,
 };
-
-// Sprocket-hole row height as a fraction of the frame (0 = no holes). Matches
-// holeF() in frame.wgsl.
-export const FRAME_HOLE: Record<FrameStyle, number> = {
-  'none': 0,
-  '135': 0.018,
-  '120': 0,
-  'print': 0,
-};
+// NOTE (case #4): '135' sprocket holes / edge markings are now a vendored
+// film-strip TEXTURE (public/frames/135-strip.png) sampled by frame.wgsl, not
+// procedural geometry -- FRAME_HOLE / inSprocketHole were removed with the old
+// procedural holes. The texture's irregular pattern is what makes it read as
+// real film instead of "ปลอมจัด".
 
 export function isNeutralFrame(style: FrameStyle): boolean {
   return style === 'none';
@@ -53,18 +49,4 @@ export function packFrame(style: FrameStyle, cropFrac: [number, number] = [1, 1]
 // border b: the inner rect [b, 1-b] maps to [0, 1].
 export function imageSource(nx: number, b: number): number {
   return Math.min(Math.max((nx - b) / (1 - 2 * b), 0), 1);
-}
-
-// True when the pixel at normalized (nx, ny) is inside a sprocket hole: a
-// repeating rect cell along the top/bottom rebate bands. Cell pitch 0.055,
-// hole filling the first 0.6 of the cell (width ~0.033). Matches frame.wgsl.
-export function inSprocketHole(nx: number, ny: number, style: Exclude<FrameStyle, 'none'>): boolean {
-  const hole = FRAME_HOLE[style];
-  if (hole <= 0) return false;
-  const b = FRAME_BORDER[style];
-  const phase = nx / 0.055 - Math.floor(nx / 0.055);
-  if (phase >= 0.6) return false;
-  const top = Math.abs(ny - b / 2) < hole / 2;
-  const bottom = Math.abs(ny - (1 - b / 2)) < hole / 2;
-  return top || bottom;
 }
