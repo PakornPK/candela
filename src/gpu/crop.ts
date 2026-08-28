@@ -202,7 +202,7 @@ export function packCrop(c: CropParams, W: number, H: number): Float32Array {
 }
 
 // The crop selection as a screen-space rect (texture pixels): the mask bbox
-// centered in the source, rotated by the straighten angle. The DOM crop
+// centered in the source, tilted by the STRAIGHTEN angle only. The DOM crop
 // overlay (#2 workbench) draws exactly this -- rect + dim outside -- so the
 // view shows the FULL image with a live crop selection instead of baked
 // letterbox bars.
@@ -211,12 +211,18 @@ export interface CropOverlayRect {
   y: number;
   w: number;
   h: number;
-  angle: number; // radians, matches the packed crop uniform
+  angle: number; // radians; straighten tilt only (NOT the 90° turns)
 }
 
 export function cropOverlayRect(c: CropParams, W: number, H: number): CropOverlayRect {
   const g = cropGeometry(c, W, H);
-  return { x: g.cx - g.halfW, y: g.cy - g.halfH, w: g.maskW, h: g.maskH, angle: g.angle };
+  // The frame is the mask bbox tilted by the STRAIGHTEN angle only. The 90°
+  // quarter-turns re-orient the mask axis-aligned (a landscape crop rotated
+  // 90° fills a PORTRAIT mask), so drawing the bbox at the TOTAL angle turns
+  // it landscape and it no longer hugs the rotated image -- the "crop แล้วหมุน
+  // / straighten mark หมุนตาม" reports. cropGeometry keeps the total angle for
+  // the shader + export; only the DOM selection uses the straighten tilt.
+  return { x: g.cx - g.halfW, y: g.cy - g.halfH, w: g.maskW, h: g.maskH, angle: (c.angle * Math.PI) / 180 };
 }
 
 // The crop mask bbox as a normalized [x, y, w, h] rect (left/top/size, 0..1) —

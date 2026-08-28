@@ -103,11 +103,17 @@ describe('crop', () => {
     expect(o.x).toBe(0); expect(o.w).toBe(200);
     expect(o.y).toBeCloseTo(43.75, 6); expect(o.h).toBeCloseTo(112.5, 6);
     // 90° turn of the full frame: vertical 200x300 content is zoomed 1.5 into
-    // the landscape 300x200 texture -> mask 133.3x200, rect re-orients (PI/2).
+    // the landscape 300x200 texture -> mask 133.3x200 (portrait). The DOM
+    // selection stays AXIS-ALIGNED (angle = straighten only = 0) so it hugs
+    // the portrait image -- the total angle belongs to the shader + export.
     const r = cropOverlayRect(crop({ rotate90: 1 }), 300, 200);
     expect(r.w).toBeCloseTo(133.33, 2); expect(r.h).toBe(200);
-    expect(r.x).toBeCloseTo(83.33, 2); expect(r.angle).toBeCloseTo(Math.PI / 2, 6);
-    // Straighten tilts the overlay rect, same angle the shader applies.
+    expect(r.x).toBeCloseTo(83.33, 2); expect(r.angle).toBe(0);
+    // A 90° turn + straighten: the frame carries the straighten tilt only --
+    // it must not also rotate by the quarter-turn ("straighten mark หมุนตาม").
+    const rt = cropOverlayRect(crop({ rotate90: 1, angle: 3 }), 300, 200);
+    expect(rt.angle).toBeCloseTo((3 * Math.PI) / 180, 6);
+    // Straighten tilts the overlay rect by the straighten angle.
     const s = cropOverlayRect(crop({ angle: 3 }), W, H);
     expect(s.angle).toBeCloseTo((3 * Math.PI) / 180, 6);
     expect(s.x).toBeCloseTo((W - s.w) / 2, 6);
