@@ -128,6 +128,13 @@
         position: relative;
         background: var(--bg);
       }
+      /* Contact has no side panels -- its single .content must fill the whole
+         row, not auto-place into the 220px left column of the 3-col template.
+         (Library/Develop carry asides, so auto-placement puts their content in
+         the 1fr middle column and they're unaffected.) */
+      #module-contact {
+        grid-template-columns: 1fr;
+      }
       .panel-title {
         margin: 0 0 8px;
         font-size: 11px;
