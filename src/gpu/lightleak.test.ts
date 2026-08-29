@@ -120,4 +120,13 @@ describe('lightleak', () => {
     expect(Array.from(packLightleak({ amount: 1, hue: 0, fade: 0, pattern: 9 }, 0.25))[5]).toBe(3);
     expect(Array.from(packLightleak({ amount: 1, hue: 0, fade: 0, pattern: -5 }, 0.25))[5]).toBe(0);
   });
+
+  it('carries the B&W-treatment flag in pad slot 6 (1 = desaturate the leak)', () => {
+    const color = packLightleak({ amount: 80, hue: 0, fade: 0, pattern: -1 }, 0.5);
+    expect(color[6]).toBe(0);
+    const bw = packLightleak({ amount: 80, hue: 0, fade: 0, pattern: -1 }, 0.5, true);
+    expect(bw[6]).toBe(1);
+    // slot 7 stays reserved; the shader struct reads slot 6 as `bw`.
+    expect(bw[7]).toBe(0);
+  });
 });

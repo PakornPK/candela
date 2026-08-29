@@ -36,11 +36,12 @@ export function isNeutralLightleak(p: LightleakParams): boolean {
 
 // Layout must match the `Lightleak` struct in lightleak.wgsl (8 f32s):
 // amount, hue, fade, seed, patternMode (0 auto / 1 fixed), patternSel (0-3 =
-// Set A..D). Mirrored by the shader's fam selection.
-export function packLightleak(p: LightleakParams, seed: number): Float32Array {
+// Set A..D), bw (1 = B&W treatment active -> the leak renders gray), pad.
+// Mirrored by the shader's fam selection + the bw desaturation branch.
+export function packLightleak(p: LightleakParams, seed: number, bwActive = false): Float32Array {
   const mode = p.pattern === -1 ? 0 : 1;
   const sel = Math.min(Math.max(Math.round(p.pattern), 0), 3);
-  return new Float32Array([p.amount, p.hue, p.fade, seed, mode, sel, 0, 0]);
+  return new Float32Array([p.amount, p.hue, p.fade, seed, mode, sel, bwActive ? 1 : 0, 0]);
 }
 
 // How far the `fade` envelope reaches into the frame (fraction, from the leak

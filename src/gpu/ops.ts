@@ -231,14 +231,18 @@ export const OP_RENDERERS: OpRenderer[] = [
     // A creative display-level effect (not in LrC) that belongs BEFORE the
     // crop: it bakes into the cropped content (cropping a leaked shot keeps
     // the leak), and its X-Half shape spreads corner-to-corner. Seed shared
-    // with grain (same film-roll character). Absent op packs the neutral
-    // defaults (amount 0) so a no-op pass renders as identity.
+    // with grain (same film-roll character). Runs AFTER bw's desaturation in
+    // the chain, so when the B&W treatment is active the shader desaturates
+    // its own contribution -- a B&W film leak is a bright gray band, not a
+    // colored one (the bw flag rides the lightleak uniform pad). Absent op
+    // packs the neutral defaults (amount 0) so a no-op pass renders as
+    // identity.
     shader: lightleakShader,
-    uniformSize: 32, // struct Lightleak { 6 f32 + 2 pad }
+    uniformSize: 32, // struct Lightleak { 6 f32 + bw flag + pad }
     packParams: (ops) => {
       const op = ops.find(isLightleakOp);
       const p: LightleakParams = op ?? { amount: 0, hue: 0, fade: 0, pattern: -1 };
-      return packLightleak(p, getGrainSeed());
+      return packLightleak(p, getGrainSeed(), ops.some(isBwOp));
     },
   },
   {

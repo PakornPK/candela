@@ -33,7 +33,7 @@ struct Lightleak {
   seed: f32,         // [0,1) -- per-file, shared with grain
   patternMode: f32,  // 0 = auto (seed picks the set), 1 = fixed (patternSel)
   patternSel: f32,   // 0 = Set A, 1 = Set B (used when patternMode = 1)
-  _pad2: f32,
+  bw: f32,           // 1 = B&W treatment active -> the leak renders gray
   _pad3: f32,
 };
 
@@ -101,7 +101,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let t1 = textureSampleLevel(leakTexs, leakSamp, uv, fam * 3u + 1u, 0.0).rgb;
   let t2 = textureSampleLevel(leakTexs, leakSamp, uv, fam * 3u + 2u, 0.0).rgb;
   let w = leakWeights(clamp(p.hue * 0.01, 0.0, 1.0));
-  let tex = t0 * w.x + t1 * w.y + t2 * w.z;
+  var tex = t0 * w.x + t1 * w.y + t2 * w.z;
+  // B&W treatment active (the bw op already dropped the image's chroma, so
+  // the leak would re-add color on top of a gray image): desaturate the leak
+  // to its linear luma -- the same weights as LUMA_WEIGHTS (tone.ts), which is
+  // exactly what a neutral B&W mix produces, so a default-treatment shot shows
+  // the precise bwLuminance result for the leak too.
+  // ponytail: fixed luma weights; a tuned B&W mix shifts the leak's gray vs the
+  // image by that band's weight -- pass the mix array here if the user flags it.
+  if (p.bw > 0.5) {
+    let lg = dot(tex, vec3<f32>(0.2126729, 0.7151522, 0.072175));
+    tex = vec3<f32>(lg);
+  }
   let d = edgeDistance(edge, nx, ny);
   let fade01 = clamp(p.fade * 0.01, 0.0, 1.0);
   let fadeGain = mix(1.0, 1.0 - smoothstep(0.0, LEAK_WIDTH, d), fade01);
