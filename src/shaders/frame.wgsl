@@ -31,6 +31,14 @@ fn borderF(style: u32) -> f32 {
   return 0.06;
 }
 
+// 135 sprocket holes are procedural, matching the contact sheet look (clean
+// #d9d5cc rects on #171614 film): the vendored photo's holes are ~3px in a
+// 2048px strip -- at frame scale they render as 1-2px slits, not holes.
+const PITCH_135 = 0.077;  // contact sheet hole pitch, fraction of frame width
+const HOLE_W_135 = 0.022; // contact sheet hole width, fraction of frame width
+const FILM_135 = vec3<f32>(0.00858, 0.00801, 0.00699); // #171614, linear
+const HOLE_135 = vec3<f32>(0.694, 0.665, 0.604);       // #d9d5cc, linear
+
 @group(0) @binding(0) var inTex: texture_2d<f32>;
 @group(0) @binding(1) var outTex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> p: Frame;
@@ -86,15 +94,26 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   }
 
   // Rebate band: every style samples its own REAL strip texture (layer =
-  // style: 0 '135' sprocket edge, 1 '120' paper backing, 2 'print' matte).
-  // The band maps to the strip's top / bottom halves (uv.y 0..0.5 top,
-  // 0.5..1 bottom); the photo itself is drawn by the image branch above,
-  // never by the texture.
+  // style: 0 '135' sprocket edge, 1 '120' paper backing, 2 'print' matte),
+  // EXCEPT the 135 holes, which are procedural (see PITCH_135 above). The
+  // band maps to the strip's top / bottom halves (uv.y 0..0.5 top, 0.5..1
+  // bottom); the photo itself is drawn by the image branch above, never by
+  // the texture.
   let px2 = (nx - cropL) / cfx;      // 0..1 across the crop content
   var py = (ny - cropT) / cfy;
   let top = py < b;
   if (!top) { py = 1.0 - py; }
   let band = clamp(py / b, 0.0, 1.0); // 0..1 across the band thickness
+  if (style == 0u) {
+    // Clean sprocket holes, centered: hole = 2.2% of the frame wide, 60% of
+    // the band tall (contact sheet proportions), ~13 across.
+    let centerX = 0.5 + round((px2 - 0.5) / PITCH_135) * PITCH_135;
+    let inX = abs(px2 - centerX) < HOLE_W_135 * 0.5;
+    let inY = abs(band - 0.5) < 0.3;
+    let color = select(FILM_135, HOLE_135, inX && inY);
+    textureStore(outTex, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
+    return;
+  }
   let uv = vec2<f32>(px2, select(band * 0.5 + 0.5, band * 0.5, top));
   let color = textureSampleLevel(frameTexs, filmSamp, uv, style, 0.0).rgb;
   textureStore(outTex, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
