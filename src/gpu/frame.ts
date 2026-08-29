@@ -24,6 +24,11 @@ export const FRAME_BORDER: Record<FrameStyle, number> = {
   '120': 0.05,
   'print': 0.1,
 };
+
+// Thin black rebate / light gap line around the photo in darkroom print (fraction of frame).
+// Matches KEYLINE_PRINT in frame.wgsl.
+export const PRINT_KEYLINE = 0.005;
+
 // NOTE (case #4 -> now): all three frame bands are REAL vendored photographs
 // (public/frames/{135,120,print}-strip.png, scripts/vend-frames.mjs -- real
 // film/paper from Wikimedia Commons, CC BY, license committed) sampled by
@@ -53,3 +58,12 @@ export function packFrame(style: FrameStyle, region: [number, number, number, nu
 export function imageSource(nx: number, b: number): number {
   return Math.min(Math.max((nx - b) / (1 - 2 * b), 0), 1);
 }
+
+// Tests whether a coordinate (nx, ny) in normalized crop space is inside the
+// thin black keyline surrounding the image in darkroom print mode.
+export function isPrintKeyline(nx: number, ny: number, b: number = FRAME_BORDER.print, keyline: number = PRINT_KEYLINE): boolean {
+  const inOuter = nx >= b - keyline && nx <= 1 - b + keyline && ny >= b - keyline && ny <= 1 - b + keyline;
+  const inInner = nx > b && nx < 1 - b && ny > b && ny < 1 - b;
+  return inOuter && !inInner;
+}
+

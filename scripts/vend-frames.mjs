@@ -201,13 +201,13 @@ try {
   writeFileSync(join(OUT, '120-strip.png'), encodePng(BW, BH * 2, strip120));
   console.log('120-strip:', bandStats(band120, BW, BH));
 
-  // ==== print band (sr1 film base): real matte paper, normalized white =======
-  // Print matte = real paper. The same film base normalized to paper white
-  // (~252) with a warm cast reads as fibre paper at the 0.1 border thickness.
-  // Same verified CC BY 2.0 source as the 135/120 bands -> one attribution.
+  // ==== print band (sr1 film base): premium fine-art white paper ============
+  // Premium white baryta / archival cotton paper: clean neutral white (~254)
+  // with a very subtle, elegant micro-texture (amp 2, neutral [0,0,0]).
+  // Clean, luxurious, and free of yellowing/muddiness.
   const fbP = filmBase(sr1);
   const bandPrint = mirrorTile(fbP.data, fbP.W, fbP.H, BW, BH);
-  normTo(bandPrint, 252, 6, [2, 0, -2]);
+  normTo(bandPrint, 254, 2, [0, 0, 0]);
   const stripPrint = Buffer.alloc(BW * BH * 2 * 4);
   bandPrint.copy(stripPrint, 0); bandPrint.copy(stripPrint, BW * BH * 4);
   writeFileSync(join(OUT, 'print-strip.png'), encodePng(BW, BH * 2, stripPrint));

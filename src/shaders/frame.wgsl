@@ -39,6 +39,11 @@ const HOLE_W_135 = 0.022; // contact sheet hole width, fraction of frame width
 const FILM_135 = vec3<f32>(0.00858, 0.00801, 0.00699); // #171614, linear
 const HOLE_135 = vec3<f32>(0.694, 0.665, 0.604);       // #d9d5cc, linear
 
+// Darkroom print: thin black rebate keyline (fraction of frame) surrounding the photo,
+// representing the light gap around the negative carrier in an enlarger.
+const KEYLINE_PRINT = 0.005;
+
+
 @group(0) @binding(0) var inTex: texture_2d<f32>;
 @group(0) @binding(1) var outTex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> p: Frame;
@@ -113,6 +118,18 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let color = select(FILM_135, HOLE_135, inX && inY);
     textureStore(outTex, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
     return;
+  }
+  if (style == 2u) {
+    // Darkroom print: thin black rebate line immediately surrounding the photo
+    // (where enlarger light spills past the negative carrier gate/rebate),
+    // surrounded by white matte paper (where the easel blades mask the paper).
+    let py_raw = (ny - cropT) / cfy;
+    let inKeyline = px2 >= b - KEYLINE_PRINT && px2 <= 1.0 - b + KEYLINE_PRINT &&
+                    py_raw >= b - KEYLINE_PRINT && py_raw <= 1.0 - b + KEYLINE_PRINT;
+    if (inKeyline) {
+      textureStore(outTex, vec2<i32>(id.xy), vec4<f32>(FILM_135, 1.0));
+      return;
+    }
   }
   let uv = vec2<f32>(px2, select(band * 0.5 + 0.5, band * 0.5, top));
   let color = textureSampleLevel(frameTexs, filmSamp, uv, style, 0.0).rgb;
