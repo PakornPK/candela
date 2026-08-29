@@ -699,6 +699,98 @@
       }
 
       /* ---- error toast ---- */
+      #help-btn {
+        margin-left: auto;
+        width: 26px;
+        height: 26px;
+        border-radius: 50%;
+        line-height: 1;
+        font-weight: 700;
+      }
+      /* Fullscreen gate for browsers without WebGPU -- a dead UI is confusing,
+         a clear "use Chrome" is not. (#error stays a toast for runtime errors.) */
+      #gpu-gate {
+        position: fixed;
+        inset: 0;
+        z-index: 100;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0, 0, 0, 0.85);
+        color: #ddd;
+      }
+      #gpu-gate[hidden] {
+        display: none;
+      }
+      #gpu-gate > div {
+        max-width: 460px;
+        padding: 24px 28px;
+        background: #1c1c1c;
+        border: 1px solid #444;
+        border-radius: 8px;
+        line-height: 1.6;
+      }
+      #gpu-gate h1 {
+        margin: 0 0 12px;
+        font-size: 18px;
+        color: #fff;
+      }
+      #gpu-gate ul {
+        margin: 8px 0;
+        padding-left: 20px;
+      }
+      #gpu-gate .detail {
+        color: #999;
+        font-size: 12px;
+        font-family: ui-monospace, monospace;
+      }
+      dialog#help-dialog {
+        position: relative;
+        border: 1px solid #555;
+        border-radius: 8px;
+        background: #1c1c1c;
+        color: #ddd;
+        max-width: 520px;
+        padding: 20px 24px;
+        line-height: 1.6;
+      }
+      dialog#help-dialog::backdrop {
+        background: rgba(0, 0, 0, 0.6);
+      }
+      dialog#help-dialog h2 {
+        margin: 0 0 10px;
+        color: #fff;
+        font-size: 16px;
+      }
+      dialog#help-dialog ol {
+        margin: 0;
+        padding-left: 22px;
+      }
+      dialog#help-dialog li {
+        margin: 6px 0;
+      }
+      dialog#help-dialog kbd {
+        background: #333;
+        border: 1px solid #555;
+        border-bottom-width: 2px;
+        border-radius: 4px;
+        padding: 1px 6px;
+        font-size: 12px;
+        font-family: ui-monospace, monospace;
+      }
+      dialog#help-dialog .help-close {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        border: none;
+        background: none;
+        color: #999;
+        font-size: 16px;
+        cursor: pointer;
+      }
+      dialog#help-dialog .help-close:hover {
+        color: #fff;
+      }
       #error {
         position: fixed;
         bottom: 96px;
@@ -893,6 +985,7 @@
         <button data-module="library" class="active">Library</button>
         <button data-module="develop">Develop</button>
         <button data-module="contact">Contact Sheet</button>
+        <button id="help-btn" title="How to use">?</button>
         <span id="brand">Candela</span>
       </header>
 
@@ -1258,6 +1351,30 @@
           <summary>See detail</summary>
           <pre id="error-detail"></pre>
         </details>
+      </div>
+
+      <dialog id="help-dialog">
+        <form method="dialog"><button class="help-close" aria-label="Close">✕</button></form>
+        <h2>How to use Candela</h2>
+        <ol>
+          <li><b>Open a folder</b> — in <b>Library</b>, click <b>＋</b> next to "Folders" and pick a folder of raw files (desktop Chrome / Edge / Opera). It is read only in your browser — nothing is uploaded.</li>
+          <li><b>Cull</b> — step with <kbd>←</kbd> <kbd>→</kbd>. Rate <kbd>1</kbd>–<kbd>5</kbd>, reject <kbd>X</kbd>, pick <kbd>P</kbd>, clear <kbd>U</kbd>, color <kbd>6</kbd>–<kbd>9</kbd>. Filter with the checkboxes on the left.</li>
+          <li><b>Develop</b> — <kbd>E</kbd> opens the loupe. Adjust White Balance, Tone, Presence, Tone Curve, Effects, Crop… every edit is live, undoable (<kbd>Ctrl</kbd>+<kbd>Z</kbd>), and saved with the file. Hold <kbd>\</kbd> for before/after.</li>
+          <li><b>Export</b> — pick a format (JPEG / PNG / TIFF), size and preset, then press <b>Export</b>.</li>
+        </ol>
+      </dialog>
+
+      <div id="gpu-gate" hidden>
+        <div>
+          <h1>Candela needs a WebGPU browser</h1>
+          <p>Every adjustment runs on the GPU, so this app can't run in the browser you're using right now.</p>
+          <ul>
+            <li>Use the latest <b>Google Chrome</b>, <b>Microsoft Edge</b>, or <b>Opera</b> on a desktop computer.</li>
+            <li>Open the site over <b>HTTPS</b> or <b>localhost</b>.</li>
+            <li>Safari, Firefox, and mobile browsers aren't supported yet.</li>
+          </ul>
+          <p class="detail" id="gpu-gate-detail"></p>
+        </div>
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>

@@ -243,6 +243,17 @@ function showError(message: string, detail?: string): void {
   errorEl.hidden = false;
 }
 
+// Fullscreen gate for browsers without WebGPU -- the whole app is unusable, so
+// a corner toast is not enough. Called before/at Pipeline.create; the detail
+// is the specific reason (no navigator.gpu, no adapter, init failure).
+const gpuGate = document.querySelector<HTMLDivElement>('#gpu-gate')!;
+const gpuGateDetail = document.querySelector<HTMLParagraphElement>('#gpu-gate-detail')!;
+
+function showGpuGate(reason: string): void {
+  gpuGateDetail.textContent = reason;
+  gpuGate.hidden = false;
+}
+
 function clearError(): void {
   errorEl.hidden = true;
   errorMessageEl.textContent = '';
@@ -1175,6 +1186,15 @@ function drawHistogram(data: Uint8Array): void {
 }
 
 async function init(): Promise<void> {
+  // Gate before touching the catalog: no WebGPU means the app cannot run, no
+  // point opening IndexedDB or wiring UI. Pipeline.create throws its own clear
+  // errors ("WebGPU is not supported...", "No WebGPU adapter available.") when
+  // navigator.gpu exists but the adapter fails -- those land in showGpuGate too.
+  if (!('gpu' in navigator)) {
+    showGpuGate('navigator.gpu is undefined — WebGPU is not enabled in this browser.');
+    return;
+  }
+
   let db: IDBDatabase;
   try {
     db = await openCatalogDb();
@@ -1187,10 +1207,7 @@ async function init(): Promise<void> {
   try {
     pipeline = await Pipeline.create(canvas);
   } catch (err) {
-    showError("This browser can't run the editor (WebGPU is required).", errorDetail(err));
-    addFolderButton.disabled = true;
-    exposureSlider.disabled = true;
-    wbSlider.disabled = true;
+    showGpuGate(errorDetail(err));
     return;
   }
 
@@ -2621,6 +2638,10 @@ async function init(): Promise<void> {
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-module]')) {
     button.addEventListener('click', () => switchModule(button.dataset.module as ModuleId));
   }
+
+  document.querySelector<HTMLButtonElement>('#help-btn')!.addEventListener('click', () => {
+    document.querySelector<HTMLDialogElement>('#help-dialog')!.showModal();
+  });
 
   // Keeps the topbar tab highlight in sync with the active module,
   // whichever path changed it (click or G/E shortcut).

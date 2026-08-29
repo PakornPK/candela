@@ -47,6 +47,21 @@ Rust + wgpu unchanged if the core ever moves to native.
 - JPEG / PNG / 16-bit TIFF, with box-pyramid downscale (exact area-average, no
   single bilinear leap)
 
+## How to use
+
+1. **Open a folder** — in Library, click **＋** next to "Folders" and pick a
+   folder of raw files. It is read only in your browser — nothing is uploaded.
+2. **Cull** — step through shots with **←** / **→**. Rate **1–5**, reject **X**,
+   pick **P**, clear **U**, paint a color **6–9**. Filter with the checkboxes
+   on the left.
+3. **Develop** — **E** opens the loupe. Adjust White Balance, Tone, Presence,
+   Tone Curve, Effects, Crop… every edit is live, undoable (**Ctrl+Z**), and
+   saved with the file. Hold **\** for before/after.
+4. **Export** — pick a format (JPEG / PNG / TIFF), size and preset, then press
+   **Export**.
+
+The same guide is available in-app via the **?** button in the top bar.
+
 ## Tech stack
 
 - TypeScript + Vite, vanilla DOM (no UI framework)
@@ -59,7 +74,8 @@ Rust + wgpu unchanged if the core ever moves to native.
 
 Requires a **Chromium browser with WebGPU** (Chrome / Edge / Opera). WebGPU and
 the File System Access API are secure-context-only, so run over `localhost` or
-HTTPS.
+HTTPS. On a browser without WebGPU (Safari, Firefox, mobile) the app shows a
+full-screen notice explaining what's needed instead of a dead UI.
 
 ```sh
 npm install
