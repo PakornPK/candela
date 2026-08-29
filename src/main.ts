@@ -175,6 +175,7 @@ const contactNext = document.querySelector<HTMLButtonElement>('#contact-next')!;
 const contactSheetLabel = document.querySelector<HTMLSpanElement>('#contact-sheet-label')!;
 const contactRollLabel = document.querySelector<HTMLDivElement>('#contact-roll-label')!;
 const contactGrid = document.querySelector<HTMLDivElement>('#contact-grid')!;
+const contactExport = document.querySelector<HTMLButtonElement>('#contact-export')!;
 const errorEl = document.querySelector<HTMLDivElement>('#error')!;
 const errorMessageEl = document.querySelector<HTMLParagraphElement>('#error-message')!;
 const errorDetailEl = document.querySelector<HTMLPreElement>('#error-detail')!;
@@ -2537,31 +2538,118 @@ async function init(): Promise<void> {
       return;
     }
     const frames = sheets[contactSheetIdx];
-    frames.forEach((file, i) => {
-      const cell = document.createElement('div');
-      cell.className = 'contact-frame';
-      cell.title = file.path;
-      cell.addEventListener('click', () => {
-        openFile(file);
-        switchModule('develop'); // proofing: click a frame, see it full
+    // One row = one strip of film: 6 frames side by side (real 35mm is cut
+    // and printed in 6-frame strips); the sprocket bands are the CSS
+    // ::before/::after on .contact-strip.
+    const FRAMES_PER_STRIP = 6;
+    for (let r = 0; r < frames.length; r += FRAMES_PER_STRIP) {
+      const strip = document.createElement('div');
+      strip.className = 'contact-strip';
+      const inner = document.createElement('div');
+      inner.className = 'contact-strip-frames';
+      frames.slice(r, r + FRAMES_PER_STRIP).forEach((file, j) => {
+        const cell = document.createElement('div');
+        cell.className = 'contact-frame';
+        cell.title = file.path;
+        cell.addEventListener('click', () => {
+          openFile(file);
+          switchModule('develop'); // proofing: click a frame, see it full
+        });
+        const num = document.createElement('span');
+        num.className = 'contact-frame-num';
+        num.textContent = String(contactSheetIdx * CONTACT_SHEET_SIZE + r + j + 1).padStart(2, '0');
+        cell.appendChild(num);
+        inner.appendChild(cell);
+        getThumbnail(file).then((blob) => {
+          if (!blob) return;
+          const img = document.createElement('img');
+          img.src = URL.createObjectURL(blob);
+          img.addEventListener('load', () => URL.revokeObjectURL(img.src), { once: true });
+          img.addEventListener('error', () => {
+            URL.revokeObjectURL(img.src);
+            img.remove();
+          }, { once: true });
+          cell.appendChild(img);
+        });
       });
-      const num = document.createElement('span');
-      num.className = 'contact-frame-num';
-      num.textContent = String(contactSheetIdx * CONTACT_SHEET_SIZE + i + 1).padStart(2, '0');
-      cell.appendChild(num);
-      contactGrid.appendChild(cell);
-      getThumbnail(file).then((blob) => {
-        if (!blob) return;
-        const img = document.createElement('img');
-        img.src = URL.createObjectURL(blob);
-        img.addEventListener('load', () => URL.revokeObjectURL(img.src), { once: true });
-        img.addEventListener('error', () => {
-          URL.revokeObjectURL(img.src);
-          img.remove();
-        }, { once: true });
-        cell.appendChild(img);
+      strip.appendChild(inner);
+      contactGrid.appendChild(strip);
+    }
+  }
+
+  // Rasterize the visible sheet to a PNG at 2x, mirroring the DOM strip
+  // layout (sprocket bands, 3:2 cover-cropped frames, frame numbers).
+  function exportContactSheet(): void {
+    const S = 2; // export scale
+    const FW = 240 * S; // frame width
+    const FH = Math.round((FW * 2) / 3); // 3:2 frame height
+    const GAP = 8 * S; // between frames
+    const BAND_H = 10 * S; // sprocket band height
+    const STRIP_GAP = 6 * S; // band -> frames -> band
+    const PAD_X = 12 * S;
+    const PAD_Y = 8 * S;
+    const SHEET_GAP = 14 * S;
+    const PER_STRIP = 6;
+    const strips = [...contactGrid.querySelectorAll<HTMLElement>('.contact-strip')];
+    if (strips.length === 0) return;
+    const stripContentW = PER_STRIP * FW + (PER_STRIP - 1) * GAP;
+    const totalW = stripContentW + PAD_X * 2;
+    const stripH = PAD_Y * 2 + BAND_H * 2 + STRIP_GAP * 2 + FH;
+    const totalH = strips.length * stripH + (strips.length - 1) * SHEET_GAP;
+    const canvas = document.createElement('canvas');
+    canvas.width = totalW;
+    canvas.height = totalH;
+    const ctx = canvas.getContext('2d')!;
+    ctx.fillStyle = '#0d0d0d'; // paper
+    ctx.fillRect(0, 0, totalW, totalH);
+    const drawSprocket = (x: number, y: number, w: number, h: number) => {
+      ctx.fillStyle = '#171614';
+      ctx.fillRect(x, y, w, h);
+      ctx.fillStyle = '#d9d5cc';
+      const pitch = 7 * S;
+      const holeX = 5 * S;
+      const holeW = 4 * S;
+      for (let hx = x; hx < x + w; hx += pitch * 2) {
+        ctx.fillRect(hx + holeX, y + 3 * S, holeW, h - 6 * S);
+      }
+    };
+    strips.forEach((strip, si) => {
+      const stripY = si * (stripH + SHEET_GAP);
+      ctx.fillStyle = '#232323';
+      ctx.fillRect(0, stripY, totalW, stripH);
+      drawSprocket(PAD_X, stripY + PAD_Y, stripContentW, BAND_H);
+      drawSprocket(PAD_X, stripY + stripH - PAD_Y - BAND_H, stripContentW, BAND_H);
+      const framesY = stripY + PAD_Y + BAND_H + STRIP_GAP;
+      const cells = [...strip.querySelectorAll<HTMLElement>('.contact-frame')];
+      cells.forEach((cell, i) => {
+        const x = PAD_X + i * (FW + GAP);
+        ctx.fillStyle = '#0a0a0a'; // placeholder while a thumbnail is missing
+        ctx.fillRect(x, framesY, FW, FH);
+        const img = cell.querySelector<HTMLImageElement>('img');
+        if (img && img.complete && img.naturalWidth > 0) {
+          const s = Math.max(FW / img.naturalWidth, FH / img.naturalHeight);
+          const sw = FW / s;
+          const sh = FH / s;
+          ctx.drawImage(img, (img.naturalWidth - sw) / 2, (img.naturalHeight - sh) / 2, sw, sh, x, framesY, FW, FH);
+        }
+        // frame number chip (matches .contact-frame-num)
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.65)';
+        ctx.fillRect(x, framesY, FW, 22 * S);
+        ctx.fillStyle = '#eee';
+        ctx.font = `${11 * S}px ui-monospace, monospace`;
+        const num = cell.querySelector('.contact-frame-num')?.textContent ?? '';
+        ctx.fillText(num, x + 6 * S, framesY + 16 * S);
       });
     });
+    canvas.toBlob((blob) => {
+      if (!blob) return;
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `contact-sheet-${contactSheetIdx + 1}.png`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }, 'image/png');
   }
 
   // ---- module wiring ----
@@ -2634,6 +2722,7 @@ async function init(): Promise<void> {
     contactSheetIdx++;
     renderContactSheet();
   });
+  contactExport.addEventListener('click', exportContactSheet);
 
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-module]')) {
     button.addEventListener('click', () => switchModule(button.dataset.module as ModuleId));
