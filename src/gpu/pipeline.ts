@@ -818,7 +818,7 @@ async function loadFilmStrips(device: GPUDevice): Promise<GPUTexture> {
   const layers = await Promise.all(
     NAMES.map(async (name) => {
       try {
-        const res = await fetch(`/frames/${name}.png`);
+        const res = await fetch(import.meta.env.BASE_URL + `frames/${name}.png`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const bitmap = await createImageBitmap(await res.blob());
         const c = document.createElement('canvas');
@@ -863,7 +863,7 @@ async function loadLightLeaks(device: GPUDevice): Promise<GPUTexture> {
   const layers = await Promise.all(
     [...Array(N).keys()].map(async (i) => {
       try {
-        const res = await fetch(`/leaks/leak-${i}.png`);
+        const res = await fetch(import.meta.env.BASE_URL + `leaks/leak-${i}.png`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const bitmap = await createImageBitmap(await res.blob());
         const c = document.createElement('canvas');
