@@ -561,7 +561,7 @@ function readLightleakParams(): LightleakParams {
     amount: Number(lightleakAmountSlider.value),
     hue: Number(lightleakHueSlider.value),
     fade: Number(lightleakFadeSlider.value),
-    pattern: Number(lightleakPatternSelect.value), // -1 auto, 0 Set A, 1 Set B
+    pattern: Number(lightleakPatternSelect.value), // -1 auto, 0..3 Set A..D
   };
 }
 
@@ -2017,7 +2017,7 @@ async function init(): Promise<void> {
     commitCurrentEdit();
   });
 
-  // Light-leak pattern is a discrete set switch (Auto / Set A / Set B) -- one
+  // Light-leak pattern is a discrete set switch (Auto / Set A..D) -- one
   // render + one history commit per change, like the frame style select.
   lightleakPatternSelect.addEventListener('change', () => {
     onSliderInput();

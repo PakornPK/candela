@@ -1,7 +1,9 @@
 // Vendors the downloaded Resource Boy light-leak PHOTOS (light_leak/NNN.jpg)
-// into the six committed additive leak textures the shader samples
-// (public/leaks/leak-{0..5}.png): two PATTERN SETS of three hue anchors
-// (Set A = leak-0..2, Set B = leak-3..5). Replaces the old procedural
+// into the committed additive leak textures the shader samples
+// (public/leaks/leak-{0..11}.png): FOUR PATTERN SETS of three hue anchors
+// (Set A = leak-0..2, Set B = leak-3..5, Set C = leak-6..8, Set D =
+// leak-9..11). The app uploads them as one texture_2d_array (12 layers) and
+// the shader picks a layer by set*3 + hue-anchor. Replaces the old procedural
 // stand-ins: real scans now drive the leak.
 //
 // Source: Resource Boy Light Leak Overlays (https://resourceboy.com) —
@@ -16,7 +18,8 @@
 // top, (2) downscaled to 1024x1024 (uv-space proportions are unchanged by the
 // squish — it only blurs), (3) kept as-is. Only BLACK-background leaks work
 // additively: a bright full-frame scene averages to neutral gray. These were
-// picked from the 250 by corner-brightness + bright-centroid analysis.
+// picked from the 250 by corner-brightness + bright-centroid analysis (see
+// Set C/D below; Set A/B were the original six).
 //
 // Usage: node scripts/vend-light-leaks.mjs
 // Requires: macOS sips (JPG decode + rotate + resize) + light_leak/ present.
@@ -27,9 +30,9 @@ import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
-// Two PATTERN SETS, each with one leak per hue anchor (0 warm, 1 mid, 2 cool).
-// The UI picker selects a set (or Auto, where the per-photo seed flips the
-// set), and `hue` blends the set's three textures. `edge` is the photo's
+// Four PATTERN SETS, each with one leak per hue anchor (0 warm, 1 mid, 2 cool).
+// The UI picker selects a set (or Auto, where the per-photo seed picks among
+// the four), and `hue` blends the set's three textures. `edge` is the photo's
 // dominant bright edge; the script rotates it to the top. Measured by the
 // edge-luma analysis (all 250; only ~61 have dark backgrounds usable for
 // additive leaks).
@@ -37,6 +40,10 @@ import { fileURLToPath } from 'node:url';
 //   red->pink->white, 174 bright warm yellow, 139 cool cyan->white->blue).
 //   Set B (leak-3..5) = picked from the same dark-bg pool for RICHER casts:
 //   150 saturated warm orange, 122 muted cream, 196 cool blue-white glow.
+//   Set C (leak-6..8) = punchy saturated casts (182 strong golden-amber, 185
+//   warm sepia-brown, 248 teal-blue) -- the strong-color end of the pool.
+//   Set D (leak-9..11) = moody dark casts (160 deep crimson, 230 golden
+//   amber, 210 green-teal) -- the deep/muted end, incl. the only green leak.
 const SETS = [
   { note: 'Set A: subtle pale bands', texs: [
     { src: '119', edge: 'r', note: 'warm red->pink->white right band' },
@@ -47,6 +54,16 @@ const SETS = [
     { src: '150', edge: 'r', note: 'saturated warm orange right band' },
     { src: '122', edge: 'r', note: 'muted warm cream right band' },
     { src: '196', edge: 'r', note: 'cool blue-white glow (center-right)' },
+  ] },
+  { note: 'Set C: punchy saturated casts', texs: [
+    { src: '182', edge: 'l', note: 'strong golden-amber left band' },
+    { src: '185', edge: 't', note: 'warm sepia-brown top band' },
+    { src: '248', edge: 'l', note: 'teal-blue left band' },
+  ] },
+  { note: 'Set D: moody dark casts', texs: [
+    { src: '160', edge: 'r', note: 'deep crimson right band' },
+    { src: '230', edge: 'l', note: 'golden amber left band' },
+    { src: '210', edge: 't', note: 'green-teal top band' },
   ] },
 ];
 // Clockwise degrees to bring each photo edge to the texture top.

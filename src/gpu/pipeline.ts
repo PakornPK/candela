@@ -91,7 +91,7 @@ export class Pipeline {
   // sRGB -> linear, matching the old procedural colors.
   private readonly filmStripTexture: GPUTexture;
   private readonly filmStripSampler: GPUSampler;
-  private readonly leakTextures: GPUTexture[];
+  private readonly leakTextures: GPUTexture;
   private readonly leakSampler: GPUSampler;
 
   private constructor(
@@ -99,7 +99,7 @@ export class Pipeline {
     private readonly context: GPUCanvasContext,
     private readonly format: GPUTextureFormat,
     filmStripTexture: GPUTexture,
-    leakTextures: GPUTexture[],
+    leakTextures: GPUTexture,
   ) {
     this.unpackPipeline = device.createComputePipeline({
       layout: 'auto',
@@ -400,12 +400,12 @@ export class Pipeline {
           { binding: 4, resource: this.filmStripSampler },
         );
       }
-      // Light leak carries seven: the six vendored leak textures (2 pattern
-      // sets x 3 hue anchors) + one shared linear sampler
-      // (lightleak.wgsl binding 3..9).
+      // Light leak carries two: the ONE vendored leak array texture (12 layers
+      // = 4 pattern sets x 3 hue anchors) + a shared linear sampler
+      // (lightleak.wgsl binding 3..4).
       if (renderer.kind === 'lightleak') {
-        for (let b = 0; b < 6; b++) entries.push({ binding: 3 + b, resource: this.leakTextures[b].createView() });
-        entries.push({ binding: 9, resource: this.leakSampler });
+        entries.push({ binding: 3, resource: this.leakTextures.createView() });
+        entries.push({ binding: 4, resource: this.leakSampler });
       }
       const bindGroup = this.device.createBindGroup({
         layout: this.opPipelines[index].getBindGroupLayout(0),
@@ -793,7 +793,7 @@ export class Pipeline {
     this.cropBlitUniform.destroy();
     this.dodgeMaskTexture?.destroy();
     this.filmStripTexture.destroy();
-    for (const t of this.leakTextures) t.destroy();
+    this.leakTextures.destroy();
     // Samplers have no destroy() (device-lifetime objects) -- the texture owns
     // the memory.
   }
@@ -813,16 +813,49 @@ async function loadFilmStrip(device: GPUDevice): Promise<GPUTexture> {
   return loadPngTexture(device, '/frames/135-strip.png', 'rgba8unorm-srgb', 'film strip');
 }
 
-// The three vendored light-leak textures (real Resource Boy scans, scripts/
-// vend-light-leaks.mjs). rgba8unorm (NOT -srgb): the bytes are the scan's own
-// sRGB display values, kept as-is so `texture * gain` adds a screen-blend
-// amount to linear RGB (linearizing them crushed the gradient to a few value
-// buckets). A missing leak texture falls back to a 1x1 black texel, which
-// samples as 0 -- the leak just adds nothing for that asset.
-async function loadLightLeaks(device: GPUDevice): Promise<GPUTexture[]> {
-  // Six textures = 2 pattern sets x 3 hue anchors (Set A leak-0..2, Set B
-  // leak-3..5). See scripts/vend-light-leaks.mjs.
-  return Promise.all([0, 1, 2, 3, 4, 5].map((i) => loadPngTexture(device, `/leaks/leak-${i}.png`, 'rgba8unorm', 'light leak')));
+// The vendored light-leak textures (real Resource Boy scans, scripts/
+// vend-light-leaks.mjs) as ONE texture_2d_array. rgba8unorm (NOT -srgb): the
+// bytes are the scan's own sRGB display values, kept as-is so `texture * gain`
+// adds a screen-blend amount to linear RGB (linearizing them crushed the
+// gradient to a few value buckets). A missing layer decodes to null -> a
+// full-black layer, which samples as 0 -- the leak just adds nothing for that
+// asset. 12 layers = 4 pattern sets x 3 hue anchors (Set A layers 0-2, Set B
+// 3-5, Set C 6-8, Set D 9-11); the shader indexes layer = set*3 + anchor.
+async function loadLightLeaks(device: GPUDevice): Promise<GPUTexture> {
+  const N = 12;
+  const layers = await Promise.all(
+    [...Array(N).keys()].map(async (i) => {
+      try {
+        const res = await fetch(`/leaks/leak-${i}.png`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const bitmap = await createImageBitmap(await res.blob());
+        const c = document.createElement('canvas');
+        c.width = bitmap.width;
+        c.height = bitmap.height;
+        const cx = c.getContext('2d');
+        if (!cx) throw new Error(`no 2d context for light leak ${i}`);
+        cx.drawImage(bitmap, 0, 0);
+        return { width: bitmap.width, height: bitmap.height, data: cx.getImageData(0, 0, bitmap.width, bitmap.height).data };
+      } catch (err) {
+        console.error(`[gpu] light leak layer ${i} load failed, black fallback:`, err);
+        return null;
+      }
+    }),
+  );
+  const first = layers.find((l) => l !== null);
+  const W = first?.width ?? 1;
+  const H = first?.height ?? 1;
+  const tex = device.createTexture({
+    size: [W, H, N], // texture_2d_array, N layers
+    format: 'rgba8unorm',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+  });
+  for (let i = 0; i < N; i++) {
+    const l = layers[i];
+    const bytes = l ? l.data : new Uint8ClampedArray(W * H * 4);
+    device.queue.writeTexture({ texture: tex, mipLevel: 0, origin: [0, 0, i] }, bytes, { bytesPerRow: W * 4 }, [W, H, 1]);
+  }
+  return tex;
 }
 
 // Decode a committed PNG through a 2D canvas and upload via writeTexture --

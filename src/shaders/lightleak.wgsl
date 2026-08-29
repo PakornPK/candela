@@ -6,18 +6,19 @@
 // cool (cyan). Runs LAST in the op chain.
 //
 // The leak shape is VENDORED TEXTURE-DRIVEN (case #8 -- the old procedural
-// smoothstep+hash-band gradient looked "fake"). Six committed rgba8unorm
-// leak textures (public/leaks/leak-{0..5}.png, vendored from real Resource
-// Boy scans by scripts/vend-light-leaks.mjs) = TWO PATTERN SETS of three hue
-// anchors (Set A leak-0..2, Set B leak-3..5). A set is authored entering from
-// the TOP; the frame is rotated so the texture's top aligns with the
-// per-photo edge. `patternMode` picks the set: auto (0) = the per-photo seed
-// flips it (each file leaks differently), fixed (1) = the UI's `patternSel`.
-// The bytes are the scans' own sRGB display values (no -srgb), kept as-is so
-// `texture * gain` adds a screen-blend amount to linear RGB. `hue` blends the
-// chosen set's three texture weights (0 warm tex0, 50 mid tex1, 100 cool
-// tex2); `fade` scales a distance envelope on top of the textures' own
-// falloff (0 = texture shape, 100 = hard stop by LEAK_WIDTH).
+// smoothstep+hash-band gradient looked "fake"). Twelve committed rgba8unorm
+// leak textures (public/leaks/leak-{0..11}.png, vendored from real Resource
+// Boy scans by scripts/vend-light-leaks.mjs) uploaded as ONE texture_2d_array
+// = FOUR PATTERN SETS of three hue anchors (Set A layers 0-2, Set B 3-5,
+// Set C 6-8, Set D 9-11). A set is authored entering from the TOP; the frame
+// is rotated so the texture's top aligns with the per-photo edge.
+// `patternMode` picks the set: auto (0) = the per-photo seed picks among the
+// four (2 bits), fixed (1) = the UI's `patternSel` (0-3). The bytes are the
+// scans' own sRGB display values (no -srgb), kept as-is so `texture * gain`
+// adds a screen-blend amount to linear RGB. `hue` blends the chosen set's
+// three texture weights (0 warm tex0, 50 mid tex1, 100 cool tex2); `fade`
+// scales a distance envelope on top of the textures' own falloff (0 =
+// texture shape, 100 = hard stop by LEAK_WIDTH).
 //
 // Model mirrored by lightleak.ts -- this shader and the CPU `leakAdd` must
 // stay in sync (the CPU mirror uses representative colors + an envelope for
@@ -41,13 +42,8 @@ const LEAK_WIDTH: f32 = 0.35;
 @group(0) @binding(0) var inTex: texture_2d<f32>;
 @group(0) @binding(1) var outTex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> p: Lightleak;
-@group(0) @binding(3) var leakTex0a: texture_2d<f32>; // Set A warm
-@group(0) @binding(4) var leakTex1a: texture_2d<f32>; // Set A mid
-@group(0) @binding(5) var leakTex2a: texture_2d<f32>; // Set A cool
-@group(0) @binding(6) var leakTex0b: texture_2d<f32>; // Set B warm
-@group(0) @binding(7) var leakTex1b: texture_2d<f32>; // Set B mid
-@group(0) @binding(8) var leakTex2b: texture_2d<f32>; // Set B cool
-@group(0) @binding(9) var leakSamp: sampler;
+@group(0) @binding(3) var leakTexs: texture_2d_array<f32>; // 12 layers = 4 sets x 3 hue anchors
+@group(0) @binding(4) var leakSamp: sampler;
 
 // Distance across the frame from the leak edge: 0 on the edge, 1 at the far
 // side. edge 0=top, 1=right, 2=bottom, 3=left.
@@ -89,28 +85,21 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let nx = (f32(id.x) + 0.5) / f32(dims.x);
   let ny = (f32(id.y) + 0.5) / f32(dims.y);
   let edge = seedU % 4u;
-  // Pattern set: auto = the seed's top bit (a file either leaks Set A or Set
-  // B), fixed = the UI picker's patternSel. Mirrored by packLightleak.
+  // Pattern set: auto = the seed's 2 bits (a file leaks one of the four
+  // sets), fixed = the UI picker's patternSel (0-3). Mirrored by packLightleak.
   // ponytail: if/else, not `cond ? a : b` -- this Tint build rejects `?:`.
   var fam: u32;
   if (p.patternMode < 0.5) {
-    fam = (seedU >> 23u) & 1u;
-  } else if (p.patternSel >= 0.5) {
-    fam = 1u;
+    fam = (seedU >> 22u) & 3u;
   } else {
-    fam = 0u;
+    fam = min(u32(p.patternSel), 3u);
   }
   let uv = uvForEdge(edge, nx, ny);
-  var t0: vec3<f32>; var t1: vec3<f32>; var t2: vec3<f32>;
-  if (fam == 0u) {
-    t0 = textureSampleLevel(leakTex0a, leakSamp, uv, 0.0).rgb;
-    t1 = textureSampleLevel(leakTex1a, leakSamp, uv, 0.0).rgb;
-    t2 = textureSampleLevel(leakTex2a, leakSamp, uv, 0.0).rgb;
-  } else {
-    t0 = textureSampleLevel(leakTex0b, leakSamp, uv, 0.0).rgb;
-    t1 = textureSampleLevel(leakTex1b, leakSamp, uv, 0.0).rgb;
-    t2 = textureSampleLevel(leakTex2b, leakSamp, uv, 0.0).rgb;
-  }
+  // One array texture: layer = set*3 + hue anchor (0 warm, 1 mid, 2 cool).
+  // textureSampleLevel(t2d_array, sampler, coords, array_index, lod).
+  let t0 = textureSampleLevel(leakTexs, leakSamp, uv, fam * 3u + 0u, 0.0).rgb;
+  let t1 = textureSampleLevel(leakTexs, leakSamp, uv, fam * 3u + 1u, 0.0).rgb;
+  let t2 = textureSampleLevel(leakTexs, leakSamp, uv, fam * 3u + 2u, 0.0).rgb;
   let w = leakWeights(clamp(p.hue * 0.01, 0.0, 1.0));
   let tex = t0 * w.x + t1 * w.y + t2 * w.z;
   let d = edgeDistance(edge, nx, ny);

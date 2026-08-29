@@ -107,10 +107,17 @@ describe('lightleak', () => {
     // auto (-1) -> patternMode 0 (seed picks the set) -- same layout as before.
     const auto = packLightleak({ amount: 60, hue: 40, fade: 30, pattern: -1 }, 0.25);
     expect(Array.from(auto)).toEqual([60, 40, 30, 0.25, 0, 0, 0, 0]);
-    // fixed set -> patternMode 1, patternSel 0 (Set A) or 1 (Set B).
+    // fixed set -> patternMode 1, patternSel 0..3 (Set A..D), clamped to 0..3.
     const setA = packLightleak({ amount: 60, hue: 40, fade: 30, pattern: 0 }, 0.25);
     expect(Array.from(setA)).toEqual([60, 40, 30, 0.25, 1, 0, 0, 0]);
     const setB = packLightleak({ amount: 60, hue: 40, fade: 30, pattern: 1 }, 0.25);
     expect(Array.from(setB)).toEqual([60, 40, 30, 0.25, 1, 1, 0, 0]);
+    const setC = packLightleak({ amount: 60, hue: 40, fade: 30, pattern: 2 }, 0.25);
+    expect(Array.from(setC)).toEqual([60, 40, 30, 0.25, 1, 2, 0, 0]);
+    const setD = packLightleak({ amount: 60, hue: 40, fade: 30, pattern: 3 }, 0.25);
+    expect(Array.from(setD)).toEqual([60, 40, 30, 0.25, 1, 3, 0, 0]);
+    // out-of-range pattern clamps into 0..3 rather than leaking into the pads.
+    expect(Array.from(packLightleak({ amount: 1, hue: 0, fade: 0, pattern: 9 }, 0.25))[5]).toBe(3);
+    expect(Array.from(packLightleak({ amount: 1, hue: 0, fade: 0, pattern: -5 }, 0.25))[5]).toBe(0);
   });
 });
