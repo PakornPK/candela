@@ -5,9 +5,9 @@
 //
 // Styles (uniform `style`):
 //   3 'none'  -- no frame (border 0, identity)
-//   0 '135'   -- black rebate + sprocket holes top & bottom
-//   1 '120'   -- black rebate, no holes (paper-backed)
-//   2 'print' -- white matte (darkroom print)
+//   0 '135'   -- real sprocket holes + dark rebate (135-strip.png, layer 0)
+//   1 '120'   -- real dark paper backing (120-strip.png, layer 1)
+//   2 'print' -- real off-white matte paper (print-strip.png, layer 2)
 //
 // ponytail: nearest-neighbor downscale (the op chain has no sampler binding --
 // textureLoad only) is fine at a 5-10% shrink; box-average it if jitter shows.
@@ -31,16 +31,14 @@ fn borderF(style: u32) -> f32 {
   return 0.06;
 }
 
-// Rebate color per style: near-black for film, off-white for the print matte.
-fn rebateColor(style: u32) -> vec3<f32> {
-  if (style == 2u) { return vec3<f32>(0.96, 0.96, 0.96); }
-  return vec3<f32>(0.02, 0.02, 0.02);
-}
-
 @group(0) @binding(0) var inTex: texture_2d<f32>;
 @group(0) @binding(1) var outTex: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> p: Frame;
-@group(0) @binding(3) var filmTex: texture_2d<f32>; // '135' film-strip edge
+// Three vendored strip textures (public/frames/*-strip.png, scripts/
+// vend-frames.mjs -- real film/paper photos, committed): layer 0 = '135'
+// sprocket edge, 1 = '120' paper backing, 2 = 'print' matte. rgba8unorm-srgb:
+// the bands are displayed colors (linearized by sampling -srgb), not additive.
+@group(0) @binding(3) var frameTexs: texture_2d_array<f32>;
 @group(0) @binding(4) var filmSamp: sampler;
 
 @compute @workgroup_size(8, 8)
@@ -87,19 +85,17 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     return;
   }
 
-  // Rebate band. '135' (style 0) samples the film-strip edge texture: a clean
-  // regular grid of sprocket holes (public/frames/135-strip.png). The band maps
-  // to the strip's top / bottom halves; the photo itself is drawn by the image
-  // branch above, never by the texture. 120 / print keep the plain matte.
-  var color = rebateColor(style);
-  if (style == 0u) {
-    let px2 = (nx - cropL) / cfx;      // 0..1 across the crop content
-    var py = (ny - cropT) / cfy;
-    let top = py < b;
-    if (!top) { py = 1.0 - py; }
-    let band = clamp(py / b, 0.0, 1.0); // 0..1 across the band thickness
-    let uv = vec2<f32>(px2, select(band * 0.5 + 0.5, band * 0.5, top));
-    color = textureSampleLevel(filmTex, filmSamp, uv, 0.0).rgb;
-  }
+  // Rebate band: every style samples its own REAL strip texture (layer =
+  // style: 0 '135' sprocket edge, 1 '120' paper backing, 2 'print' matte).
+  // The band maps to the strip's top / bottom halves (uv.y 0..0.5 top,
+  // 0.5..1 bottom); the photo itself is drawn by the image branch above,
+  // never by the texture.
+  let px2 = (nx - cropL) / cfx;      // 0..1 across the crop content
+  var py = (ny - cropT) / cfy;
+  let top = py < b;
+  if (!top) { py = 1.0 - py; }
+  let band = clamp(py / b, 0.0, 1.0); // 0..1 across the band thickness
+  let uv = vec2<f32>(px2, select(band * 0.5 + 0.5, band * 0.5, top));
+  let color = textureSampleLevel(frameTexs, filmSamp, uv, style, 0.0).rgb;
   textureStore(outTex, vec2<i32>(id.xy), vec4<f32>(color, 1.0));
 }

@@ -4,15 +4,15 @@
 //
 // Analog frame variants (a creative Effects panel look, not in LrC):
 //   'none'  -- no frame (identity; style id 3, border 0)
-//   '135'   -- 35mm: black rebate with a row of sprocket holes top + bottom
-//   '120'   -- medium format: black rebate, no holes (paper-backed)
-//   'print' -- darkroom print: generous white matte
+//   '135'   -- 35mm: real sprocket holes + dark rebate (frameTexs layer 0)
+//   '120'   -- medium format: dark charcoal backing, no holes (layer 1)
+//   'print' -- darkroom print: off-white matte, real film-base grain (layer 2)
 // The image is scaled into the inner (1-2b) rect (nearest, in the shader), so
 // the border is real -- the rebate is extra width, not painted over the photo.
 //
 // ponytail: nearest-neighbor downscale (no sampler binding in the op chain)
 // is fine at a 5-10% shrink; box-averaging would smooth it if the user flags
-// jitter. Holes are plain rects, no rounding. Widths are fixed per style.
+// jitter. Widths are fixed per style.
 
 export type FrameStyle = 'none' | '135' | '120' | 'print';
 
@@ -24,12 +24,14 @@ export const FRAME_BORDER: Record<FrameStyle, number> = {
   '120': 0.05,
   'print': 0.1,
 };
-// NOTE (case #4 -> now): '135' sprocket holes are a vendored film-strip TEXTURE
-// (public/frames/135-strip.png) sampled by frame.wgsl, not procedural geometry.
-// The texture is a clean REGULAR grid of rounded holes -- case #4's irregular +
-// grainy v1 read as messy "dots" ("เห็นมีหลายจุด"), so it went back to a tidy
-// repeating pattern. FRAME_HOLE / inSprocketHole were removed with the old
-// procedural holes.
+// NOTE (case #4 -> now): all three frame bands are REAL vendored photographs
+// (public/frames/{135,120,print}-strip.png, scripts/vend-frames.mjs -- real
+// film/paper from Wikimedia Commons, CC BY, license committed) sampled by
+// frame.wgsl as one texture_2d_array, layer = style. The bands are real but
+// CLEAN: sr1's backlit sprocket holes + unexposed dark film between them
+// (case #4's irregular + grainy v1 read as messy "dots", "เห็นมีหลายจุด"; the
+// between-hole film keeps real grain without the source scene). FRAME_HOLE /
+// inSprocketHole were removed with the old procedural holes.
 
 export function isNeutralFrame(style: FrameStyle): boolean {
   return style === 'none';

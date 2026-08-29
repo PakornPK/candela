@@ -1,0 +1,24 @@
+Film frame textures -- source + license
+========================================
+
+The three strip textures (135-strip.png, 120-strip.png, print-strip.png) are
+derived from ONE source photograph:
+
+  File:Sprocket_Rocket_(27975049409).jpg
+  https://commons.wikimedia.org/wiki/File:Sprocket_Rocket_(27975049409).jpg
+  Author: Kevin Dooley (Flickr: https://www.flickr.com/people/pagedooley/)
+  License: Creative Commons Attribution 2.0 (CC BY 2.0)
+           https://creativecommons.org/licenses/by/2.0/
+
+What was taken: real 35mm sprocket holes (backlit) and the unexposed film base
+between them, from a real Sprocket Rocket shot. scripts/vend-frames.mjs
+resizes / mirror-tiles / tone-normalizes those pixels into the three bands:
+135 = real sprocket holes + dark rebate; 120 = the film base lifted to a
+charcoal backing; print = the same film base normalized to paper white.
+No scene content is used (the source photo's image area is skipped), so the
+textures carry only film/paper texture.
+
+Derived works are distributed under CC BY 2.0 with attribution to Kevin Dooley
+as above. The source file is committed as light_frames/sr1.jpg (gitignored);
+re-fetch from the Commons URL and run `node scripts/vend-frames.mjs` to
+regenerate the strips.
