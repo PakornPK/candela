@@ -10,23 +10,36 @@
 //     rect of a preset aspect, or the freeform x/y/w/h (normalized center +
 //     size) the overlay committed. A 90° rotation swaps the preset's aspect (a
 //     3:2 crop rotated 90° captures a 2:3 source rect so it DISPLAYS 3:2).
-//   - cropGeometry: the output mask = the rotated rect's axis-aligned bbox
-//     (centered on the rect), scaled by `zoom` to fit the texture. Inside the
-//     mask the source is sampled at R(-angle)·o/zoom around the rect center,
-//     so the rotated+zoomed crop fills it with no clipped corners. Outside =
-//     black (the bars LrC letterboxes a crop into).
+//   - cropGeometry: the output mask = the rotated IMAGE's axis-aligned bbox
+//     (centered on the crop rect center), scaled by `zoom` to fit the texture.
+//     Inside the mask the source is sampled at R(-angle)·o/zoom around the rect
+//     center, so a straighten shows the WHOLE image tilted under the selection
+//     frame — LrC's crop loupe. Outside the mask + in its empty bbox corners =
+//     black (LrC's loupe backdrop; crop.wgsl's letterbox + out-of-source test).
+//   - The LrC selection FRAME (cropOverlayRect / cropRegion) is NOT the mask
+//     bbox: the mask bbox aspect drifts with the straighten angle (a 15°
+//     straighten renders ~1.26:1 — the "ปรับสัดส่วนแล้วไม่ปรับตาม" report).
+//     LrC keeps the frame at the CHOSEN aspect and shrinks it to the largest
+//     such rect inside the ROTATED IMAGE (a preset) or the ROTATED freeform
+//     rect, so the image rotates under a fixed frame and its corners beyond it
+//     get trimmed/dimmed.
 //   - The crop is drawn at SOURCE SCALE: the fixed-size canvas (sized to the
 //     source) shows it fit-to-window exactly like LrC's loupe, and the op-chain
 //     textures never resize.
-//   - cropRegion: the normalized [x, y, w, h] of the mask bbox — what the
-//     export/histogram blit samples and the frame/vignette treat as "the
-//     image". [0,0,1,1] with no crop = identity.
+//   - cropRegion: the normalized [x, y, w, h] of the FRAME (the aspect-
+//     preserving selection) — what the export/histogram blit samples and the
+//     frame/vignette treat as "the image" (LrC's Post-Crop). [0,0,1,1] with no
+//     crop = identity.
 //
-// ponytail: the straighten zoom fits the rotated crop inside the SOURCE (no
-// black corner wedges) rather than LrC's cover-to-fill — at ≤5° the 1-2%
-// difference is invisible. Freeform resize locks only to the preset aspect
-// (edge handles act free); the rect is axis-aligned, straighten still rotates
-// the image inside it.
+// ponytail: the frame extents divide by `zoom`, so the Done export = the frame
+// at the mask's fit scale (a 1/zoom downscale of the source rect — same ceiling
+// as before, capped at source res). A freeform rect dragged to the source edge
+// + a straighten can push the frame past the rotated image (black creeps into
+// the frame) — LrC has the same constrain-to-image interplay; acceptable. The
+// first drag that converts a preset to a freeform rect re-fits the frame to the
+// rect's own rotated bounds (a small snap). Freeform resize locks only to the
+// preset aspect (edge handles act free); the rect is axis-aligned, straighten
+// still rotates the image inside it.
 
 import { isCropOp, type AspectPreset, type Op } from '../catalog/types';
 
@@ -184,6 +197,13 @@ export interface CropGeometry {
   halfH: number;
   maskW: number; // mask full extent, output pixels
   maskH: number;
+  // The LrC selection frame: the largest CHOSEN-aspect rect that fits inside
+  // the rotated crop rect, centered on it, in output pixels (source extents /
+  // zoom). The mask bbox aspect drifts with the straighten angle; the frame
+  // keeps the chosen aspect and the rotated image's corners beyond it are what
+  // LrC trims (Done) / dims (workbench).
+  frameHalfW: number;
+  frameHalfH: number;
   cx: number;    // mask center, output pixels (the rect center)
   cy: number;
 }
@@ -193,12 +213,38 @@ export function cropGeometry(c: CropParams, W: number, H: number): CropGeometry 
   const angle = (c.rotate90 * Math.PI) / 2 + (c.angle * Math.PI) / 180;
   const ca = Math.cos(angle);
   const sa = Math.sin(angle);
-  const bw = cw * Math.abs(ca) + ch * Math.abs(sa); // rotated bbox width
-  const bh = cw * Math.abs(sa) + ch * Math.abs(ca); // rotated bbox height
+  const ac = Math.abs(ca);
+  const as = Math.abs(sa);
+  // The workbench + Done export show the FULL source rotated under a fixed
+  // aspect frame (LrC's crop loupe): a straighten tilts the whole image, and
+  // the corners beyond the frame are what the dim / export trims — NOT a
+  // rotated cut of the pre-straighten crop rect. The old mask hid the image's
+  // edges, so you couldn't see what a straighten would cut ("ตอน Straighten
+  // มันเอียง... ปรับสัดส่วนแล้วไม่ปรับตาม"). The mask = the rotated IMAGE's
+  // axis-aligned bbox, zoomed to fit the texture; the shader letterboxes its
+  // empty corners (LrC's loupe backdrop).
+  const bw = W * ac + H * as; // rotated image bbox
+  const bh = W * as + H * ac;
   const zoom = Math.max(1, bw / W, bh / H);
   const maskW = bw / zoom;
   const maskH = bh / zoom;
-  return { angle, zoom, halfW: maskW / 2, halfH: maskH / 2, maskW, maskH, cx, cy };
+  // LrC frame: the image rotates under a FIXED-aspect selection frame, so the
+  // frame = the largest rect of the DISPLAY aspect inside the rotated source
+  // (its corners land exactly on the rotated image's edges — never in the
+  // empty bbox corners). A 90° turn swaps the display aspect (a 3:2 crop
+  // turned 90° DISPLAYS 3:2), so `aDisp` mirrors cropRect's flip. At angle 0
+  // this reduces to the preset rect. A freeform drag constrains the frame to
+  // its own rotated rect (the selection keeps its size), not the whole image.
+  const aDisp = c.rotate90 % 2 === 1 ? ch / cw : cw / ch;
+  const fw = isFreeformCrop(c) ? cw : W;
+  const fh = isFreeformCrop(c) ? ch : H;
+  const frameHalfH = Math.min((fw / 2) / (aDisp * ac + as), (fh / 2) / (aDisp * as + ac));
+  return {
+    angle, zoom, halfW: maskW / 2, halfH: maskH / 2, maskW, maskH,
+    frameHalfW: (aDisp * frameHalfH) / zoom,
+    frameHalfH: frameHalfH / zoom,
+    cx, cy,
+  };
 }
 
 // Uniform layout must match the `Crop` struct in crop.wgsl (6 f32s + 2 pad).
@@ -224,23 +270,24 @@ export function cropOverlayRect(c: CropParams, W: number, H: number): CropOverla
   const g = cropGeometry(c, W, H);
   // The DOM selection frame is ALWAYS axis-aligned -- LrC's crop frame never
   // rotates. The straighten/90° rotation lives in the crop SHADER, which tilts
-  // the IMAGE under the fixed frame, so the axis-aligned mask bbox is exactly
-  // the region the rotated image fills and the frame hugs it. Drawing the
-  // frame tilted instead (straighten-only) made the drawn handles sit far from
-  // the axis-aligned hit-test at real-photo scale (3000px·sin10° ≈ 521px vs a
+  // the IMAGE under the fixed frame; the frame = the aspect-preserving rect
+  // that fits inside the rotated image, so the image's corners beyond it are
+  // what the dim dims (and the Done export trims). Drawing the frame tilted
+  // instead (straighten-only) made the drawn handles sit far from the
+  // axis-aligned hit-test at real-photo scale (3000px·sin10° ≈ 521px vs a
   // ~171px grab radius) -- the "Straighten แล้วเลื่อน ขนาด crop ไม่ได้" report.
-  return { x: g.cx - g.halfW, y: g.cy - g.halfH, w: g.maskW, h: g.maskH, angle: 0 };
+  return { x: g.cx - g.frameHalfW, y: g.cy - g.frameHalfH, w: g.frameHalfW * 2, h: g.frameHalfH * 2, angle: 0 };
 }
 
-// The crop mask bbox as a normalized [x, y, w, h] rect (left/top/size, 0..1) —
-// what the export/histogram blit samples and the frame/vignette treat as "the
-// image" (LrC's Post-Crop). [0,0,1,1] when no crop op is present = identity.
-// Guarded for unloaded sizes so the vignette/frame packParams can call it in
-// tests before any load.
+// The FRAME (aspect-preserving selection) as a normalized [x, y, w, h] rect
+// (left/top/size, 0..1) — what the export/histogram blit samples and the
+// frame/vignette treat as "the image" (LrC's Post-Crop). [0,0,1,1] when no
+// crop op is present = identity. Guarded for unloaded sizes so the
+// vignette/frame packParams can call it in tests before any load.
 export function cropRegion(ops: Op[], W: number, H: number): [number, number, number, number] {
   if (W <= 0 || H <= 0) return [0, 0, 1, 1];
   const c = ops.find(isCropOp);
   if (!c) return [0, 0, 1, 1];
   const g = cropGeometry(c, W, H);
-  return [(g.cx - g.halfW) / W, (g.cy - g.halfH) / H, g.maskW / W, g.maskH / H];
+  return [(g.cx - g.frameHalfW) / W, (g.cy - g.frameHalfH) / H, (g.frameHalfW * 2) / W, (g.frameHalfH * 2) / H];
 }

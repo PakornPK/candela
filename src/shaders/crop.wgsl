@@ -1,15 +1,15 @@
 // Crop + rotate: map each output pixel to its source sample via the inverse
-// rotation, masked to the rotated crop's axis-aligned bbox. Outside the mask
-// is black — the bars LrC letterboxes a crop into. The mask is centered on
-// the crop rect (cx,cy — the texture center for a preset, the freeform rect's
-// center when the overlay drags it) and scaled to fit, so the fixed-size
-// canvas shows the crop fit-in-window exactly like LrC's loupe (crop fills
-// one dimension, the bars the other). Bilinear source sampling keeps the crop
+// rotation, masked to the rotated IMAGE's axis-aligned bbox. Outside the mask
+// is black — the bars LrC letterboxes a crop into; the same black fills the
+// bbox's empty corners (samples past the source's extent), the loupe backdrop.
+// The mask is centered on the crop rect (cx,cy — the texture center for a
+// preset, the freeform rect's center when the overlay drags it) and scaled to
+// fit, so the fixed-size canvas shows the WHOLE image rotated fit-in-window
+// exactly like LrC's crop loupe — a straighten tilts the entire image under
+// the DOM selection frame, and the image's corners beyond the frame are what
+// the overlay dims / the export trims. Bilinear source sampling keeps the crop
 // smooth; 90° and straighten share the same inverse-map (rotate90·π/2 +
 // angle·π/180) so rotating a straightened crop keeps the rotation cumulative.
-//
-// ponytail: the mask fits the rotated rect inside the source (no black corner
-// wedges) rather than LrC's cover-to-fill — indistinguishable at ≤5°.
 
 struct Crop {
   angle: f32,
@@ -69,8 +69,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let sx = r.x * ca + r.y * sa + center.x;  // R(-angle) row 0: [cos, sin]
   let sy = -r.x * sa + r.y * ca + center.y; // R(-angle) row 1: [-sin, cos]
 
-  // Clamp to the source (the crop rect never extends past it, but a 90°
-  // rotation of an asymmetric source could round a pixel out by a hair).
+  // Past the source's extent (the rotated image's empty bbox corners, or a
+  // freeform rect overhanging the edge) -> the loupe backdrop, not a clamped
+  // edge smear. The selection frame lands on the rotated image's edges, so the
+  // Done export never samples these.
+  if (sx < 0.0 || sy < 0.0 || sx >= f32(dims.x) || sy >= f32(dims.y)) {
+    textureStore(dstTex, pos, vec4<f32>(0.0, 0.0, 0.0, 1.0));
+    return;
+  }
+
+  // Clamp in-range samples to the source's last texel (a 90° rotation of an
+  // asymmetric source can round a pixel out by a hair).
   let maxv = vec2<f32>(dims) - 1.0;
   let s = clamp(vec2<f32>(sx, sy), vec2<f32>(0.0), maxv);
 

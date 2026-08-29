@@ -72,11 +72,18 @@ describe('crop', () => {
     expect(s3.zoom).toBeCloseTo(1.0771, 3);
     expect(s3.halfH).toBeCloseTo(2000, 3);
     expect(s3.halfW).toBeCloseTo(2878.53, 2);
+    // The FRAME is the largest chosen-aspect rect inside the rotated rect (the
+    // LrC selection), distinct from the rotated-bbox mask it fits inside.
+    expect(s3.frameHalfW).toBeCloseTo(2585.72, 2);
+    expect(s3.frameHalfH).toBeCloseTo(1723.82, 2);
+    expect(s3.frameHalfW / s3.frameHalfH).toBeCloseTo(1.5, 4);
     // Neutral geometry = the full mask at zoom 1 (identity pass).
     const identity = cropGeometry(crop({}), W, H);
     expect(identity.zoom).toBe(1);
     expect(identity.maskW).toBe(W);
     expect(identity.maskH).toBe(H);
+    expect(identity.frameHalfW).toBe(W / 2);
+    expect(identity.frameHalfH).toBe(H / 2);
   });
 
   it('packs 6 geometry floats (rect center) + 2 pad', () => {
@@ -107,19 +114,73 @@ describe('crop', () => {
     // selection stays AXIS-ALIGNED (angle = straighten only = 0) so it hugs
     // the portrait image -- the total angle belongs to the shader + export.
     const r = cropOverlayRect(crop({ rotate90: 1 }), 300, 200);
-    expect(r.w).toBeCloseTo(133.33, 2); expect(r.h).toBe(200);
+    expect(r.w).toBeCloseTo(133.33, 2); expect(r.h).toBeCloseTo(200, 6);
     expect(r.x).toBeCloseTo(83.33, 2); expect(r.angle).toBe(0);
     // The frame is ALWAYS axis-aligned (LrC-correct): the 90° turn + straighten
     // rotate the IMAGE in the shader, never the frame. This is what keeps the
     // drawn handles on the axis-aligned hit-test -- a tilted frame put them
     // ~521px off at real-photo scale (the "Straighten แล้วเลื่อน ขนาด crop
     // ไม่ได้" report) and carried the 90° turn ("straighten mark หมุนตาม").
+    // The frame is also ASPECT-PRESERVING: the 90°-turned 3:2 DISPLAYS 3:2, so
+    // the straighten shrinks it inside the rotated rect rather than widening it
+    // to the rotated bbox (119.8 vs the old 139.0 bbox width).
     const rt = cropOverlayRect(crop({ rotate90: 1, angle: 3 }), 300, 200);
     expect(rt.angle).toBe(0);
-    expect(rt.w).toBeCloseTo(138.96, 2); // 90°+3° rotated mask bbox (straighten grows it)
+    expect(rt.w).toBeCloseTo(119.77, 2);
+    expect(rt.h).toBeCloseTo(179.66, 2);
     const s = cropOverlayRect(crop({ angle: 3 }), W, H);
     expect(s.angle).toBe(0);
     expect(s.x).toBeCloseTo((W - s.w) / 2, 6);
+  });
+
+  it('keeps the chosen aspect under straighten (LrC frame fits inside the rotated image)', () => {
+    // The mask bbox of a straighten is NOT the chosen aspect (a 15° straighten
+    // of a 3:2 crop renders ~1.26:1) -- LrC shrinks the frame so it keeps the
+    // chosen aspect inside the rotated image and trims/dims the corners beyond
+    // it. This was the "ปรับสัดส่วนแล้วไม่ปรับตาม" report.
+    const s3 = cropOverlayRect(crop({ angle: 3 }), W, H);
+    expect(s3.w / s3.h).toBeCloseTo(1.5, 4); // 3:2 (the source is 3:2)
+    const s15 = cropOverlayRect(crop({ angle: 15 }), W, H);
+    expect(s15.w / s15.h).toBeCloseTo(1.5, 4);
+    expect(s15.w).toBeCloseTo(3272.01, 2); // smaller than the source (corners trimmed)
+    const sq = cropOverlayRect(crop({ aspect: '1:1', angle: 15 }), W, H);
+    expect(sq.w / sq.h).toBeCloseTo(1, 4);
+    // The frame fits the rotated FULL image (LrC loupe), not the pre-straighten
+    // 4000x4000 crop rect -- so it shrinks with the image's height (2000/1.225
+    // half) rather than locking at the crop's own 2000.
+    expect(sq.w).toBeCloseTo(2411.83, 2);
+    const wide = cropOverlayRect(crop({ aspect: '16:9', angle: 15 }), W, H);
+    expect(wide.w / wide.h).toBeCloseTo(16 / 9, 4);
+    // A 90°-turned 3:2 crop still DISPLAYS 3:2 (aspect restored, not the 2:3
+    // source rect it captures).
+    const r90 = cropOverlayRect(crop({ aspect: '3:2', rotate90: 1, angle: 5 }), W, H);
+    expect(r90.w / r90.h).toBeCloseTo(1.5, 3);
+    // At angle 0 the frame IS the crop rect (no shrink).
+    const flat = cropOverlayRect(crop({ aspect: '1:1' }), W, H);
+    expect(flat.w).toBe(4000);
+    expect(flat.h).toBe(4000);
+  });
+
+  it('straighten shows the FULL image under the LrC frame (loupe), not the rotated crop', () => {
+    // A 3:2 preset on a 4:3 source (bayer.dng is 64x48), 15° straighten. The
+    // workbench mask = the rotated IMAGE's bbox (the WHOLE scene tilts; the
+    // shader letterboxes the empty corners) -- the old mask was the rotated
+    // CROP rect's bbox (72.86x57.78 -> 60.53x48), which hid the source's top/
+    // bottom rows behind the crop ("ยังไม่เหมือนนะ ใช้ไม่ได้ของแบบ LRC").
+    const g = cropGeometry(crop({ aspect: '3:2', angle: 15 }), 64, 48);
+    expect(g.maskW).toBeCloseTo(56.63, 1); // full 64x48 image rotated -> 74.24x62.93 bbox / zoom 1.311
+    expect(g.maskH).toBeCloseTo(48, 2);    // height binds
+    // The LrC frame = the largest 3:2 inside the rotated FULL image (fits the
+    // 48-tall image, corners on its edges) -- the old frame fit the rotated
+    // 64x42.67 crop rect and was ~3% smaller. The export follows this frame.
+    const o = cropOverlayRect(crop({ aspect: '3:2', angle: 15 }), 64, 48);
+    expect(o.w / o.h).toBeCloseTo(1.5, 4);
+    expect(o.w).toBeCloseTo(40.56, 2);
+    expect(o.h).toBeCloseTo(27.04, 2);
+    const [, , rw, rh] = cropRegion([{ kind: 'crop', aspect: '3:2', rotate90: 0, angle: 15 }], 64, 48);
+    expect((rw * 64) / (rh * 48)).toBeCloseTo(1.5, 4);
+    expect(rw * 64).toBeCloseTo(40.56, 2); // Done canvas = the LrC frame (was 39.26)
+    expect(rh * 48).toBeCloseTo(27.04, 2); // (was 26.18)
   });
 
   it('reports the crop mask as a normalized rect', () => {
@@ -131,6 +192,17 @@ describe('crop', () => {
     expect(cropRegion(free, W, H)).toEqual([0, 0.25, 0.5, 0.5]);
     // Unloaded size guard (vignette/frame packParams call this in tests).
     expect(cropRegion(ops, 0, 0)).toEqual([0, 0, 1, 1]);
+  });
+
+  it('exports the aspect-preserving frame region under straighten', () => {
+    const ops: Op[] = [{ kind: 'crop', aspect: '3:2', rotate90: 0, angle: 15 }];
+    const [, , rw, rh] = cropRegion(ops, W, H);
+    // cropRegion is normalized to the SOURCE, so the Done canvas aspect (the
+    // chosen 3:2, not the normalized 1.0 square) is (rw·W)/(rh·H).
+    expect((rw * W) / (rh * H)).toBeCloseTo(1.5, 4); // the Done canvas keeps the chosen aspect
+    // At angle 0 it equals the preset rect (a 3:2 crop = full 6000x4000 here).
+    const flat: Op[] = [{ kind: 'crop', aspect: '3:2', rotate90: 0, angle: 0 }];
+    expect(cropRegion(flat, W, H)).toEqual([0, 0, 1, 1]);
   });
 
   it('knows every preset aspect ratio', () => {

@@ -266,14 +266,17 @@ describe('OP_RENDERERS packParams', () => {
     setImageSize(0, 0);
   });
 
-  it('crop packs geometry for a 1:1 crop (fits the source dims)', () => {
+  it('crop packs geometry for a 1:1 crop (mask = the whole image, frame = the preset)', () => {
     const crop = OP_RENDERERS[9];
     expect(crop.kind).toBe('crop');
     setImageSize(6000, 4000);
     const packed = crop.packParams([{ kind: 'crop', aspect: '1:1', rotate90: 0, angle: 0 }]);
     expect(packed.length).toBe(8);
     expect(packed[1]).toBe(1); // zoom
-    expect(packed[2]).toBe(2000); // halfW
+    // The mask is the FULL source (the whole image tilts under the frame —
+    // LrC loupe); a 1:1 crop at angle 0 hits the shader's identity branch, so
+    // these only matter once a straighten/90° rotates the image.
+    expect(packed[2]).toBe(3000); // halfW (was the crop rect's 2000)
     expect(packed[3]).toBe(2000); // halfH
     setImageSize(0, 0);
   });
