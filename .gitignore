@@ -8,3 +8,7 @@ native/libraw-wrapper/build-native/
 light_leak/
 .DS_Store
 light_frames/
+.hermes/
+.agents/
+.vscode/
+

@@ -2,10 +2,24 @@ import type { FolderRecord, FileRecord } from './types';
 import { listFolders } from './query';
 
 const RAW_EXTENSIONS = ['.dng', '.nef', '.cr3', '.arw', '.raf'];
+const IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png', '.tiff', '.tif', '.webp', '.heic', '.heif'];
 
 function isRawFile(name: string): boolean {
   const lower = name.toLowerCase();
   return RAW_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+function isImageFile(name: string): boolean {
+  const lower = name.toLowerCase();
+  return IMAGE_EXTENSIONS.some((ext) => lower.endsWith(ext));
+}
+
+export function isSupportedFile(name: string): boolean {
+  return isRawFile(name) || isImageFile(name);
+}
+
+export function isRawFileName(name: string): boolean {
+  return isRawFile(name);
 }
 
 async function* walk(
@@ -16,7 +30,7 @@ async function* walk(
     const path = prefix ? `${prefix}/${name}` : name;
     if (entry.kind === 'directory') {
       yield* walk(entry, path);
-    } else if (isRawFile(name)) {
+    } else if (isRawFile(name) || isImageFile(name)) {
       yield { path, handle: entry };
     }
   }

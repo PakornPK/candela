@@ -323,6 +323,132 @@ export class Pipeline {
     this.displayTexture = this.demosaicedTexture;
   }
 
+  // Loads a standard image (JPEG/PNG/TIFF/WebP/HEIC) into the pipeline.
+  // The image is already RGB (no Bayer, no demosaic), so this skips the
+  // unpack/demosaic passes and uploads the RGBA data directly to the
+  // demosaicedTexture as rgba16float. The rest of the op chain (tone, WB,
+  // etc.) works unchanged.
+  loadImage(image: { width: number; height: number; imageData: ImageData; make: string; model: string }): void {
+    this.bayerTexture?.destroy();
+    this.bayerTexture = null;
+    this.normalizedTexture?.destroy();
+    this.normalizedTexture = null;
+    this.demosaicedTexture?.destroy();
+    this.opA?.destroy();
+    this.opB?.destroy();
+    this.dodgeMaskTexture?.destroy();
+    this.dodgeMaskTexture = null;
+    this.displayTexture = null;
+
+    const size = [image.width, image.height];
+    const workUsage = GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC;
+
+    // Upload the RGBA 8-bit image data as rgba8unorm, then convert to
+    // rgba16float for the demosaicedTexture (the op chain expects float).
+    const rgba8Texture = this.device.createTexture({
+      size,
+      format: 'rgba8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    this.device.queue.writeTexture(
+      { texture: rgba8Texture },
+      image.imageData.data,
+      { bytesPerRow: image.width * 4 },
+      { width: image.width, height: image.height },
+    );
+
+    this.demosaicedTexture = this.device.createTexture({
+      size,
+      format: 'rgba16float',
+      usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+    });
+    this.opA = this.device.createTexture({ size, format: 'rgba16float', usage: workUsage });
+    this.opB = this.device.createTexture({ size, format: 'rgba16float', usage: workUsage });
+
+    // Dodge/burn mask (same as load())
+    const [maskW, maskH] = maskDims(image.width, image.height);
+    this.dodgeMaskTexture = this.device.createTexture({
+      size: [maskW, maskH],
+      format: 'r8unorm',
+      usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    });
+    this.setDodgeMask(new Uint8Array(maskW * maskH).fill(128));
+
+    // Standard images have no raw metadata — use neutral defaults
+    this.device.queue.writeBuffer(this.levelsBuffer, 0, new Float32Array([0, 255, 0, 0]));
+    this.device.queue.writeBuffer(this.cfaBuffer, 0, packCfa6(new Uint8Array(36)));
+    // Identity color matrix (no camera profile adjustment)
+    setCameraColorMatrix(new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1]));
+    setCameraXyz(undefined);
+    setAsShotGains({ r: 1, g: 1, b: 1 });
+    setImageSize(image.width, image.height);
+
+    // Convert rgba8unorm -> rgba16float using a compute shader
+    const encoder = this.device.createCommandEncoder();
+    this.dispatchRgba8ToFloat(encoder, rgba8Texture, this.demosaicedTexture, image.width, image.height);
+    this.device.queue.submit([encoder.finish()]);
+
+    rgba8Texture.destroy();
+    this.displayTexture = this.demosaicedTexture;
+  }
+
+  // Converts rgba8unorm (sRGB 8-bit) to rgba16float (linear 0..1) for the
+  // op chain. Applies sRGB EOTF so the rest of the pipeline works in linear
+  // space (same as the raw path after demosaic).
+  private dispatchRgba8ToFloat(
+    encoder: GPUCommandEncoder,
+    source: GPUTexture,
+    target: GPUTexture,
+    width: number,
+    height: number,
+  ): void {
+    // Use a simple compute shader to convert rgba8unorm -> rgba16float
+    // This is a one-time upload cost, not on the hot path
+    const shader = this.device.createShaderModule({
+      code: `
+        @group(0) @binding(0) var src: texture_2d<f32>;
+        @group(0) @binding(1) var dst: texture_storage_2d<rgba16float, write>;
+
+        fn srgbToLinear(x: f32) -> f32 {
+          if (x <= 0.04045) { return x / 12.92; }
+          return pow((x + 0.055) / 1.055, 2.4);
+        }
+
+        @compute @workgroup_size(8, 8)
+        fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+          let x = gid.x;
+          let y = gid.y;
+          if (x >= ${width}u || y >= ${height}u) { return; }
+          let rgba = textureLoad(src, vec2<i32>(i32(x), i32(y)), 0);
+          // Apply sRGB EOTF to convert from sRGB to linear
+          let linear = vec4<f32>(
+            srgbToLinear(rgba.r),
+            srgbToLinear(rgba.g),
+            srgbToLinear(rgba.b),
+            rgba.a
+          );
+          textureStore(dst, vec2<i32>(i32(x), i32(y)), linear);
+        }
+      `,
+    });
+    const pipeline = this.device.createComputePipeline({
+      layout: 'auto',
+      compute: { module: shader, entryPoint: 'main' },
+    });
+    const bindGroup = this.device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: source.createView() },
+        { binding: 1, resource: target.createView() },
+      ],
+    });
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, bindGroup);
+    pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
+    pass.end();
+  }
+
   private workgroupCounts(width: number, height: number): [number, number] {
     return [Math.ceil(width / 8), Math.ceil(height / 8)];
   }

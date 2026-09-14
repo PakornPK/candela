@@ -1,5 +1,6 @@
 import type { FileRecord } from './types';
 import { extractThumbnail } from '../raw/thumbnail';
+import { isRawFileName } from './import';
 import { ensureReadPermission } from './permissions';
 
 interface ThumbnailRow {
@@ -31,6 +32,29 @@ export function saveThumbnail(db: IDBDatabase, fileId: number, blob: Blob | null
   });
 }
 
+// Creates a thumbnail for a standard image file (JPEG/PNG/TIFF/WebP/HEIC)
+// using the browser's native image decoding. Returns a JPEG blob.
+async function createImageThumbnail(fileBytes: ArrayBuffer, maxSize = 320): Promise<Blob> {
+  const blob = new Blob([fileBytes]);
+  const bitmap = await createImageBitmap(blob);
+  
+  // Scale down to fit within maxSize while preserving aspect ratio
+  const scale = Math.min(1, maxSize / Math.max(bitmap.width, bitmap.height));
+  const w = Math.round(bitmap.width * scale);
+  const h = Math.round(bitmap.height * scale);
+  
+  const canvas = new OffscreenCanvas(w, h);
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    bitmap.close();
+    throw new Error('Failed to get 2D canvas context for thumbnail');
+  }
+  ctx.drawImage(bitmap, 0, 0, w, h);
+  bitmap.close();
+  
+  return await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
+}
+
 // Checks the cache first; only touches the file/WASM on a cache miss, and
 // only persists a negative-cache row for a genuine extraction failure --
 // not for a missing permission grant, which is retryable (e.g. once the
@@ -46,7 +70,17 @@ export async function getOrExtractThumbnail(db: IDBDatabase, record: FileRecord)
 
   try {
     const file = await record.handle.getFile();
-    const blob = await extractThumbnail(await file.arrayBuffer());
+    const fileBytes = await file.arrayBuffer();
+    
+    // Standard images (JPEG/PNG/TIFF/WebP/HEIC) use browser native decoding;
+    // raw files use LibRaw's embedded thumbnail extraction.
+    let blob: Blob;
+    if (isRawFileName(record.name)) {
+      blob = await extractThumbnail(fileBytes);
+    } else {
+      blob = await createImageThumbnail(fileBytes);
+    }
+    
     await saveThumbnail(db, record.id, blob);
     return blob;
   } catch (err) {

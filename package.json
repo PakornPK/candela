@@ -10,12 +10,12 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@types/node": "^26.2.0",
-    "@types/wicg-file-system-access": "^2023.10.7",
-    "@webgpu/types": "^0.1.72",
-    "typescript": "~6.0.2",
-    "vite": "^8.2.0",
-    "vitest": "^4.1.11"
+    "@types/node": "26.2.0",
+    "@types/wicg-file-system-access": "2023.10.7",
+    "@webgpu/types": "0.1.72",
+    "typescript": "6.0.2",
+    "vite": "8.2.0",
+    "vitest": "4.1.11"
   },
   "dependencies": {
     "@tanstack/virtual-core": "^3.17.8"

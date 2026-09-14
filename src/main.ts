@@ -1,13 +1,14 @@
 import { Virtualizer, elementScroll, observeElementRect, observeElementOffset } from '@tanstack/virtual-core';
 import { Pipeline } from './gpu/pipeline';
 import { decode, DecodeError, type CameraMeta, type DecodedRaw } from './raw/decode';
+import { decodeImage, ImageDecodeError, type DecodedImage } from './raw/imageDecode';
 import { extractThumbnail } from './raw/thumbnail';
 import { cameraCalibrationKey, gainsToKelvin, gainsToTint, WB_NEUTRAL_KELVIN } from './gpu/uniforms';
 import { getCameraXyz } from './gpu/ops';
 import { openCatalogDb } from './catalog/db';
 import { listFolders, listFiles } from './catalog/query';
 import { setCull } from './catalog/culling';
-import { importFolder } from './catalog/import';
+import { importFolder, isRawFileName } from './catalog/import';
 import { ensureReadPermission } from './catalog/permissions';
 import { loadEditState, saveEditState } from './catalog/editsStore';
 import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
@@ -1787,14 +1788,14 @@ async function init(): Promise<void> {
       .catch(() => false); // extraction failed (no embedded JPEG) or preview decode failed
   }
 
-  // Decodes `record` (LibRaw -- the slow synchronous step), sizes the canvas,
-  // and uploads the Bayer data to the GPU. Callers own the render. Returns
-  // false if a newer selection superseded this one mid-decode.
+  // Decodes `record` (LibRaw for raw files, browser native for standard images),
+  // sizes the canvas, and uploads the data to the GPU. Callers own the render.
+  // Returns false if a newer selection superseded this one mid-decode.
   async function loadIntoPipeline(record: FileRecord, requestId: number): Promise<boolean> {
     // Already showing this file (re-clicking the current photo, or clicking
     // back to one that's loaded) -- nothing to decode; the pipeline holds the
-    // Bayer data. This is what keeps filmstrip clicking in Develop fast
-    // instead of re-running the ~3s LibRaw decode on every click.
+    // image data. This is what keeps filmstrip clicking in Develop fast
+    // instead of re-running the decode on every click.
     if (loadedFileId === record.id) return true;
     // Same selection already decoding (e.g. onShow's ensureDevelopImage raced
     // with the click's openFile, both with this requestId) -- share it.
@@ -1808,83 +1809,123 @@ async function init(): Promise<void> {
       const file = await record.handle.getFile();
       const fileBytes = await file.arrayBuffer();
       if (requestId !== openRequestId) return false; // superseded during file read
-      let decoded: DecodedRaw;
-      try {
-        decoded = await decode(fileBytes);
-      } catch (err) {
-        // Raw decode failed OR returned garbage (wrapper reports -1004 when
-        // LibRaw's error_count() exceeds ~1% of the frame -- see wrapper.cpp;
-        // Nikon HE* is the case that surfaced this). Show the camera's
-        // embedded JPEG instead of an error toast or streaks; the exposure/WB
-        // sliders correctly do nothing for a preview (the pipeline has no
-        // textures loaded).
-        if (err instanceof DecodeError) {
-          const dims = await showPreview(record, fileBytes, requestId);
-          if (requestId !== openRequestId) return false; // superseded during preview extract
-          if (dims) {
-            loadedFileId = record.id;
-            lastDecoded = { width: dims.width, height: dims.height, cameraMeta: null, make: '', model: '' };
-            asShotWB = null; // no raw camera data behind a preview
-            canvas.width = dims.width;
-            canvas.height = dims.height;
-            console.log(`decode failed (LibRaw ${err.code}), showing embedded preview (${dims.width}x${dims.height})`);
-            return true;
+      
+      const isRaw = isRawFileName(record.name);
+      
+      if (isRaw) {
+        // Raw file: use LibRaw to decode Bayer data
+        let decoded: DecodedRaw;
+        try {
+          decoded = await decode(fileBytes);
+        } catch (err) {
+          // Raw decode failed OR returned garbage (wrapper reports -1004 when
+          // LibRaw's error_count() exceeds ~1% of the frame -- see wrapper.cpp;
+          // Nikon HE* is the case that surfaced this). Show the camera's
+          // embedded JPEG instead of an error toast or streaks; the exposure/WB
+          // sliders correctly do nothing for a preview (the pipeline has no
+          // textures loaded).
+          if (err instanceof DecodeError) {
+            const dims = await showPreview(record, fileBytes, requestId);
+            if (requestId !== openRequestId) return false; // superseded during preview extract
+            if (dims) {
+              loadedFileId = record.id;
+              lastDecoded = { width: dims.width, height: dims.height, cameraMeta: null, make: '', model: '' };
+              asShotWB = null; // no raw camera data behind a preview
+              canvas.width = dims.width;
+              canvas.height = dims.height;
+              console.log(`decode failed (LibRaw ${err.code}), showing embedded preview (${dims.width}x${dims.height})`);
+              return true;
+            }
           }
+          throw err; // not a DecodeError, or no embedded JPEG -- let caller show the error
         }
-        throw err; // not a DecodeError, or no embedded JPEG -- let caller show the error
-      }
-      if (requestId !== openRequestId) return false; // superseded during decode
-      hidePreview();
-      canvas.width = decoded.effectiveWidth ?? decoded.width;
-      canvas.height = decoded.effectiveHeight ?? decoded.height;
-      // Re-create the WebGPU surface at the just-set size. Chrome 151 ties the
-      // drawing buffer to the canvas size at configure() time -- a configure
-      // left over from a different-size file would leave the blit target
-      // mismatched with the loaded image.
-      pipeline.show();
-      pipeline.load(decoded);
-      // Fresh CPU brush mask at this file's capped dims (the GPU mask texture
-      // was just created empty in load()). applyOpsToSliders repopulates it
-      // from the loaded edit if this photo has a dodgeBurn op.
-      resizePaintMask(decoded.effectiveWidth ?? decoded.width, decoded.effectiveHeight ?? decoded.height);
-      // Per-photo grain seed -- deterministic per file, different between
-      // photos (two takes get different grain; a re-open gets the same).
-      setGrainSeed(seedFromPath(record.path));
-      // The fresh (no-WB-op) default renders at the camera's As-Shot gains;
-      // the WB slider readout is derived from them (kelvin/tint).
-      if (decoded.asShotGains) {
-        const cameraKey = cameraCalibrationKey(decoded.make, decoded.model);
-        asShotWB = {
-          gains: decoded.asShotGains,
-          kelvin: gainsToKelvin(decoded.asShotGains, decoded.camXyz, cameraKey),
-          tint: gainsToTint(decoded.asShotGains, decoded.camXyz, cameraKey),
+        if (requestId !== openRequestId) return false; // superseded during decode
+        hidePreview();
+        canvas.width = decoded.effectiveWidth ?? decoded.width;
+        canvas.height = decoded.effectiveHeight ?? decoded.height;
+        // Re-create the WebGPU surface at the just-set size. Chrome 151 ties the
+        // drawing buffer to the canvas size at configure() time -- a configure
+        // left over from a different-size file would leave the blit target
+        // mismatched with the loaded image.
+        pipeline.show();
+        pipeline.load(decoded);
+        // Fresh CPU brush mask at this file's capped dims (the GPU mask texture
+        // was just created empty in load()). applyOpsToSliders repopulates it
+        // from the loaded edit if this photo has a dodgeBurn op.
+        resizePaintMask(decoded.effectiveWidth ?? decoded.width, decoded.effectiveHeight ?? decoded.height);
+        // Per-photo grain seed -- deterministic per file, different between
+        // photos (two takes get different grain; a re-open gets the same).
+        setGrainSeed(seedFromPath(record.path));
+        // The fresh (no-WB-op) default renders at the camera's As-Shot gains;
+        // the WB slider readout is derived from them (kelvin/tint).
+        if (decoded.asShotGains) {
+          const cameraKey = cameraCalibrationKey(decoded.make, decoded.model);
+          asShotWB = {
+            gains: decoded.asShotGains,
+            kelvin: gainsToKelvin(decoded.asShotGains, decoded.camXyz, cameraKey),
+            tint: gainsToTint(decoded.asShotGains, decoded.camXyz, cameraKey),
+          };
+          // wb-diag: the browser's actual readout inputs at fresh open -- paste
+          // this line when the displayed temp/tint disagrees with LrC, so the
+          // calibration offsets can be re-fit against the real file (gains +
+          // camXyz -> the un-offset Robertson decomposition; readout = the
+          // displayed value through the current offsets).
+          console.log(
+            `[wb-diag] gains=${decoded.asShotGains.r.toFixed(6)}/${decoded.asShotGains.g.toFixed(6)}/${decoded.asShotGains.b.toFixed(6)}` +
+              ` camXyz=[${decoded.camXyz ? Array.from(decoded.camXyz).map((v) => v.toFixed(5)).join(',') : 'none'}]` +
+              ` readout=${asShotWB.kelvin.toFixed(1)}K/${asShotWB.tint.toFixed(1)}`,
+          );
+        } else {
+          asShotWB = null;
+        }
+        loadedFileId = record.id;
+        lastDecoded = {
+          width: decoded.effectiveWidth ?? decoded.width,
+          height: decoded.effectiveHeight ?? decoded.height,
+          cameraMeta: decoded.cameraMeta,
+          make: decoded.make,
+          model: decoded.model,
         };
-        // wb-diag: the browser's actual readout inputs at fresh open -- paste
-        // this line when the displayed temp/tint disagrees with LrC, so the
-        // calibration offsets can be re-fit against the real file (gains +
-        // camXyz -> the un-offset Robertson decomposition; readout = the
-        // displayed value through the current offsets).
-        console.log(
-          `[wb-diag] gains=${decoded.asShotGains.r.toFixed(6)}/${decoded.asShotGains.g.toFixed(6)}/${decoded.asShotGains.b.toFixed(6)}` +
-            ` camXyz=[${decoded.camXyz ? Array.from(decoded.camXyz).map((v) => v.toFixed(5)).join(',') : 'none'}]` +
-            ` readout=${asShotWB.kelvin.toFixed(1)}K/${asShotWB.tint.toFixed(1)}`,
-        );
+        // waitForGPU() is awaited only for the perf log below -- it doesn't gate
+        // anything, since nothing after it touches shared state.
+        await pipeline.waitForGPU();
+        console.log(`decode+demosaic: ${(performance.now() - start).toFixed(1)}ms (${decoded.width}x${decoded.height})`);
+        return true;
       } else {
+        // Standard image (JPEG/PNG/TIFF/WebP/HEIC): use browser native decode
+        let decodedImage: DecodedImage;
+        try {
+          decodedImage = await decodeImage(fileBytes);
+        } catch (err) {
+          if (err instanceof ImageDecodeError) {
+            showError("Couldn't read this image -- it may be corrupted or in an unsupported format.", err.message);
+          } else {
+            showError('Something went wrong opening this file.', errorDetail(err));
+          }
+          return false;
+        }
+        if (requestId !== openRequestId) return false; // superseded during decode
+        hidePreview();
+        canvas.width = decodedImage.width;
+        canvas.height = decodedImage.height;
+        pipeline.show();
+        pipeline.loadImage(decodedImage);
+        resizePaintMask(decodedImage.width, decodedImage.height);
+        setGrainSeed(seedFromPath(record.path));
+        // Standard images have no raw WB data
         asShotWB = null;
+        loadedFileId = record.id;
+        lastDecoded = {
+          width: decodedImage.width,
+          height: decodedImage.height,
+          cameraMeta: decodedImage.cameraMeta,
+          make: decodedImage.make,
+          model: decodedImage.model,
+        };
+        await pipeline.waitForGPU();
+        console.log(`image decode: ${(performance.now() - start).toFixed(1)}ms (${decodedImage.width}x${decodedImage.height})`);
+        return true;
       }
-      loadedFileId = record.id;
-      lastDecoded = {
-        width: decoded.effectiveWidth ?? decoded.width,
-        height: decoded.effectiveHeight ?? decoded.height,
-        cameraMeta: decoded.cameraMeta,
-        make: decoded.make,
-        model: decoded.model,
-      };
-      // waitForGPU() is awaited only for the perf log below -- it doesn't gate
-      // anything, since nothing after it touches shared state.
-      await pipeline.waitForGPU();
-      console.log(`decode+demosaic: ${(performance.now() - start).toFixed(1)}ms (${decoded.width}x${decoded.height})`);
-      return true;
     })();
     inflightDecode = { id: record.id, requestId, promise };
     try {
@@ -1894,7 +1935,7 @@ async function init(): Promise<void> {
     }
   }
 
-  // Decodes + loads the current selection if its Bayer data isn't already in
+  // Decodes + loads the current selection if its image data isn't already in
   // the pipeline. Called on Develop entry for a file that was selected from
   // Library (which no longer decodes eagerly).
   async function ensureDevelopImage(): Promise<void> {
@@ -1906,6 +1947,8 @@ async function init(): Promise<void> {
     } catch (err) {
       if (err instanceof DecodeError) {
         showError("Couldn't read this photo -- it may be corrupted or in an unsupported format.", `LibRaw error ${err.code}`);
+      } else if (err instanceof ImageDecodeError) {
+        showError("Couldn't read this image -- it may be corrupted or in an unsupported format.", err.message);
       } else {
         showError('Something went wrong opening this file.', errorDetail(err));
       }
