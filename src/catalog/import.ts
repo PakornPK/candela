@@ -99,8 +99,25 @@ async function upsertFile(
 // under it, and upserts the folder + its files into the catalog.
 export async function importFolder(db: IDBDatabase): Promise<void> {
   const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+  await importFolderFromHandle(db, dirHandle);
+}
+
+// Import from an existing directory handle (for drag & drop)
+export async function importFolderFromHandle(db: IDBDatabase, dirHandle: FileSystemDirectoryHandle): Promise<void> {
   const folderId = await upsertFolder(db, dirHandle);
   for await (const { path, handle } of walk(dirHandle, '')) {
     await upsertFile(db, folderId, path, handle);
   }
+}
+
+// Imports one file under a folder handle. Tethered capture uses this for
+// frames arriving one at a time; the batch path above covers whole folders.
+// Path is the bare file name, matching what walk() yields at the top level.
+export async function importSingleFile(
+  db: IDBDatabase,
+  dirHandle: FileSystemDirectoryHandle,
+  fileHandle: FileSystemFileHandle,
+): Promise<void> {
+  const folderId = await upsertFolder(db, dirHandle);
+  await upsertFile(db, folderId, fileHandle.name, fileHandle);
 }

@@ -7,8 +7,8 @@ import { cameraCalibrationKey, gainsToKelvin, gainsToTint, WB_NEUTRAL_KELVIN } f
 import { getCameraXyz } from './gpu/ops';
 import { openCatalogDb } from './catalog/db';
 import { listFolders, listFiles } from './catalog/query';
-import { setCull } from './catalog/culling';
-import { importFolder, isRawFileName } from './catalog/import';
+import { applyCullResult, setCull } from './catalog/culling';
+import { importFolder, importFolderFromHandle, isRawFileName } from './catalog/import';
 import { ensureReadPermission } from './catalog/permissions';
 import { loadEditState, saveEditState } from './catalog/editsStore';
 import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
@@ -31,6 +31,11 @@ import { getState, selectFile, setSelection, subscribe, type ModuleId } from './
 import { registerModule, switchModule } from './app/modules';
 import { createFilmstrip } from './app/filmstrip';
 import { keyToAction } from './app/shortcuts';
+import { defaultViewState, viewStateToCropFrac, zoomToward, panBy, type ViewState } from './app/viewState';
+import { listCollections, createCollection, deleteCollection, addFilesToCollection, removeFilesFromCollection, type Collection } from './catalog/collections';
+import { listSmartCollections, createSmartCollection, updateSmartCollection, deleteSmartCollection, querySmartCollection, buildCriteria, criteriaToForm, describeCriteria, hasCriteria, type CriteriaForm, type SmartCollection, type SmartCollectionCriteria } from './catalog/smartCollections';
+import { TetheredCapture } from './app/tetheredCapture';
+import { openControlsWindow, type ControlsWindow, type MirrorControl } from './app/secondMonitor';
 
 const COLUMNS_PER_ROW = 6; // fixed for this pass -- see plan header
 const CELL_SIZE = 160; // px, matches index.html's .catalog-cell
@@ -177,6 +182,13 @@ const contactSheetLabel = document.querySelector<HTMLSpanElement>('#contact-shee
 const contactRollLabel = document.querySelector<HTMLDivElement>('#contact-roll-label')!;
 const contactGrid = document.querySelector<HTMLDivElement>('#contact-grid')!;
 const contactExport = document.querySelector<HTMLButtonElement>('#contact-export')!;
+const printPaper = document.querySelector<HTMLSelectElement>('#print-paper')!;
+const printOrientation = document.querySelector<HTMLSelectElement>('#print-orientation')!;
+const printMargin = document.querySelector<HTMLSelectElement>('#print-margin')!;
+const printButton = document.querySelector<HTMLButtonElement>('#print-btn')!;
+const printPageEl = document.querySelector<HTMLDivElement>('#print-page')!;
+const printImageEl = document.querySelector<HTMLImageElement>('#print-image')!;
+const printEmptyEl = document.querySelector<HTMLDivElement>('#print-empty')!;
 const errorEl = document.querySelector<HTMLDivElement>('#error')!;
 const errorMessageEl = document.querySelector<HTMLParagraphElement>('#error-message')!;
 const errorDetailEl = document.querySelector<HTMLPreElement>('#error-detail')!;
@@ -218,6 +230,7 @@ const presetSaveButton = document.querySelector<HTMLButtonElement>('#preset-save
 const presetImportButton = document.querySelector<HTMLButtonElement>('#preset-import')!;
 const presetListEl = document.querySelector<HTMLDivElement>('#preset-list')!;
 const syncBtn = document.querySelector<HTMLButtonElement>('#sync-btn')!;
+const autoAdvanceCheckbox = document.querySelector<HTMLInputElement>('#auto-advance')!;
 const footerCounts = document.querySelector<HTMLSpanElement>('#footer-counts')!;
 const selectionInfo = document.querySelector<HTMLSpanElement>('#selection-info')!;
 const footerFilterButtons = document.querySelectorAll<HTMLButtonElement>('#footer-filters [data-minrating]');
@@ -238,6 +251,31 @@ const maskOverlay = document.querySelector<HTMLCanvasElement>('#mask-overlay')!;
 const maskOverlayCtx = maskOverlay.getContext('2d')!;
 const cropOverlay = document.querySelector<HTMLCanvasElement>('#crop-overlay')!;
 const cropOverlayCtx = cropOverlay.getContext('2d')!;
+const zoomFitBtn = document.querySelector<HTMLButtonElement>('#zoom-fit')!;
+const zoomFillBtn = document.querySelector<HTMLButtonElement>('#zoom-fill')!;
+const zoom100Btn = document.querySelector<HTMLButtonElement>('#zoom-100')!;
+const zoom200Btn = document.querySelector<HTMLButtonElement>('#zoom-200')!;
+const zoomIndicator = document.querySelector<HTMLSpanElement>('#zoom-indicator')!;
+const searchInput = document.querySelector<HTMLInputElement>('#search-input')!;
+const collectionListEl = document.querySelector<HTMLDivElement>('#collection-list')!;
+const addCollectionBtn = document.querySelector<HTMLButtonElement>('#add-collection')!;
+const collectionRemoveSelectedBtn = document.querySelector<HTMLButtonElement>('#collection-remove-selected')!;
+const smartCollectionListEl = document.querySelector<HTMLDivElement>('#smart-collection-list')!;
+const addSmartCollectionBtn = document.querySelector<HTMLButtonElement>('#add-smart-collection')!;
+const smartDialog = document.querySelector<HTMLDialogElement>('#smart-dialog')!;
+const smartForm = document.querySelector<HTMLFormElement>('#smart-form')!;
+const smartDialogTitle = document.querySelector<HTMLHeadingElement>('#smart-dialog-title')!;
+const smartNameInput = document.querySelector<HTMLInputElement>('#smart-name')!;
+const smartScopeSelect = document.querySelector<HTMLSelectElement>('#smart-scope')!;
+const smartRatingOpSelect = document.querySelector<HTMLSelectElement>('#smart-rating-op')!;
+const smartRatingSelect = document.querySelector<HTMLSelectElement>('#smart-rating')!;
+const smartFlagSelect = document.querySelector<HTMLSelectElement>('#smart-flag')!;
+const smartFromInput = document.querySelector<HTMLInputElement>('#smart-from')!;
+const smartToInput = document.querySelector<HTMLInputElement>('#smart-to')!;
+const smartPreviewEl = document.querySelector<HTMLParagraphElement>('#smart-preview')!;
+const tetheredStartBtn = document.querySelector<HTMLButtonElement>('#tethered-start-btn')!;
+const tetheredStopBtn = document.querySelector<HTMLButtonElement>('#tethered-stop-btn')!;
+const tetheredStatusEl = document.querySelector<HTMLDivElement>('#tethered-status')!;
 
 function showError(message: string, detail?: string): void {
   errorMessageEl.textContent = message;
@@ -377,12 +415,50 @@ const ALL_SLIDERS: SliderConfig[] = [
   { slider: dodgeFeatherSlider, output: dodgeFeatherValue, neutral: 0, format: (v) => `${v}%` },
 ];
 
+// The Second Monitor controls window mirrors this panel, and paintSliders() is
+// the one place that repaints a slider's fill + readout -- so it is also where
+// the mirror is kept current (non-null only while that window is open).
+let syncControlsWindow: (() => void) | null = null;
+
 function paintSliders(): void {
   for (const cfg of ALL_SLIDERS) {
     updateSliderFill(cfg.slider, cfg.neutral);
     cfg.output.textContent = cfg.format(Number(cfg.slider.value));
   }
+  syncControlsWindow?.();
 }
+
+// The panel's own label text for a slider: the <label for=...>'s text nodes.
+// The readout <output> is nested inside that label, and its value is not part
+// of the control's name.
+function sliderLabelText(slider: HTMLInputElement): string {
+  const label = document.querySelector(`label[for="${slider.id}"]`);
+  if (!label) return slider.id;
+  const text = Array.from(label.childNodes)
+    .filter((node) => node.nodeType === Node.TEXT_NODE)
+    .map((node) => node.textContent ?? '')
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return text || slider.id;
+}
+
+// Which panel section a control sits in, so the mirror groups its rows the
+// same way the panel does.
+function sliderGroupName(slider: HTMLInputElement): string {
+  const section = slider.closest('details.panel-section');
+  return section?.querySelector('summary')?.textContent?.trim() || 'Controls';
+}
+
+// The mirror's rows come from ALL_SLIDERS, so a control added to the panel (one
+// array entry + one <input>/<output> pair in index.html) shows up in the
+// controls window with the panel's own range, label and readout, untouched.
+const MIRROR_CONTROLS: MirrorControl[] = ALL_SLIDERS.map((cfg) => ({
+  slider: cfg.slider,
+  label: sliderLabelText(cfg.slider),
+  group: sliderGroupName(cfg.slider),
+  readout: () => cfg.format(Number(cfg.slider.value)),
+}));
 
 // --- Tone curve editor state. Two modes behind the "Adjust:" dropdown:
 // Region (LrC's default -- four parametric sliders) and Point (the direct
@@ -1219,8 +1295,44 @@ async function init(): Promise<void> {
   // gate, so the slider hot path never waits on it.
   pipeline.setHistogramListener(drawHistogram);
 
+  // Device loss recovery handler (Phase 4.1)
+  pipeline.setDeviceLostHandler(async () => {
+    showError('GPU device lost. Attempting to recover...');
+    try {
+      // Recreate pipeline
+      const newPipeline = await Pipeline.create(canvas);
+      pipeline = newPipeline;
+      pipeline.setHistogramListener(drawHistogram);
+      // Re-set device loss handler
+      pipeline.setDeviceLostHandler(async () => {
+        showError('GPU device lost again. Please reload the page.');
+      });
+      // Reload current image if any
+      if (currentFileId) {
+        const file = allFiles.find((f) => f.id === currentFileId);
+        if (file) {
+          await loadIntoPipeline(file, Date.now());
+          renderOps(currentOps(currentEditState!));
+        }
+      }
+      showError('Recovered from GPU device loss.');
+      setTimeout(() => {
+        const errorEl = document.querySelector('#error');
+        if (errorEl) errorEl.remove();
+      }, 3000);
+    } catch (err) {
+      showError('Failed to recover from GPU device loss. Please reload the page.', String(err));
+    }
+  });
+
   let currentFileId: number | null = null;
   let currentEditState: EditState | null = null;
+  // View state for the Develop module's loupe: zoom level and pan position.
+  // zoom = 1 = fit, >1 = zoomed in. Pan is normalized (0..1) image center.
+  let viewState: ViewState = defaultViewState();
+  function updateZoomIndicator(): void {
+    zoomIndicator.textContent = `${Math.round(viewState.zoom * 100)}%`;
+  }
   let lastDecoded: { width: number; height: number; cameraMeta: CameraMeta | null; make: string; model: string } | null = null;
   // Camera identity of the loaded file, for the per-camera WB-readout
   // calibration (uniforms.ts wbCalibrationFor). null until a raw decodes.
@@ -1256,6 +1368,11 @@ async function init(): Promise<void> {
   let allFiles: FileRecord[] = [];
   let folderFilter: number | null = null;
   let gridEntries: GridEntry[] = [];
+  let collections: Collection[] = [];
+  let smartCollections: SmartCollection[] = [];
+  let activeCollectionId: number | null = null;
+  let activeSmartCollectionId: number | null = null;
+  let searchQuery = '';
 
   // Culling filter state. The grid and the contact sheet follow it; allFiles
   // (filmstrip + arrow navigation) is always unfiltered, Lightroom-style.
@@ -1268,26 +1385,80 @@ async function init(): Promise<void> {
     return true;
   }
 
-  // Re-chunks allFiles into grid entries honoring folderFilter + cullFilter,
-  // then repaints. Called after a filter change or a cull keypress (which
-  // mutates allFiles in place); keeps the DB out of the hot path.
+  // Re-chunks allFiles into grid entries honoring folderFilter, cullFilter,
+  // activeCollection, activeSmartCollection, and searchQuery, then repaints.
+  // Called after a filter change or a cull keypress (which mutates allFiles
+  // in place); keeps the DB out of the hot path.
   function rebuildGrid(): void {
     gridEntries = [];
-    for (const folder of folders) {
-      if (folderFilter !== null && folder.id !== folderFilter) continue;
-      const visible = allFiles.filter((f) => f.folderId === folder.id && matchesCullFilter(f));
+    
+    // Determine which files to show based on active filter
+    let filesToShow = allFiles;
+    
+    // Collection filter
+    if (activeCollectionId !== null) {
+      const collection = collections.find(c => c.id === activeCollectionId);
+      if (collection) {
+        const idSet = new Set(collection.fileIds);
+        filesToShow = allFiles.filter(f => idSet.has(f.id));
+      }
+    } else if (activeSmartCollectionId !== null) {
+      const smart = smartCollections.find(s => s.id === activeSmartCollectionId);
+      if (smart) {
+        filesToShow = querySmartCollection(allFiles, smart.criteria);
+      }
+    } else if (searchQuery) {
+      // Search filter
+      const query = searchQuery.toLowerCase();
+      filesToShow = allFiles.filter(f => 
+        f.path.toLowerCase().includes(query) ||
+        (f as any).cameraModel?.toLowerCase().includes(query) ||
+        (f as any).lensModel?.toLowerCase().includes(query)
+      );
+    } else {
+      // Folder filter
+      for (const folder of folders) {
+        if (folderFilter !== null && folder.id !== folderFilter) continue;
+        const visible = filesToShow.filter((f) => f.folderId === folder.id && matchesCullFilter(f));
+        if (visible.length === 0) continue;
+        gridEntries.push({ kind: 'heading', folderName: folder.name });
+        for (const row of chunkIntoRows(visible)) {
+          gridEntries.push({ kind: 'row', files: row });
+        }
+      }
+      virtualizer.setOptions({ ...virtualizer.options, count: gridEntries.length });
+      virtualizer.measure();
+      renderVisibleRows();
+      updateFooter();
+      if (getState().module === 'contact') renderContactSheet();
+      return;
+    }
+    
+    // Apply cull filter to the filtered set
+    filesToShow = filesToShow.filter(matchesCullFilter);
+    
+    // Group by folder for display
+    const filesByFolder = new Map<number, FileRecord[]>();
+    for (const file of filesToShow) {
+      if (!filesByFolder.has(file.folderId)) {
+        filesByFolder.set(file.folderId, []);
+      }
+      filesByFolder.get(file.folderId)!.push(file);
+    }
+    
+    for (const [folderId, files] of filesByFolder) {
+      const folder = folders.find(f => f.id === folderId);
+      if (!folder) continue;
       gridEntries.push({ kind: 'heading', folderName: folder.name });
-      for (const row of chunkIntoRows(visible)) {
+      for (const row of chunkIntoRows(files)) {
         gridEntries.push({ kind: 'row', files: row });
       }
     }
+    
     virtualizer.setOptions({ ...virtualizer.options, count: gridEntries.length });
     virtualizer.measure();
     renderVisibleRows();
     updateFooter();
-    // A cull/filter change that rebuilds the grid must also rebuild the contact
-    // sheet (it follows the same cull filter). Only when visible -- renderContactSheet
-    // reads module DOM, which is cheap but pointless while the sheet is hidden.
     if (getState().module === 'contact') renderContactSheet();
   }
 
@@ -1302,20 +1473,23 @@ async function init(): Promise<void> {
     return allFiles.filter((f) => folderFilter === null || f.folderId === folderFilter).map((f) => f.id);
   }
 
-  // Applies a rating to the whole selection (star-strip click / number key).
-  // Clicking the current rating again clears it. No selection = the clicked
-  // file only.
-  async function rateFile(reference: FileRecord, rating: number): Promise<void> {
-    const { selectedIds } = getState();
-    const targets = selectedIds.length ? selectedIds : [reference.id];
+  // Cull metadata (rating / flag / colour) is what the smart collections query,
+  // so every writer of it refreshes their counts too -- otherwise a rule like
+  // "5 stars" keeps showing a stale number until something else re-renders it.
+  function refreshCullDependents(): void {
+    rebuildGrid();
+    void renderSmartCollections();
+  }
+
+  // Applies a rating to the file whose stars were clicked; clicking the current
+  // rating again clears it. The keyboard path (1..5) is the selection-wide one
+  // (see the cull key handler): a key press names no target, so it rates every
+  // selected photo, while a click names exactly one.
+  async function rateFile(file: FileRecord, rating: number): Promise<void> {
     try {
-      for (const id of targets) {
-        const record = allFiles.find((f) => f.id === id);
-        if (!record) continue;
-        const patch = record.rating === rating ? { rating: 0 } : { rating };
-        Object.assign(record, await setCull(db, id, patch));
-      }
-      rebuildGrid();
+      const patch = file.rating === rating ? { rating: 0 } : { rating };
+      applyCullResult(file, await setCull(db, file.id, patch));
+      refreshCullDependents();
     } catch (err) {
       showError("Couldn't save the rating.", errorDetail(err));
     }
@@ -1361,6 +1535,8 @@ async function init(): Promise<void> {
   }
 
   function renderOps(ops: Op[]): void {
+    if (showFps) perfMarks.renderStart = performance.now();
+    
     // The brush mask lives CPU-side (authoritative); push any change to the GPU
     // before the render dispatches the dodgeBurn pass (which samples it).
     syncDodgeMaskToGPU();
@@ -1376,13 +1552,33 @@ async function init(): Promise<void> {
       // crop is [0,0,1,1] = the full source (no visual change).
       const [rx, ry, rw, rh] = cropRegion(ops, W, H);
       ensureCanvasSize(Math.max(1, Math.round(rw * W)), Math.max(1, Math.round(rh * H)));
-      pipeline.setCanvasRect([rx, ry, rw, rh]);
+      // Apply viewState zoom/pan on top of the crop region: when zoomed in,
+      // the canvas shows a sub-region of the crop (not the full crop).
+      if (viewState.zoom > 1) {
+        const [vx, vy, vw, vh] = viewStateToCropFrac(viewState);
+        // viewState is normalized to the crop region, so scale to crop coords.
+        pipeline.setCanvasRect([
+          rx + vx * rw,
+          ry + vy * rh,
+          vw * rw,
+          vh * rh,
+        ]);
+      } else {
+        pipeline.setCanvasRect([rx, ry, rw, rh]);
+      }
     }
     pipeline.render(ops);
     if (cropModeActive) {
       drawCropOverlay(readCropParams()); // unhides the overlay
     } else {
       cropOverlay.hidden = true;
+    }
+    // Update zoom indicator after every render.
+    updateZoomIndicator();
+    
+    if (showFps) {
+      perfMarks.renderEnd = performance.now();
+      logPerformance();
     }
   }
 
@@ -1479,9 +1675,9 @@ async function init(): Promise<void> {
         });
         cell.addEventListener('dblclick', () => switchModule('develop'));
         // Cull badges: reject/pick in the corner, clickable rating stars at the
-        // foot (star N sets the rating, clicking the current rating clears it;
-        // with a multi-selection the rating applies to every selected photo),
-        // color as a left edge bar.
+        // foot (star N sets *this* photo's rating, clicking the current rating
+        // clears it -- the 1..5 keys are what rate the whole selection), color
+        // as a left edge bar.
         if (file.flag === false) {
           const b = document.createElement('span');
           b.className = 'cell-badge cell-badge-reject';
@@ -1499,7 +1695,7 @@ async function init(): Promise<void> {
           const s = document.createElement('span');
           s.className = 'cell-star' + (n <= (file.rating ?? 0) ? ' on' : '');
           s.textContent = '★';
-          s.title = `${n}★ (applies to the whole selection)`;
+          s.title = `${n}\u2605 (rate this photo; click again to clear)`;
           s.addEventListener('click', (e) => {
             e.stopPropagation(); // rating a photo is not opening it
             void rateFile(file, n);
@@ -1536,14 +1732,28 @@ async function init(): Promise<void> {
   // keypresses go through rebuildGrid() instead (no DB re-query).
   async function renderCatalog(): Promise<void> {
     folders = await listFolders(db);
-    allFiles = [];
+    const loaded: FileRecord[] = [];
     for (const folder of folders) {
       if (folderFilter !== null && folder.id !== folderFilter) continue;
-      allFiles.push(...(await listFiles(db, folder.id)));
+      loaded.push(...(await listFiles(db, folder.id)));
     }
+    // Assign once, at the end: the collection panels count over allFiles, and
+    // anything repainted while the list was being rebuilt would otherwise read
+    // a half-filled array and show 0.
+    allFiles = loaded;
     rebuildGrid();
     renderFolderList();
     filmstrip.setFiles(allFiles.length);
+  }
+
+  // Every view switch goes through here. The collection panels read allFiles, so
+  // they are repainted only after renderCatalog() resolves -- refreshing them
+  // alongside it counts over the file list of the view being left behind (or an
+  // unloaded one), which shows stale or zero counts.
+  async function reloadCatalog(): Promise<void> {
+    await renderCatalog();
+    void renderCollections();
+    void renderSmartCollections();
   }
 
   function renderFolderList(): void {
@@ -1554,13 +1764,99 @@ async function init(): Promise<void> {
     }
   }
 
+  async function renderCollections(): Promise<void> {
+    collections = await listCollections(db);
+    collectionListEl.textContent = '';
+    for (const collection of collections) {
+      const row = document.createElement('div');
+      row.className = 'collection-row' + (activeCollectionId === collection.id ? ' active' : '');
+      row.innerHTML = `
+        <span class="collection-name">${collection.name}</span>
+        <span class="collection-count">${collection.fileIds.length}</span>
+        <button class="collection-add" title="Add the selected photos to this collection">＋</button>
+        <button class="collection-delete" title="Delete collection">×</button>
+      `;
+      row.addEventListener('click', (e) => {
+        const target = e.target as HTMLElement;
+        if (target.classList.contains('collection-add')) {
+          e.stopPropagation();
+          void addSelectionToCollection(collection);
+          return;
+        }
+        if (target.classList.contains('collection-delete')) {
+          e.stopPropagation();
+          if (confirm(`Delete collection "${collection.name}"?`)) {
+            deleteCollection(db, collection.id!).then(() => renderCollections());
+          }
+          return;
+        }
+        activeCollectionId = collection.id!;
+        activeSmartCollectionId = null;
+        folderFilter = null;
+        // renderCatalog(), never rebuildGrid(): rebuildGrid() re-paints the file
+        // list it already holds, which is still scoped to the folder that was
+        // open a moment ago, so the collection would show only that folder's
+        // photos. reloadCatalog() re-reads every folder with folderFilter null.
+        void reloadCatalog();
+      });
+      collectionListEl.appendChild(row);
+    }
+    syncCollectionActions();
+  }
+
+  async function renderSmartCollections(): Promise<void> {
+    smartCollections = await listSmartCollections(db);
+    smartCollectionListEl.textContent = '';
+    for (const smart of smartCollections) {
+      const matchingFiles = querySmartCollection(allFiles, smart.criteria);
+      const row = document.createElement('div');
+      row.className = 'collection-row' + (activeSmartCollectionId === smart.id ? ' active' : '');
+      row.innerHTML = `
+
+        <span class="collection-name">${smart.name}</span>
+        <span class="collection-count">${matchingFiles.length}</span>
+        <button class="collection-edit" title="Edit criteria">&#9998;</button>
+        <button class="collection-delete" title="Delete smart collection">×</button>
+      `;
+      // The rule itself, so a row is readable without opening the dialog.
+      row.title = `Matches ${describeCriteria(smart.criteria)}`;
+      row.addEventListener('click', (e) => {
+        const target = e.target as HTMLElement;
+        if (target.classList.contains('collection-edit')) {
+          e.stopPropagation();
+          openSmartDialog(smart);
+          return;
+        }
+        if (target.classList.contains('collection-delete')) {
+          e.stopPropagation();
+          if (confirm(`Delete smart collection "${smart.name}"?`)) {
+            deleteSmartCollection(db, smart.id!).then(() => renderSmartCollections());
+          }
+          return;
+        }
+        activeSmartCollectionId = smart.id!;
+        activeCollectionId = null;
+        folderFilter = null;
+        void reloadCatalog();
+      });
+      smartCollectionListEl.appendChild(row);
+    }
+  }
+
+
   function appendFolderRow(id: number | null, name: string): void {
     const row = document.createElement('button');
     row.className = 'folder-row' + (folderFilter === id ? ' active' : '');
     row.textContent = name;
     row.addEventListener('click', () => {
+      // Folder, collection and smart collection are one view selector between
+      // them: rebuildGrid checks the collections first, so a stale
+      // activeCollectionId would keep filtering the grid no matter what
+      // folder was picked (clicking a folder looked like it did nothing).
       folderFilter = id;
-      renderCatalog(); // also re-renders the folder list active state
+      activeCollectionId = null;
+      activeSmartCollectionId = null;
+      void reloadCatalog(); // also re-renders the folder list active state
     });
     folderListEl.appendChild(row);
   }
@@ -1640,10 +1936,12 @@ async function init(): Promise<void> {
   // failure is, instead of becoming an unhandled rejection.
   async function openFile(record: FileRecord): Promise<void> {
     clearError();
+    // Reset zoom/pan when switching files so each photo opens at fit-to-view.
+    viewState = defaultViewState();
     // Temporary perf probe (click-jank investigation): every selection
     // synchronously notifies subscribers -- the filmstrip scrolls the
     // selected cell into view and re-renders its visible cells. Log how long
-    // that sync block takes so the jank can be attributed or ruled out.
+
     const selStart = performance.now();
     selectFile(record.id);
     console.log(`[app] selectFile sync block: ${(performance.now() - selStart).toFixed(1)}ms`);
@@ -1704,10 +2002,13 @@ async function init(): Promise<void> {
     } catch (err) {
       if (err instanceof DecodeError) {
         showError("Couldn't read this photo -- it may be corrupted or in an unsupported format.", `LibRaw error ${err.code}`);
+      } else if (err instanceof ImageDecodeError) {
+        showError("Couldn't read this image -- it may be corrupted or in an unsupported format.", err.message);
       } else {
         showError('Something went wrong opening this file.', errorDetail(err));
       }
     }
+
   }
 
   // Re-enables the adjust sliders when real (decoded) Bayer data takes over.
@@ -2251,6 +2552,39 @@ async function init(): Promise<void> {
   undoButton.addEventListener('click', () => applyUndoRedo(false));
   redoButton.addEventListener('click', () => applyUndoRedo(true));
 
+    // Second Monitor support: the controls window mirrors MIRROR_CONTROLS, and
+  // paintSliders() pushes every panel repaint into it. Clicking again focuses
+  // the window that is already open.
+  let controlsWindow: ControlsWindow | null = null;
+  const secondMonitorBtn = document.querySelector<HTMLButtonElement>('#second-monitor-btn')!;
+  secondMonitorBtn.addEventListener('click', () => {
+    if (controlsWindow && !controlsWindow.window.closed) {
+      controlsWindow.window.focus();
+      return;
+    }
+    const opened = openControlsWindow({
+      controls: MIRROR_CONTROLS,
+      onAction: (action) => {
+        if (action === 'reset') resetButton.click();
+        else if (action === 'copy') void copySettingsToClipboard();
+        else void pasteSettingsFromClipboard();
+      },
+    });
+    if (!opened) {
+      showError('ไม่สามารถเปิดหน้าต่างควบคุมได้ - อาจถูก popup blocker บล็อก');
+      return;
+    }
+    controlsWindow = opened;
+    syncControlsWindow = opened.sync;
+
+    const checkClosed = setInterval(() => {
+      if (!opened.window.closed) return;
+      clearInterval(checkClosed);
+      syncControlsWindow = null;
+      controlsWindow = null;
+    }, 1000);
+  });
+
   // Export current Develop state -> JPEG/PNG download. The one allowed
   // GPU->CPU readback. A preview (HE*/undecodable file) can't be exported --
   // there's no full-res image behind it, only the embedded JPEG.
@@ -2314,6 +2648,216 @@ async function init(): Promise<void> {
       exportButton.disabled = false;
     }
   });
+
+  // Performance profiling (Phase 3.4)
+  let frameCount = 0;
+  let lastFpsUpdate = performance.now();
+  let currentFps = 0;
+  const fpsDisplay = document.createElement('div');
+  fpsDisplay.style.cssText = `
+    position: absolute;
+    top: 10px;
+    right: 10px;
+    background: rgba(0, 0, 0, 0.7);
+    color: #0f0;
+    padding: 4px 8px;
+    font-family: monospace;
+    font-size: 11px;
+    border-radius: 3px;
+    pointer-events: none;
+    z-index: 1000;
+    display: none;
+  `;
+  document.body.appendChild(fpsDisplay);
+  
+  let showFps = false;
+  window.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.shiftKey && e.key === 'P') {
+      showFps = !showFps;
+      fpsDisplay.style.display = showFps ? 'block' : 'none';
+    }
+  });
+  
+  function updateFpsCounter() {
+    if (!showFps) return;
+    frameCount++;
+    const now = performance.now();
+    if (now - lastFpsUpdate >= 1000) {
+      currentFps = frameCount;
+      frameCount = 0;
+      lastFpsUpdate = now;
+      fpsDisplay.textContent = `FPS: ${currentFps}`;
+    }
+    requestAnimationFrame(updateFpsCounter);
+  }
+  updateFpsCounter();
+  
+  // Performance marks for key operations
+  const perfMarks = {
+    decodeStart: 0,
+    decodeEnd: 0,
+    renderStart: 0,
+    renderEnd: 0,
+  };
+  
+  function logPerformance() {
+    if (!showFps) return;
+    const decodeTime = perfMarks.decodeEnd - perfMarks.decodeStart;
+    const renderTime = perfMarks.renderEnd - perfMarks.renderStart;
+    console.log(`[perf] decode: ${decodeTime.toFixed(1)}ms, render: ${renderTime.toFixed(1)}ms`);
+  }
+
+  // Edit State Backup (Phase 4.3)
+  let backupTimer: ReturnType<typeof setInterval> | null = null;
+  
+  function startBackupSystem() {
+    if (backupTimer) return;
+    backupTimer = setInterval(() => {
+      if (!currentFileId || !currentEditState) return;
+      saveEditState(db, currentFileId, currentEditState).catch(err => {
+        console.warn('[backup] failed:', err);
+      });
+    }, 30000); // 30 seconds
+  }
+  
+  function stopBackupSystem() {
+    if (backupTimer) {
+      clearInterval(backupTimer);
+      backupTimer = null;
+    }
+  }
+  
+  // Start backup system
+  startBackupSystem();
+  
+  // Cleanup on page unload
+  window.addEventListener('beforeunload', () => {
+    stopBackupSystem();
+    // Final save
+    if (currentFileId && currentEditState) {
+      saveEditState(db, currentFileId, currentEditState).catch(() => {});
+    }
+  });
+
+  // Batch export functionality
+  const batchExportRow = document.querySelector<HTMLElement>('#batch-export-row')!;
+  const batchExportBtn = document.querySelector<HTMLButtonElement>('#batch-export-btn')!;
+  const exportProgress = document.querySelector<HTMLElement>('#export-progress')!;
+  const exportProgressBar = document.querySelector<HTMLElement>('#export-progress-bar')!;
+  const exportProgressText = document.querySelector<HTMLElement>('#export-progress-text')!;
+  const exportCancelBtn = document.querySelector<HTMLButtonElement>('#export-cancel-btn')!;
+  
+  let batchExportCancelled = false;
+  
+  // Update batch export button visibility and text based on selection
+  subscribe(() => {
+    const selectedIds = getState().selectedIds;
+    if (selectedIds.length > 1) {
+      batchExportRow.style.display = 'flex';
+      batchExportBtn.textContent = `Batch Export Selected (${selectedIds.length})`;
+    } else {
+      batchExportRow.style.display = 'none';
+    }
+  });
+  
+  batchExportBtn.addEventListener('click', async () => {
+    const selectedIds = getState().selectedIds;
+    if (selectedIds.length < 2) return;
+    
+    const format = exportFormat.value as 'jpeg' | 'png' | 'tiff';
+    const bitDepth = exportBitDepth.value === '16' ? 16 : 8;
+    const longEdge = exportSize.value === 'original' ? null : Number(exportSize.value);
+    const ext = format === 'jpeg' ? 'jpg' : format;
+    
+    // Ask user for output directory
+    try {
+      const dirHandle = await (window as any).showDirectoryPicker({ mode: 'readwrite' });
+      
+      batchExportCancelled = false;
+      batchExportBtn.disabled = true;
+      exportButton.disabled = true;
+      exportProgress.style.display = 'block';
+      exportProgressBar.style.width = '0%';
+      exportProgressText.textContent = 'Starting batch export...';
+      
+      let completed = 0;
+      const total = selectedIds.length;
+      
+      for (const fileId of selectedIds) {
+        if (batchExportCancelled) {
+          exportProgressText.textContent = `Cancelled (${completed}/${total} completed)`;
+          break;
+        }
+        
+        const record = allFiles.find((f) => f.id === fileId);
+        if (!record) continue;
+        
+        exportProgressText.textContent = `Exporting ${completed + 1}/${total}: ${record.name}`;
+        
+        try {
+          // Load the file into pipeline
+          const file = await record.handle.getFile();
+          const fileBytes = await file.arrayBuffer();
+          
+          let decoded;
+          if (isRawFileName(record.name)) {
+            decoded = await decode(fileBytes);
+            pipeline.load(decoded);
+          } else {
+            decoded = await decodeImage(fileBytes);
+            pipeline.loadImage(decoded);
+          }
+          
+          // Load edit state
+          const editState = await loadEditState(db, fileId);
+          const ops = currentOps(editState);
+          
+          // Export
+          syncDodgeMaskToGPU();
+          const blob = await pipeline.exportImage(ops, { format, bitDepth, longEdge });
+          
+          // Save to directory
+          const base = record.name.replace(/\.[^.]+$/, '');
+          const fileHandle = await dirHandle.getFileHandle(`${base}.${ext}`, { create: true });
+          const writable = await fileHandle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          
+          completed++;
+          exportProgressBar.style.width = `${(completed / total) * 100}%`;
+        } catch (err) {
+          console.error(`Failed to export ${record.name}:`, err);
+          // Continue with next file
+        }
+      }
+      
+      if (!batchExportCancelled) {
+        exportProgressText.textContent = `Completed ${completed}/${total} exports`;
+      }
+      
+      // Restore current file
+      if (currentFileId) {
+        await openFile(allFiles.find(f => f.id === currentFileId)!);
+      }
+      
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        showError('Batch export failed.', errorDetail(err));
+      }
+    } finally {
+      batchExportBtn.disabled = false;
+      exportButton.disabled = false;
+      setTimeout(() => {
+        exportProgress.style.display = 'none';
+      }, 3000);
+    }
+  });
+  
+  exportCancelBtn.addEventListener('click', () => {
+    batchExportCancelled = true;
+    exportProgressText.textContent = 'Cancelling...';
+  });
+
 
   // Reset to the fresh-import default, LrC-style: an empty ops state (still
   // renders via the mandatory As-Shot WB + camera profile + ACR baseline
@@ -2400,10 +2944,185 @@ async function init(): Promise<void> {
   canvas.addEventListener('pointercancel', endStroke);
   canvas.addEventListener('pointerleave', endStroke);
 
+  // ---- zoom & pan (Develop module) ----
+  // Mouse wheel → zoom toward cursor; middle-click drag → pan; Z key → toggle zoom.
+  // Zoom is bounded [1, 8]; pan is bounded by image edges.
+  canvas.addEventListener('wheel', (e) => {
+    if (getState().module !== 'develop' || cropModeActive) return;
+    e.preventDefault();
+    // Zoom factor: 1.1x per wheel tick, clamped to [1, 8].
+    const zoomFactor = e.deltaY < 0 ? 1.1 : 1 / 1.1;
+    const newZoom = Math.max(1, Math.min(8, viewState.zoom * zoomFactor));
+    if (newZoom === viewState.zoom) return;
+
+    // Cursor position in normalized image coordinates.
+    const rect = canvas.getBoundingClientRect();
+    const cursorX = (e.clientX - rect.left) / rect.width;
+    const cursorY = (e.clientY - rect.top) / rect.height;
+    // Convert canvas coords to image coords (account for current view).
+    const [vx, vy, vw, vh] = viewStateToCropFrac(viewState);
+    const imgX = vx + cursorX * vw;
+    const imgY = vy + cursorY * vh;
+
+    viewState = zoomToward(viewState, imgX, imgY, newZoom);
+    renderOps(currentOpsFromSliders());
+  }, { passive: false });
+
+  // Middle-click drag → pan.
+  let panStart: { x: number; y: number; panX: number; panY: number } | null = null;
+  canvas.addEventListener('pointerdown', (e) => {
+    if (getState().module !== 'develop' || cropModeActive || e.button !== 1) return;
+    e.preventDefault();
+    panStart = { x: e.clientX, y: e.clientY, panX: viewState.panX, panY: viewState.panY };
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener('pointermove', (e) => {
+    if (!panStart) return;
+    const rect = canvas.getBoundingClientRect();
+    const dx = (e.clientX - panStart.x) / rect.width;
+    const dy = (e.clientY - panStart.y) / rect.height;
+    // Convert canvas delta to image delta (account for zoom).
+    const [_, __, vw, vh] = viewStateToCropFrac(viewState);
+    viewState = panBy(
+      { zoom: viewState.zoom, panX: panStart.panX, panY: panStart.panY },
+      -dx * vw,
+      -dy * vh,
+    );
+    renderOps(currentOpsFromSliders());
+  });
+  canvas.addEventListener('pointerup', (e) => {
+    if (panStart && e.button === 1) {
+      panStart = null;
+      canvas.releasePointerCapture(e.pointerId);
+    }
+  });
+
+  // Z key → toggle zoom: Fit → 100% → 200% → Fit.
+  window.addEventListener('keydown', (e) => {
+    if (getState().module !== 'develop' || cropModeActive) return;
+    if (e.key.toLowerCase() === 'z' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      if (viewState.zoom === 1) {
+        viewState = { zoom: 2, panX: 0.5, panY: 0.5 };
+      } else if (viewState.zoom === 2) {
+        viewState = { zoom: 4, panX: 0.5, panY: 0.5 };
+      } else {
+        viewState = defaultViewState();
+      }
+      renderOps(currentOpsFromSliders());
+    }
+  });
+
+  // Zoom toolbar buttons.
+  zoomFitBtn.addEventListener('click', () => {
+    viewState = defaultViewState();
+    renderOps(currentOpsFromSliders());
+  });
+
+  zoomFillBtn.addEventListener('click', () => {
+    // Fill: zoom so the image fills the canvas (no letterbox).
+    // Compute from canvas/image aspect ratio.
+    const W = lastDecoded?.width ?? 1;
+    const H = lastDecoded?.height ?? 1;
+    const canvasAspect = canvas.clientWidth / canvas.clientHeight;
+    const imgAspect = W / H;
+    const zoom = canvasAspect > imgAspect ? canvasAspect / imgAspect : imgAspect / canvasAspect;
+    viewState = { zoom: Math.max(1, zoom), panX: 0.5, panY: 0.5 };
+    renderOps(currentOpsFromSliders());
+  });
+  zoom100Btn.addEventListener('click', () => {
+    viewState = { zoom: 2, panX: 0.5, panY: 0.5 }; // 1:1 = 2x on a fit view
+    renderOps(currentOpsFromSliders());
+  });
+  zoom200Btn.addEventListener('click', () => {
+    viewState = { zoom: 4, panX: 0.5, panY: 0.5 }; // 2:1 = 4x on a fit view
+    renderOps(currentOpsFromSliders());
+  });
+
+  // ---- Loupe Info Overlay (Phase 3.1) ----
+  // Show EXIF info when hovering top-left corner of canvas
+  const infoOverlay = document.createElement('div');
+  infoOverlay.id = 'info-overlay';
+  infoOverlay.style.cssText = `
+    position: absolute;
+    top: 10px;
+    left: 10px;
+    background: rgba(0, 0, 0, 0.8);
+    color: white;
+    padding: 10px;
+    border-radius: 4px;
+    font-size: 12px;
+    line-height: 1.6;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.2s;
+    z-index: 100;
+  `;
+  canvas.parentElement?.appendChild(infoOverlay);
+  
+  let infoOverlayTimeout: number | null = null;
+  
+  canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const y = e.clientY - rect.top;
+    
+    // Show overlay when mouse is in top-left 150x150px area
+    if (x < 150 && y < 150 && currentFileId && lastDecoded) {
+      const file = allFiles.find(f => f.id === currentFileId);
+      if (file) {
+        const meta = lastDecoded.cameraMeta;
+        let info = `<strong>${file.name}</strong><br>`;
+        if (lastDecoded.make || lastDecoded.model) {
+          info += `${lastDecoded.make} ${lastDecoded.model}<br>`;
+        }
+        const exifParts = [];
+        if (meta?.iso) exifParts.push(`ISO ${meta.iso}`);
+        if (meta?.shutter) {
+          const exp = meta.shutter;
+          if (exp < 1) {
+            exifParts.push(`1/${Math.round(1/exp)}s`);
+          } else {
+            exifParts.push(`${exp}s`);
+          }
+        }
+        if (meta?.aperture) exifParts.push(`f/${meta.aperture}`);
+        if (meta?.focal) exifParts.push(`${meta.focal}mm`);
+        if (exifParts.length > 0) {
+          info += exifParts.join(' · ');
+        }
+
+        infoOverlay.innerHTML = info;
+        infoOverlay.style.opacity = '1';
+        
+        if (infoOverlayTimeout) {
+          clearTimeout(infoOverlayTimeout);
+        }
+        infoOverlayTimeout = window.setTimeout(() => {
+          infoOverlay.style.opacity = '0';
+        }, 3000);
+      }
+    } else {
+      infoOverlay.style.opacity = '0';
+      if (infoOverlayTimeout) {
+        clearTimeout(infoOverlayTimeout);
+        infoOverlayTimeout = null;
+      }
+    }
+  });
+  
+  canvas.addEventListener('mouseleave', () => {
+    infoOverlay.style.opacity = '0';
+    if (infoOverlayTimeout) {
+      clearTimeout(infoOverlayTimeout);
+      infoOverlayTimeout = null;
+    }
+  });
+
   // ---- before / after (Develop) ----
   // LrC's \ key holds the original as-imported look; the footer button makes it
   // sticky. "Before" = empty ops (the same fresh-import render Reset shows).
-  // ponytail: dragging a slider mid-before falls back to After (live edit wins)
+
   // but leaves the button lit until clicked again -- acceptable, the momentary
   // \ is the primary gesture.
   let beforeAfter = false;
@@ -2695,6 +3414,165 @@ async function init(): Promise<void> {
     }, 'image/png');
   }
 
+  // Compare View: side-by-side comparison of selected photos
+  function renderCompareView(): void {
+    const container = document.querySelector<HTMLElement>('#compare-container')!;
+    const empty = document.querySelector<HTMLElement>('#compare-empty')!;
+    const selectedIds = getState().selectedIds;
+    
+    // Clear previous canvases
+    container.querySelectorAll('.compare-canvas-wrapper').forEach(el => el.remove());
+    
+    if (selectedIds.length < 2) {
+      empty.style.display = 'flex';
+      return;
+    }
+    
+    empty.style.display = 'none';
+    
+    // Set grid layout based on count
+    const count = Math.min(selectedIds.length, 4);
+    container.className = 'compare-canvas-container';
+    if (count === 2) container.classList.add('grid-1x2');
+    else if (count === 3) container.classList.add('grid-1x3');
+    else container.classList.add(count === 4 ? 'grid-2x2' : 'grid-1x4');
+    
+    // Create canvas for each selected photo
+    for (let i = 0; i < count; i++) {
+      const fileId = selectedIds[i];
+      const file = allFiles.find(f => f.id === fileId);
+      if (!file) continue;
+      
+      const wrapper = document.createElement('div');
+      wrapper.className = 'compare-canvas-wrapper';
+      
+      const canvas = document.createElement('canvas');
+      canvas.width = 800;
+      canvas.height = 600;
+      wrapper.appendChild(canvas);
+      
+      const label = document.createElement('div');
+      label.className = 'compare-canvas-label';
+      label.textContent = file.name;
+      wrapper.appendChild(label);
+      
+      container.appendChild(wrapper);
+      
+      // Load and render the photo
+      loadCompareImage(fileId, canvas);
+    }
+  }
+  
+  async function loadCompareImage(fileId: number, canvas: HTMLCanvasElement): Promise<void> {
+    try {
+      const file = allFiles.find(f => f.id === fileId);
+      if (!file) return;
+      
+      // Create a separate pipeline for this canvas
+      const comparePipeline = await Pipeline.create(canvas);
+      
+      // Load the file
+      const blob = await file.handle.getFile();
+      const buffer = await blob.arrayBuffer();
+      if (isRawFileName(file.name)) {
+        const decoded = await decode(buffer);
+        comparePipeline.load(decoded);
+        const editState = await loadEditState(db, fileId);
+        const ops = currentOps(editState);
+        comparePipeline.render(ops);
+      } else {
+        const decoded = await decodeImage(buffer);
+        comparePipeline.loadImage(decoded);
+        const editState = await loadEditState(db, fileId);
+        const ops = currentOps(editState);
+        comparePipeline.render(ops);
+      }
+    } catch (err) {
+      console.error('Failed to load compare image:', err);
+    }
+  }
+  // ---- print ----
+  // The sheet carries the same developed bitmap the Export path produces
+  // (exportImage), so a print can never drift from what the sliders show --
+  // the only print-specific concern here is laying it out on paper.
+  // Paper sizes are the physical sheet sizes in portrait; a 5x7 is photo
+  // paper, not a document size.
+  const PRINT_PAPERS: Record<string, { w: number; h: number }> = {
+    a4: { w: 210, h: 297 },
+    letter: { w: 215.9, h: 279.4 },
+    '5x7': { w: 127, h: 177.8 },
+  };
+  let printObjectUrl: string | null = null;
+
+  // @page can't read custom properties, so the sheet size handed to the print
+  // dialog lives in a style element rewritten on every layout change.
+  const printPageStyle = document.createElement('style');
+  document.head.appendChild(printPageStyle);
+
+  function applyPrintLayout(): void {
+    const paper = PRINT_PAPERS[printPaper.value] ?? PRINT_PAPERS.a4;
+    const landscape = printOrientation.value === 'landscape';
+    const w = landscape ? paper.h : paper.w;
+    const h = landscape ? paper.w : paper.h;
+    printPageEl.style.setProperty('--print-page-w', `${w}mm`);
+    printPageEl.style.setProperty('--print-page-h', `${h}mm`);
+    printPageEl.style.setProperty('--print-margin', `${printMargin.value}mm`);
+    printPageStyle.textContent = `@page { size: ${w}mm ${h}mm; margin: 0; }`;
+  }
+
+  function setPrintImage(blob: Blob | null): void {
+    if (printObjectUrl) {
+      URL.revokeObjectURL(printObjectUrl);
+      printObjectUrl = null;
+    }
+    if (!blob) {
+      printImageEl.removeAttribute('src');
+      printImageEl.hidden = true;
+      printEmptyEl.hidden = false;
+      return;
+    }
+    printObjectUrl = URL.createObjectURL(blob);
+    printImageEl.src = printObjectUrl;
+    printImageEl.hidden = false;
+    printEmptyEl.hidden = true;
+  }
+
+  async function renderPrintView(): Promise<void> {
+    applyPrintLayout();
+    // The developed pixels only exist once the file is loaded in the pipeline
+    // (openFile decodes lazily), so printing a grid-only selection would print
+    // a thumbnail-grade nothing. Say so instead.
+    if (currentFileId === null || loadedFileId !== currentFileId) {
+      printEmptyEl.textContent = currentFileId === null
+        ? 'Select a photo in Library to print it.'
+        : "Open this photo in Develop first — its edits aren't on the GPU yet.";
+      setPrintImage(null);
+      return;
+    }
+    const url = currentFileId;
+    try {
+      syncDodgeMaskToGPU();
+      const blob = await pipeline.exportImage(currentOpsFromSliders(), {
+        format: 'jpeg',
+        bitDepth: 8,
+        longEdge: null,
+      });
+      if (currentFileId !== url) return; // selection moved on mid-encode
+      setPrintImage(blob);
+    } catch (err) {
+      showError("Couldn't lay out the print page.", errorDetail(err));
+    }
+  }
+
+  for (const control of [printPaper, printOrientation, printMargin]) {
+    control.addEventListener('change', applyPrintLayout);
+  }
+  printButton.addEventListener('click', () => {
+    window.print();
+  });
+  applyPrintLayout();
+
+  // ---- module wiring ----
   // ---- module wiring ----
   registerModule({
     id: 'library',
@@ -2755,10 +3633,28 @@ async function init(): Promise<void> {
     },
     onHide: () => {},
   });
+  registerModule({
+    id: 'compare',
+    root: document.querySelector('#module-compare')!,
+    onShow: () => {
+      renderCompareView();
+    },
+    onHide: () => {},
+  });
+  registerModule({
+    id: 'print',
+    root: document.querySelector('#module-print')!,
+    // Re-encode on entry: edits made in Develop while this module was hidden
+    // are not in the sheet that is already on screen.
+    onShow: () => {
+      void renderPrintView();
+    },
+    onHide: () => {},
+  });
   contactPrev.addEventListener('click', () => {
     if (contactSheetIdx > 0) {
       contactSheetIdx--;
-      renderContactSheet();
+
     }
   });
   contactNext.addEventListener('click', () => {
@@ -2800,7 +3696,60 @@ async function init(): Promise<void> {
       selectedIds.length > 1 ? `${selectedIds.length} selected · sync from the last clicked` :
       selectedIds.length === 1 ? '1 selected' : '';
     syncBtn.disabled = !(selectedId !== null && selectedIds.length >= 2);
+    syncCollectionActions();
   });
+
+    // The same "everything selected, else the open photo" rule the settings
+  // actions use.
+  function selectionTargets(): number[] {
+    const { selectedId, selectedIds } = getState();
+    return selectedIds.length ? selectedIds : [selectedId].filter((id) => id !== null);
+  }
+
+  // Transient footer message; the next selection change repaints that footer
+  // from state.
+  function flashSelectionInfo(message: string): void {
+    selectionInfo.textContent = message;
+    setTimeout(() => { selectionInfo.textContent = ''; }, 2000);
+  }
+
+  // Copy/paste settings. Named functions, not shortcut-only code: the Second
+  // Monitor window's Copy/Paste buttons run the same two, so a clipboard
+  // round-trip behaves identically whichever window started it.
+  async function copySettingsToClipboard(): Promise<void> {
+    if (!currentEditState) return;
+    const ops = currentOps(currentEditState);
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(ops));
+      flashSelectionInfo('✓ settings copied');
+    } catch (err) {
+      showError("Couldn't copy settings.", errorDetail(err));
+    }
+  }
+
+  async function pasteSettingsFromClipboard(): Promise<void> {
+    try {
+      const text = await navigator.clipboard.readText();
+      const ops = JSON.parse(text) as Op[];
+      if (!Array.isArray(ops)) throw new Error('Invalid settings format');
+      // Paste to selected photo(s) or current photo.
+      const targets = selectionTargets();
+      if (!targets.length) return;
+      for (const id of targets) {
+        const state = await loadEditState(db, id);
+        await saveEditState(db, id, commitEdit(state, ops));
+      }
+      // Re-render if the current file was pasted to.
+      if (targets.includes(currentFileId!)) {
+        currentEditState = await loadEditState(db, currentFileId!);
+        applyOpsToSliders(currentOps(currentEditState));
+        renderOps(currentOps(currentEditState));
+      }
+      flashSelectionInfo(`✓ pasted to ${targets.length} photo${targets.length > 1 ? 's' : ''}`);
+    } catch (err) {
+      showError("Couldn't paste settings.", errorDetail(err));
+    }
+  }
 
   // ---- shortcuts ----
   window.addEventListener('keydown', async (e) => {
@@ -2820,6 +3769,19 @@ async function init(): Promise<void> {
       return;
     }
 
+    // Copy/paste settings (Develop module only).
+    if (action.type === 'copy') {
+      e.preventDefault();
+      await copySettingsToClipboard();
+      return;
+    }
+    if (action.type === 'paste') {
+      e.preventDefault();
+      await pasteSettingsFromClipboard();
+      return;
+    }
+
+
     // Culling marks on the selected file(s), applied to the in-memory records
     // so the grid repaints instantly (no DB re-query). Like LrC, the mark hits
     // every photo in the multi-selection; with no multi-selection it hits just
@@ -2829,8 +3791,7 @@ async function init(): Promise<void> {
       action.type === 'rate' || action.type === 'color'
     ) {
       e.preventDefault();
-      const { selectedIds } = getState();
-      const ids = selectedIds.length ? selectedIds : [getState().selectedId].filter((x) => x !== null);
+      const ids = selectionTargets();
       if (!ids.length) return;
       const patch =
         action.type === 'pick' ? { flag: true } :
@@ -2842,9 +3803,20 @@ async function init(): Promise<void> {
         for (const id of ids) {
           const record = allFiles.find((f) => f.id === id);
           if (!record) continue;
-          Object.assign(record, await setCull(db, id, patch));
+          applyCullResult(record, await setCull(db, id, patch));
         }
-        rebuildGrid();
+        refreshCullDependents();
+        // Auto-advance: move to next photo after rating/flagging if enabled.
+        if (
+          autoAdvanceCheckbox.checked &&
+          ids.length === 1 &&
+          getState().module === 'library' &&
+          (action.type === 'rate' || action.type === 'pick' || action.type === 'reject')
+        ) {
+          const currentIndex = allFiles.findIndex((f) => f.id === ids[0]);
+          const nextFile = allFiles[currentIndex + 1];
+          if (nextFile) await openFile(nextFile);
+        }
       } catch (err) {
         showError("Couldn't save the cull mark.", errorDetail(err));
       }
@@ -2921,7 +3893,7 @@ async function init(): Promise<void> {
     addFolderButton.disabled = true;
     try {
       await importFolder(db);
-      await renderCatalog();
+      await reloadCatalog();
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
       showError("Couldn't import that folder.", errorDetail(err));
@@ -2930,11 +3902,284 @@ async function init(): Promise<void> {
     }
   });
 
+  // ---- collections ----
+  // Photos get into a collection from the grid selection: ＋ on a row adds the
+  // selection to that collection, − removes the selection from the open one.
+  // Both go through the catalog helpers, so the row counts and the grid always
+  // come back from the store rather than being patched locally.
+  function syncCollectionActions(): void {
+    const { selectedIds } = getState();
+    collectionRemoveSelectedBtn.disabled = activeCollectionId === null || selectedIds.length === 0;
+  }
+
+  async function addSelectionToCollection(collection: Collection): Promise<void> {
+    const ids = selectionTargets();
+    if (!ids.length) {
+      flashSelectionInfo('select photos first');
+      return;
+    }
+    try {
+      await addFilesToCollection(db, collection.id!, ids);
+      await renderCollections();
+      if (activeCollectionId === collection.id) rebuildGrid();
+      flashSelectionInfo(`✓ ${collection.name}: ${ids.length} photo${ids.length > 1 ? 's' : ''} added`);
+    } catch (err) {
+      showError("Couldn't add photos to the collection.", errorDetail(err));
+    }
+  }
+
+  collectionRemoveSelectedBtn.addEventListener('click', async () => {
+    const collection = collections.find((c) => c.id === activeCollectionId);
+    if (!collection) return;
+    const ids = selectionTargets();
+    if (!ids.length) return;
+    try {
+      await removeFilesFromCollection(db, collection.id!, ids);
+      await renderCollections();
+      rebuildGrid();
+      flashSelectionInfo(`✓ ${ids.length} removed from ${collection.name}`);
+    } catch (err) {
+      showError("Couldn't remove photos from the collection.", errorDetail(err));
+    }
+  });
+
+    // The header + creates a collection *from the selection* -- the only thing
+  // "I picked these photos, put them somewhere" can mean in this panel. The
+  // smart panel's + is the one that makes a rule; making that difference real
+  // is what stops the two + buttons from being confused.
+  addCollectionBtn.addEventListener('click', async () => {
+    const name = prompt('Collection name:');
+    if (!name) return;
+    const ids = selectionTargets();
+    try {
+      const created = await createCollection(db, name, ids);
+      await renderCollections();
+      flashSelectionInfo(ids.length ? `✓ ${created.name}: ${ids.length} photo${ids.length === 1 ? '' : 's'} added` : `✓ created ${created.name}`);
+    } catch (err) {
+      showError("Couldn't create collection.", errorDetail(err));
+    }
+  });
+
+  // ---- smart collection dialog -------------------------------------------
+  // Criteria are edited in a real form. The prompt() chain this replaces could
+  // express a rating and nothing else, silently turned a typo ("four stars")
+  // into an all-photos rule (parseInt -> NaN), and gave no way back in to fix a
+  // saved rule. The dialog adds the flag and modified-date criteria the engine
+  // already evaluates, and shows the match count before saving.
+  let editingSmartId: number | null = null;
+  // The photo ids an edited rule was built from. Held across the dialog so a
+  // reopened rule shows its own scope -- and so saving an edit never silently
+  // re-bounds a saved rule to whatever happens to be selected at the time.
+  let editingScopeIds: number[] | null = null;
+
+  function readSmartForm(): CriteriaForm {
+    return {
+      ratingOp: smartRatingOpSelect.value,
+      rating: smartRatingSelect.value,
+      flag: smartFlagSelect.value,
+      from: smartFromInput.value,
+      to: smartToInput.value,
+    };
+  }
+
+  // The form is half the rule and the scope is the other half, and the scope is
+  // not a form value (it is a list of photo ids). Preview and save both go
+  // through here, so the count the dialog prints is the count that gets saved.
+  function smartCriteriaFromForm(): SmartCollectionCriteria {
+    const criteria = buildCriteria(readSmartForm());
+    if (smartScopeSelect.value === 'selected') {
+      const ids = editingScopeIds ?? getState().selectedIds;
+      if (ids.length > 0) criteria.fileIds = [...ids];
+    }
+    return criteria;
+  }
+
+  function updateSmartPreview(): void {
+    const criteria = smartCriteriaFromForm();
+    const count = querySmartCollection(allFiles, criteria).length;
+    // The preview doubles as the validation message: a rule with no conditions
+    // and no scope is refused on save, and picking either clears the warning.
+    smartPreviewEl.classList.remove('warn');
+    smartPreviewEl.textContent = `Matches ${count} photo${count === 1 ? '' : 's'} — ${describeCriteria(criteria)}`;
+  }
+
+  function openSmartDialog(existing?: SmartCollection): void {
+    editingSmartId = existing?.id ?? null;
+    editingScopeIds = existing?.criteria.fileIds ?? null;
+    smartDialogTitle.textContent = existing ? 'Edit smart collection' : 'New smart collection';
+    const form = existing ? criteriaToForm(existing.criteria) : { ratingOp: '>=', rating: 'any', flag: 'any', from: '', to: '' };
+    smartNameInput.value = existing?.name ?? '';
+    smartRatingOpSelect.value = form.ratingOp ?? '>=';
+    smartRatingSelect.value = form.rating ?? 'any';
+    smartFlagSelect.value = form.flag ?? 'any';
+    smartFromInput.value = form.from ?? '';
+    smartToInput.value = form.to ?? '';
+
+    // Name the scope option with what it holds, then pick it: a saved rule keeps
+    // its own scope, while a fresh rule opened right after picking photos starts
+    // bounded to them -- that is the reading that made "1 star" pull in every
+    // starred photo in the catalog look like a bug rather than a rule.
+    const scopeIds = editingScopeIds ?? getState().selectedIds;
+    const count = scopeIds.length;
+    const scopeOption = smartScopeSelect.querySelector<HTMLOptionElement>('option[value="selected"]')!;
+    scopeOption.textContent = editingScopeIds
+      ? `Only the ${count} photo${count === 1 ? '' : 's'} this rule was built from`
+      : `Only the ${count} selected photo${count === 1 ? '' : 's'}`;
+    scopeOption.disabled = count === 0;
+    smartScopeSelect.value = existing ? (editingScopeIds ? 'selected' : 'all') : count > 0 ? 'selected' : 'all';
+
+    updateSmartPreview();
+    smartDialog.showModal();
+    smartNameInput.focus();
+  }
+
+  addSmartCollectionBtn.addEventListener('click', () => openSmartDialog());
+  smartDialog.addEventListener('input', updateSmartPreview);
+
+// The form is method="dialog", so Save and Cancel both submit and then close
+  // it, and the submitter's value says which. Handling submit rather than the
+  // dialog's close event is deliberate: the handler can preventDefault() to keep
+  // the dialog open when the rule is not saveable yet.
+  smartForm.addEventListener('submit', async (e) => {
+    if ((e.submitter as HTMLButtonElement | null)?.value !== 'save') return;
+    const name = smartNameInput.value.trim();
+    if (!name) return;
+    const criteria = smartCriteriaFromForm();
+    // A rule with no conditions and no scope matches every photo in the catalog
+    // -- that is
+    // how "select two photos, press + here" ends up showing photos the user
+    // never selected. Refuse it instead of saving it silently.
+    if (!hasCriteria(criteria)) {
+      e.preventDefault();
+      smartPreviewEl.classList.add('warn');
+      smartPreviewEl.textContent = `Pick at least one condition — a rule with none would match every photo (${allFiles.length})`;
+      return;
+    }
+    try {
+      if (editingSmartId !== null) {
+        await updateSmartCollection(db, editingSmartId, { name, criteria });
+      } else {
+        await createSmartCollection(db, name, criteria);
+      }
+      // renderSmartCollections() refreshes the cached list rebuildGrid() filters
+      // through, so it has to run first: an edited rule would otherwise keep
+      // showing the old photos until some unrelated repaint, and the stale row
+      // count already looked right, which is what made it invisible.
+      await renderSmartCollections();
+      // Only an edit of the rule on screen changes the view; editing any other
+      // row must leave it alone.
+      if (editingSmartId !== null && activeSmartCollectionId === editingSmartId) rebuildGrid();
+    } catch (err) {
+      showError("Couldn't save the smart collection.", errorDetail(err));
+    }
+  });
+
+
+  // ---- tethered capture ----
+  // New frames land in the catalog as the camera writes them, so a shoot can be
+  // culled in the grid without leaving the app. Only the watched folder is
+  // touched, and only files that appear after watching starts.
+  let tethered: TetheredCapture | null = null;
+
+  tetheredStartBtn.addEventListener('click', async () => {
+    if (tethered) return;
+    let dirHandle: FileSystemDirectoryHandle;
+    try {
+      dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+    } catch {
+      return; // user dismissed the picker
+    }
+    const capture = new TetheredCapture(
+      db,
+      dirHandle,
+      (name) => {
+        tetheredStatusEl.textContent = `Watching ${dirHandle.name} — imported ${name}`;
+        void reloadCatalog();
+      },
+      (err) => showError("Tethered capture couldn't read the folder.", errorDetail(err)),
+    );
+    try {
+      await capture.start();
+    } catch (err) {
+      showError("Couldn't start tethered capture.", errorDetail(err));
+      return;
+    }
+    tethered = capture;
+    tetheredStatusEl.textContent = `Watching ${capture.folderName}`;
+    tetheredStartBtn.disabled = true;
+    tetheredStopBtn.disabled = false;
+  });
+
+  tetheredStopBtn.addEventListener('click', () => {
+    tethered?.stop();
+    tethered = null;
+    tetheredStatusEl.textContent = 'Stopped';
+    tetheredStartBtn.disabled = false;
+    tetheredStopBtn.disabled = true;
+  });
+
+  // ---- search ----
+  searchInput.addEventListener('input', (e) => {
+    searchQuery = (e.target as HTMLInputElement).value;
+
+    activeCollectionId = null;
+    activeSmartCollectionId = null;
+    rebuildGrid();
+  });
+
+  // ---- drag & drop folder import ----
+  const libraryContent = document.querySelector<HTMLElement>('#module-library .content')!;
+  libraryContent.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    e.dataTransfer!.dropEffect = 'copy';
+  });
+  libraryContent.addEventListener('drop', async (e) => {
+    e.preventDefault();
+    const items = e.dataTransfer?.items;
+    if (!items) return;
+    
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i];
+      if (item.kind === 'file') {
+        const entry = item.webkitGetAsEntry();
+        if (entry?.isDirectory) {
+          try {
+            const handle = await (item as any).getAsFileSystemHandle();
+            if (handle?.kind === 'directory') {
+              await importFolderFromHandle(db, handle);
+              await reloadCatalog();
+              await renderCollections();
+              await renderSmartCollections();
+            }
+
+          } catch (err) {
+            showError("Couldn't import dropped folder.", errorDetail(err));
+          }
+        }
+      }
+    }
+  });
+
+  // ---- fullscreen mode ----
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'F11' || (e.key === 'f' && !e.ctrlKey && !e.metaKey && !e.altKey)) {
+      if (document.fullscreenElement) {
+        document.exitFullscreen();
+      } else {
+        document.documentElement.requestFullscreen();
+      }
+    }
+  });
+
   await renderCatalog();
+  await renderCollections();
+  await renderSmartCollections();
+
   try {
     presets = await listPresets(db);
   } catch (err) {
     presets = []; // a broken presets store shouldn't block the catalog
+
   }
   renderPresets();
 

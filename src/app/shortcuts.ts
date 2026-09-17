@@ -14,7 +14,9 @@ export type Action =
   | { type: 'reject' } // X -- flag as rejected
   | { type: 'clearCull' } // U -- clear flag/rating/color
   | { type: 'rate'; rating: number } // 1..5 stars
-  | { type: 'color'; color: number }; // 1..4 red/yellow/green/blue (keys 6..9)
+  | { type: 'color'; color: number } // 1..4 red/yellow/green/blue (keys 6..9)
+  | { type: 'copy' } // Ctrl+Shift+C -- copy current settings
+  | { type: 'paste' }; // Ctrl+Shift+V -- paste settings to selected
 
 // The five event fields keyToAction reads. Structural: a real KeyboardEvent
 // satisfies it, and so do plain test objects (no DOM types needed).
@@ -40,6 +42,8 @@ export function keyToAction(e: KeyEventLike): Action | null {
   if (key === 'g') return { type: 'grid' };
   if (key === 'e') return { type: 'loupe' };
   if ((e.ctrlKey || e.metaKey) && key === 'z') return { type: e.shiftKey ? 'redo' : 'undo' };
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && key === 'c') return { type: 'copy' };
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && key === 'v') return { type: 'paste' };
   if (!(e.ctrlKey || e.metaKey) && key === 'arrowleft') return { type: 'prev' };
   if (!(e.ctrlKey || e.metaKey) && key === 'arrowright') return { type: 'next' };
 

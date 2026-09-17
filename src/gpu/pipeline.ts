@@ -94,6 +94,19 @@ export class Pipeline {
   private readonly leakTextures: GPUTexture;
   private readonly leakSampler: GPUSampler;
 
+  // Device loss recovery callback
+  private onDeviceLost?: () => Promise<void>;
+
+  setDeviceLostHandler(handler: () => Promise<void>): void {
+    this.onDeviceLost = handler;
+    this.device.lost.then(async (info) => {
+      console.error('[gpu] device lost:', info.message);
+      if (this.onDeviceLost) {
+        await this.onDeviceLost();
+      }
+    });
+  }
+
   private constructor(
     private readonly device: GPUDevice,
     private readonly context: GPUCanvasContext,

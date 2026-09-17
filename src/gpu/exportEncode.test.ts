@@ -55,7 +55,9 @@ describe('encodePng16', () => {
     // IDAT inflates to: filter byte 0 + 2px x 4chan x 2 bytes, BIG-endian.
     const raw = inflateSync(chunks[1].data);
     expect(raw.length).toBe(1 + 2 * 4 * 2);
-    const rdv = new DataView(raw.buffer);
+    // inflateSync returns a pooled Buffer: its byteOffset is non-zero, so the
+    // view must start at raw.byteOffset (raw.buffer alone reads pool garbage).
+    const rdv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
     expect(raw[0]).toBe(0);
     expect(rdv.getUint16(1)).toBe(65535); // R=65535 stays 0xFF 0xFF in BE
     expect(rdv.getUint16(3)).toBe(0); // G=0

@@ -31,3 +31,15 @@ export function setCull(
     request.onerror = () => reject(request.error);
   });
 }
+
+// Pushes a setCull result onto the in-memory record the grid renders from.
+// A plain Object.assign is not enough: cleared marks are deleted from the row
+// (see setCull), and Object.assign leaves keys it is not given, so the record
+// would keep the old rating while the store has none -- the grid then paints
+// stars for a photo the catalog no longer says are rated.
+export function applyCullResult(target: FileRecord, saved: FileRecord): void {
+  Object.assign(target, saved);
+  if (!('rating' in saved)) delete target.rating;
+  if (!('color' in saved)) delete target.color;
+  if (!('flag' in saved)) delete target.flag;
+}
