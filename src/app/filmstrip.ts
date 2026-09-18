@@ -10,10 +10,14 @@ export interface FilmstripOptions {
   getFiles(): FileRecord[];
   getThumbnail(file: FileRecord): Promise<Blob | undefined>;
   onSelect(file: FileRecord): void;
+  // Star click on the strip's rating row rates THAT photo (same semantics as
+  // the grid's cell stars). main.ts wires it to its rateFile + cull refresh.
+  onRate(file: FileRecord, rating: number): void;
 }
 
 export interface Filmstrip {
   setFiles(count: number): void;
+  syncRatings(): void;
   destroy(): void;
 }
 
@@ -60,6 +64,27 @@ export function createFilmstrip(opts: FilmstripOptions): Filmstrip {
       cell.style.left = `${item.start}px`;
       cell.title = file.name;
       cell.addEventListener('click', () => onSelect(file));
+      // Rating mirror AND control: the same clickable 5-star row the grid
+      // cells carry. A static N-star glyph (the first pass here) reads as the
+      // grid's widget but swallows clicks -- and "★★" on a 4-star photo
+      // invites a click on the 4th glyph that does nothing (user: 'ไม่ขยับ').
+      // Paint stays in place via syncRatings() (no rebuild-per-key flicker).
+      const stars = document.createElement('div');
+      stars.className = 'cell-stars filmstrip-stars';
+      for (let s = 1; s <= 5; s++) {
+        const st = document.createElement('span');
+        st.className = 'cell-star' + (s <= (file.rating ?? 0) ? ' on' : '');
+        st.dataset.fileId = String(file.id);
+        st.dataset.rating = String(s);
+        st.textContent = '\u2605';
+        st.title = `${s}\u2605 (rate this photo; click the current rating to clear)`;
+        st.addEventListener('click', (e) => {
+          e.stopPropagation(); // rating a photo is not opening it
+          opts.onRate(file, s);
+        });
+        stars.appendChild(st);
+      }
+      cell.appendChild(stars);
       trackEl.appendChild(cell);
 
       getThumbnail(file).then((blob) => {
@@ -106,6 +131,14 @@ export function createFilmstrip(opts: FilmstripOptions): Filmstrip {
   });
 
   return {
+    syncRatings(): void {
+      const files = getFiles();
+      for (const star of trackEl.querySelectorAll<HTMLElement>('.filmstrip-stars .cell-star')) {
+        const id = Number(star.dataset.fileId);
+        const file = files.find((f) => f.id === id);
+        star.classList.toggle('on', Number(star.dataset.rating) <= (file?.rating ?? 0));
+      }
+    },
     setFiles(count: number): void {
       virtualizer.setOptions({ ...virtualizer.options, count });
       virtualizer.measure();

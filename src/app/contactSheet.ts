@@ -11,12 +11,17 @@ export interface ContactCullFilter {
   hideRejected: boolean;
   pickedOnly: boolean;
   minRating: number;
+  // Footer-chip semantics: EXACT rating (0 = any). Optional so the pure
+  // module stays usable without it; the sheet follows the grid, so a view
+  // filtered to exactly 2 stars proofs exactly those frames.
+  exactRating?: number;
 }
 
 export function matchesContactCull(f: FileRecord, filter: ContactCullFilter): boolean {
   if (filter.hideRejected && f.flag === false) return false;
   if (filter.pickedOnly && f.flag !== true) return false;
   if (filter.minRating > 0 && (f.rating ?? 0) < filter.minRating) return false;
+  if (filter.exactRating && (f.rating ?? 0) !== filter.exactRating) return false;
   return true;
 }
 

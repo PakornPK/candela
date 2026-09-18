@@ -9,7 +9,7 @@ import { openCatalogDb } from './catalog/db';
 import { listFolders, listFiles } from './catalog/query';
 import { applyCullResult, setCull } from './catalog/culling';
 import { importFolder, importFolderFromHandle, isRawFileName } from './catalog/import';
-import { ensureReadPermission } from './catalog/permissions';
+import { ensureReadPermission, queryReadPermission } from './catalog/permissions';
 import { loadEditState, saveEditState } from './catalog/editsStore';
 import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
 import { parsePreset, serializePreset, PRESET_FILE_EXT } from './catalog/presetFiles';
@@ -44,6 +44,7 @@ const HEADING_HEIGHT = 24; // px, matches index.html's .catalog-heading
 const addFolderButton = document.querySelector<HTMLButtonElement>('#add-folder')!;
 const libraryScroll = document.querySelector<HTMLDivElement>('#library-scroll')!;
 const libraryGrid = document.querySelector<HTMLDivElement>('#library-grid')!;
+const libraryEmpty = document.querySelector<HTMLButtonElement>('#library-empty')!;
 const exposureSlider = document.querySelector<HTMLInputElement>('#exposure')!;
 const wbSlider = document.querySelector<HTMLInputElement>('#wb')!;
 const tintSlider = document.querySelector<HTMLInputElement>('#tint')!;
@@ -114,6 +115,7 @@ const lightleakFadeValue = document.querySelector<HTMLOutputElement>('#lightleak
 const frameStyleSelect = document.querySelector<HTMLSelectElement>('#frame-style')!;
 const cropAspectSelect = document.querySelector<HTMLSelectElement>('#crop-aspect')!;
 const cropToggleBtn = document.querySelector<HTMLButtonElement>('#crop-toggle')!;
+const cropWorkbenchControls = document.querySelector<HTMLElement>('#crop-workbench')!;
 const rotateCcwBtn = document.querySelector<HTMLButtonElement>('#rotate-ccw')!;
 const rotateCwBtn = document.querySelector<HTMLButtonElement>('#rotate-cw')!;
 const straightenSlider = document.querySelector<HTMLInputElement>('#straighten')!;
@@ -150,6 +152,12 @@ let cropModeActive = false;
 function setCropMode(active: boolean): void {
   cropModeActive = active;
   cropToggleBtn.textContent = active ? 'Done' : 'Crop';
+  // The Crop/Done button is the mode's one owner. The workbench controls
+  // (aspect / rotate / straighten) hide outside crop mode, so no stray
+  // change can silently re-enter it -- the aspect select used to fire
+  // setCropMode(true) from Done mode and leave the wheel/pan zoom guards
+  // (which bail on cropModeActive) dead until reload.
+  cropWorkbenchControls.hidden = !active;
 }
 const bwTreatmentSelect = document.querySelector<HTMLSelectElement>('#bw-treatment')!;
 const bwControls = document.querySelector<HTMLDivElement>('#bw-controls')!;
@@ -299,6 +307,12 @@ function clearError(): void {
   errorMessageEl.textContent = '';
   errorDetailEl.textContent = '';
 }
+
+// The alert used to stay forever (cleared only as a side effect of the next
+// action); Esc dismisses it explicitly.
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && !errorEl.hidden) clearError();
+});
 
 function errorDetail(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -1376,12 +1390,42 @@ async function init(): Promise<void> {
 
   // Culling filter state. The grid and the contact sheet follow it; allFiles
   // (filmstrip + arrow navigation) is always unfiltered, Lightroom-style.
-  let cullFilter = { hideRejected: true, pickedOnly: false, minRating: 0 };
+  // Two independent rating dimensions, ANDed: the left 'Min rating' dropdown
+  // (at least N) and the footer star chips (exactly N, click again to clear).
+  // The chips used to be 'at least N' too -- a chip labelled from the
+  // cumulative count read as '4 stars: 4', and clicking it pulled every
+  // rated photo (user report 2026-09-18: 'กด 4 แต่มาหมดเลย').
+  let cullFilter = { hideRejected: true, pickedOnly: false, minRating: 0, exactRating: 0 };
+  // The chip filter's own state (0 = off). Lives beside cullFilter so
+  // applyCullFilterControls (defined later) can read it without a TDZ hit.
+  let exactRatingFilter = 0;
 
-  function matchesCullFilter(f: FileRecord): boolean {
+  // The chip badges: the REAL rating distribution of the view (folder /
+  // collection / search scope, before any cull filter). All = the photo
+  // total. They used to be live filtered tallies, so activating one chip
+  // rewrote the others' numbers into confusing small ones ('กด 1 ดาว... All
+  // กลายเป็น 4' -- user report 2026-09-18). A number that changes under the
+  // filter it describes is not a count of anything; the raw distribution is.
+  let scopeRating: number[] = [0, 0, 0, 0, 0, 0];
+  let scopeTotal = 0;
+
+  function tallyScope(files: FileRecord[]): void {
+    for (const f of files) scopeRating[f.rating ?? 0]++;
+    scopeTotal += files.length;
+  }
+
+  // Everything except the chip's exact-rating term -- the All chip's badge
+  // counts what a click would actually leave on screen (other filters stay).
+  function passesOtherCulls(f: FileRecord): boolean {
     if (cullFilter.hideRejected && f.flag === false) return false;
     if (cullFilter.pickedOnly && f.flag !== true) return false;
     if (cullFilter.minRating > 0 && (f.rating ?? 0) < cullFilter.minRating) return false;
+    return true;
+  }
+
+  function matchesCullFilter(f: FileRecord): boolean {
+    if (!passesOtherCulls(f)) return false;
+    if (cullFilter.exactRating > 0 && (f.rating ?? 0) !== cullFilter.exactRating) return false;
     return true;
   }
 
@@ -1391,6 +1435,8 @@ async function init(): Promise<void> {
   // in place); keeps the DB out of the hot path.
   function rebuildGrid(): void {
     gridEntries = [];
+    scopeRating = [0, 0, 0, 0, 0, 0];
+    scopeTotal = 0;
     
     // Determine which files to show based on active filter
     let filesToShow = allFiles;
@@ -1420,21 +1466,20 @@ async function init(): Promise<void> {
       for (const folder of folders) {
         if (folderFilter !== null && folder.id !== folderFilter) continue;
         const visible = filesToShow.filter((f) => f.folderId === folder.id && matchesCullFilter(f));
+        const inFolder = allFiles.filter((f) => f.folderId === folder.id);
+        tallyScope(inFolder);
         if (visible.length === 0) continue;
         gridEntries.push({ kind: 'heading', folderName: folder.name });
         for (const row of chunkIntoRows(visible)) {
           gridEntries.push({ kind: 'row', files: row });
         }
       }
-      virtualizer.setOptions({ ...virtualizer.options, count: gridEntries.length });
-      virtualizer.measure();
-      renderVisibleRows();
-      updateFooter();
-      if (getState().module === 'contact') renderContactSheet();
+      repaintGrid();
       return;
     }
     
     // Apply cull filter to the filtered set
+    tallyScope(filesToShow);
     filesToShow = filesToShow.filter(matchesCullFilter);
     
     // Group by folder for display
@@ -1455,10 +1500,22 @@ async function init(): Promise<void> {
       }
     }
     
+    repaintGrid();
+  }
+
+  // The single repaint tail: update the virtualizer's item count, re-derive
+  // the visible list, and repaint grid + footer + dependents from it. Every
+  // path that changes what the grid should show ends here.
+  function repaintGrid(): void {
     virtualizer.setOptions({ ...virtualizer.options, count: gridEntries.length });
     virtualizer.measure();
+    collectVisibleFiles();
+    pruneSelectionToVisible();
     renderVisibleRows();
     updateFooter();
+    // Thumbnails share the session cache, so this re-render re-points <img>
+    // srcs without re-extracting anything.
+    filmstrip.setFiles((visibleFiles ?? allFiles).length);
     if (getState().module === 'contact') renderContactSheet();
   }
 
@@ -1479,6 +1536,10 @@ async function init(): Promise<void> {
   function refreshCullDependents(): void {
     rebuildGrid();
     void renderSmartCollections();
+    // The strip mirrors the marks the grid shows; badges repaint in place
+    // (no rebuild -- a per-keystroke image rebuild would flicker the strip).
+    filmstrip.syncRatings();
+    if (getState().module === 'compare') renderCompareView();
   }
 
   // Applies a rating to the file whose stars were clicked; clicking the current
@@ -1495,18 +1556,72 @@ async function init(): Promise<void> {
     }
   }
 
+  // The one entry point for "the grid must now match the world": resync the
+  // virtualizer's cached rect/offset (a display:none round trip can leave the
+  // ResizeObserver-fed values stale at 0, which blanks the grid until a
+  // manual scroll -- review 2026-09-18 #1), then rebuild + repaint. Call this
+  // from module onShow; data/filter changes keep calling rebuildGrid().
+  function refreshGrid(): void {
+    virtualizer.scrollRect = { width: libraryScroll.offsetWidth, height: libraryScroll.offsetHeight };
+    virtualizer.scrollOffset = libraryScroll.scrollTop;
+    rebuildGrid();
+  }
+
+  // The files the grid currently shows, in reading order (collection / smart
+  // collection / search / folder scope + cull filter). One owner for "what's
+  // visible": the footer counts it, the arrow keys walk it, shift-click ranges
+  // over it, and the reject handler moves selection within it. Rebuilt with
+  // gridEntries in rebuildGrid(); null = before the first rebuild.
+  let visibleFiles: FileRecord[] | null = null;
+
+  // Files the new view hides (rejected under hide-rejected, re-rated out of a
+  // smart collection, ...) must leave the selection too, or the footer keeps
+  // claiming "1 selected" over a photo the grid no longer shows and the next
+  // digit key hits a phantom (review 2026-09-18 #2/#3).
+  function pruneSelectionToVisible(): void {
+    if (getState().module !== 'library' || !visibleFiles || !visibleFiles.length) return;
+    const { selectedId, selectedIds } = getState();
+    if (!selectedIds.length) return;
+    const visible = new Set(visibleFiles.map((f) => f.id));
+    const keep = selectedIds.filter((id) => visible.has(id));
+    if (keep.length === selectedIds.length) return;
+    setSelection(keep, keep.includes(selectedId ?? -1) ? selectedId : keep[keep.length - 1] ?? null);
+  }
+
+  function collectVisibleFiles(): void {
+    const files: FileRecord[] = [];
+    for (const entry of gridEntries) {
+      if (entry.kind === 'row') files.push(...entry.files);
+    }
+    visibleFiles = files;
+  }
+
   // Star-chip tooltips carry the per-rating counts; the footer shows the total
-  // in the current folder. Re-run on folder/filter/cull changes (rebuildGrid).
+  // in the CURRENT scope -- the collection, smart collection, or search the
+  // grid is showing, not just the folder -- plus how many photos the cull
+  // filter hid (a smaller grid with an unchanged "6 photos" footer reads as a
+  // broken grid, not as a working filter). Re-run on folder/filter/cull
+  // changes (rebuildGrid).
   function updateFooter(): void {
-    const scope = allFiles.filter((f) => folderFilter === null || f.folderId === folderFilter);
+    const scope = visibleFiles ?? allFiles.filter((f) => folderFilter === null || f.folderId === folderFilter);
     const counts = [0, 0, 0, 0, 0, 0];
     for (const f of scope) counts[f.rating ?? 0]++;
     footerFilterButtons.forEach((btn) => {
       const min = Number(btn.dataset.minrating);
-      const n = min === 0 ? scope.length : counts.slice(min).reduce((a, b) => a + b, 0);
-      btn.title = `${min === 0 ? 'Show all' : `Show ${min}★ and up`} -- ${n} photo${n === 1 ? '' : 's'}`;
+      const n = min === 0 ? scopeTotal : (scopeRating[min] ?? 0);
+      btn.title = `${min === 0 ? 'Show all ratings' : `Show only ${min}\u2605 (click the lit chip again to clear)`} -- ${n} photo${n === 1 ? '' : 's'}`;
+      btn.textContent = '';
+      btn.append(min === 0 ? 'All' : '\u2605'.repeat(min));
+      const badge = document.createElement('span');
+      badge.className = 'chip-count';
+      badge.textContent = String(n);
+      btn.appendChild(badge);
     });
-    footerCounts.textContent = `${scope.length} photo${scope.length === 1 ? '' : 's'}`;
+    // 'of' wording names the hidden remainder against the real total instead
+    // of a bare hidden count that changed with the filter.
+    footerCounts.textContent = scope.length === scopeTotal
+      ? `${scopeTotal} photo${scopeTotal === 1 ? '' : 's'}`
+      : `${scope.length} of ${scopeTotal} photos`;
   }
 
   // Caches the in-flight or resolved thumbnail request per file id, so
@@ -1622,6 +1737,18 @@ async function init(): Promise<void> {
     virtualizer._willUpdate();
     libraryGrid.style.height = `${virtualizer.getTotalSize()}px`;
     libraryGrid.textContent = '';
+    // An empty grid used to be a silent void -- the first-run user saw
+    // nothing to act on, and a filtered-to-zero view looked broken (review
+    // 2026-09-18 #4/QA-gap). renderVisibleRows runs on every rebuild, so the
+    // CTA can't disagree with what the grid holds.
+    if (gridEntries.length === 0) {
+      libraryEmpty.hidden = false;
+      libraryEmpty.textContent = folders.length === 0 && allFiles.length === 0
+        ? 'Add a folder of photos to start.\nNothing is uploaded -- it is read in your browser only.'
+        : 'No photos match this view.\nClear the search or filters, or pick another folder.';
+    } else {
+      libraryEmpty.hidden = true;
+    }
     for (const virtualItem of virtualizer.getVirtualItems()) {
       const entry = gridEntries[virtualItem.index];
       if (!entry) continue;
@@ -1741,9 +1868,8 @@ async function init(): Promise<void> {
     // anything repainted while the list was being rebuilt would otherwise read
     // a half-filled array and show 0.
     allFiles = loaded;
-    rebuildGrid();
+    rebuildGrid(); // repaintGrid() refreshes the filmstrip count
     renderFolderList();
-    filmstrip.setFiles(allFiles.length);
   }
 
   // Every view switch goes through here. The collection panels read allFiles, so
@@ -1864,14 +1990,38 @@ async function init(): Promise<void> {
   function renderMetadata(): void {
     metadataEl.textContent = '';
     const file = allFiles.find((f) => f.id === currentFileId);
-    if (!file) return;
+    if (!file) {
+      // The panel was a fully empty column with nothing but its header --
+      // read as broken, not as no-selection (visual pass 2026-09-18).
+      const hint = document.createElement('p');
+      hint.className = 'meta-hint';
+      hint.textContent = 'Select a photo to see its file info.';
+      metadataEl.appendChild(hint);
+      return;
+    }
     appendMeta('Name', file.name);
-    appendMeta('Dimensions', lastDecoded ? `${lastDecoded.width} × ${lastDecoded.height}` : '—');
-    appendMeta('Size', `${(file.size / 1024 / 1024).toFixed(1)} MB`);
+    // A Library selection hasn't decoded yet (lazy pipeline) -- the grid's
+    // thumbnail blob knows the dimensions now; fill that row from it instead
+    // of showing a permanent em-dash next to the file the user is looking at
+    // (review 2026-09-18 #10).
+    appendMeta('Dimensions', lastDecoded ? `${lastDecoded.width} × ${lastDecoded.height}` : '…', 'meta-dims');
+    appendMeta('Size', file.size >= 1024 * 1024
+      ? `${(file.size / 1024 / 1024).toFixed(1)} MB`
+      : `${Math.max(1, Math.round(file.size / 1024))} KB`); // 0.0 MB is not a size (review #10)
     appendMeta('Modified', new Date(file.lastModified).toLocaleString());
+    if (!lastDecoded) {
+      // The file itself, not the cached thumbnail -- thumbnails are scaled
+      // down (max 320px), and reporting a scaled size as the real one would
+      // be a wrong number instead of an honest '…'.
+      void file.handle.getFile().then((f) => createImageBitmap(f)).then((bm) => {
+        const row = metadataEl.querySelector<HTMLElement>('[data-meta="meta-dims"]');
+        if (row && currentFileId === file.id) row.textContent = `${bm.width} × ${bm.height}`;
+        bm.close();
+      }).catch(() => { /* permission pending or unsupported -- leave '…' */ });
+    }
   }
 
-  function appendMeta(label: string, value: string): void {
+  function appendMeta(label: string, value: string, key?: string): void {
     const row = document.createElement('div');
     row.className = 'meta-row';
     const l = document.createElement('span');
@@ -1879,6 +2029,7 @@ async function init(): Promise<void> {
     l.textContent = label;
     const v = document.createElement('span');
     v.className = 'meta-value';
+    if (key) v.dataset.meta = key;
     v.textContent = value;
     row.append(l, v);
     metadataEl.appendChild(row);
@@ -1936,6 +2087,10 @@ async function init(): Promise<void> {
   // failure is, instead of becoming an unhandled rejection.
   async function openFile(record: FileRecord): Promise<void> {
     clearError();
+    // Ratings persisted across reload but the selection evaporated -- the user
+    // came back to an unanchored grid (review #6). Remember the last opened
+    // photo; init() re-selects it after the catalog loads.
+    try { localStorage.setItem('candela.lastFile', String(record.id)); } catch { /* private mode */ }
     // Reset zoom/pan when switching files so each photo opens at fit-to-view.
     viewState = defaultViewState();
     // Temporary perf probe (click-jank investigation): every selection
@@ -1955,7 +2110,7 @@ async function init(): Promise<void> {
       // just the one that actually changed permission state, was visibly
       // janky (competing with this very decode() call for the shared WASM
       // module) and added nothing once permission was already settled.
-      const alreadyGranted = (await record.handle.queryPermission({ mode: 'read' })) === 'granted';
+      const alreadyGranted = await queryReadPermission(record.handle);
 
       if (!(await ensureReadPermission(record.handle))) {
         showError(`Permission needed to read "${record.name}" -- click it again to retry.`);
@@ -2240,6 +2395,16 @@ async function init(): Promise<void> {
   // the pipeline. Called on Develop entry for a file that was selected from
   // Library (which no longer decodes eagerly).
   async function ensureDevelopImage(): Promise<void> {
+    // openFile owns the decode for the file it just opened: wait for its
+    // promise and let openFile render afterwards. Sharing it via
+    // loadIntoPipeline's requestId dedup resolves true the moment the load
+    // finishes -- BEFORE openFile's own applyOpsToSliders/renderOps ran --
+    // so this caller's render raced ahead of the owner's state and left a
+    // blank canvas behind.
+    if (inflightDecode && currentFileId !== null && inflightDecode.id === currentFileId) {
+      await inflightDecode.promise;
+      return;
+    }
     if (loadedFileId === currentFileId) return;
     const record = allFiles.find((f) => f.id === currentFileId);
     if (!record) return;
@@ -2334,6 +2499,23 @@ async function init(): Promise<void> {
       onSliderInput();
     });
     cfg.slider.addEventListener('change', () => {
+      commitCurrentEdit();
+    });
+    // LrC's double-click-to-default: the slider snaps back to the value a
+    // fresh open shows. For WB/tint that is the camera's As-Shot (the no-op
+    // state applyOpsToSliders renders for an untouched file), not the raw
+    // slider midpoint.
+    cfg.slider.addEventListener('dblclick', () => {
+      if (currentFileId === null) return;
+      if (cfg.slider === wbSlider || cfg.slider === tintSlider) {
+        wbSlider.value = String(kelvinToWbSlider(asShotWB?.kelvin ?? WB_NEUTRAL_KELVIN));
+        tintSlider.value = String(asShotWB?.tint ?? 0);
+        wbTouched = false;
+      } else {
+        cfg.slider.value = String(cfg.neutral);
+      }
+      paintSliders();
+      onSliderInput();
       commitCurrentEdit();
     });
   }
@@ -2623,7 +2805,7 @@ async function init(): Promise<void> {
   exportButton.addEventListener('click', async () => {
     if (currentFileId === null) return;
     if (loadedFileId !== currentFileId) {
-      showError("Nothing to export — a preview can't be exported.");
+      showError("Nothing to export yet — open the photo in Develop first (press E), then export.");
       return;
     }
     const format = exportFormat.value as 'jpeg' | 'png' | 'tiff';
@@ -2968,6 +3150,22 @@ async function init(): Promise<void> {
     renderOps(currentOpsFromSliders());
   }, { passive: false });
 
+  // Double-click → jump to 2x (1:1 on a fit view) centered on the cursor,
+  // then back to fit. Same cursor->image mapping as the wheel zoom above.
+  canvas.addEventListener('dblclick', (e) => {
+    if (getState().module !== 'develop' || cropModeActive) return;
+    if (viewState.zoom > 1) {
+      viewState = defaultViewState();
+    } else {
+      const rect = canvas.getBoundingClientRect();
+      const [vx, vy, vw, vh] = viewStateToCropFrac(viewState);
+      const imgX = vx + ((e.clientX - rect.left) / rect.width) * vw;
+      const imgY = vy + ((e.clientY - rect.top) / rect.height) * vh;
+      viewState = zoomToward(viewState, imgX, imgY, 2);
+    }
+    renderOps(currentOpsFromSliders());
+  });
+
   // Middle-click drag → pan.
   let panStart: { x: number; y: number; panX: number; panY: number } | null = null;
   canvas.addEventListener('pointerdown', (e) => {
@@ -3132,7 +3330,11 @@ async function init(): Promise<void> {
     beforeAfter = v;
     beforeAfterSticky = sticky;
     beforeAfterBtn.classList.toggle('active', v);
-    renderOps(v ? [] : currentOps(currentEditState ?? createEditState()));
+    // currentOpsFromSliders, not currentEditState: a drag live-renders from
+    // the sliders while the history commit (which updates currentEditState)
+    // runs async on release -- reading the committed state showed the
+    // pre-drag edits (or nothing) when leaving Before mode.
+    renderOps(v ? [] : currentOpsFromSliders());
   }
   beforeAfterBtn.addEventListener('click', () => setBeforeAfter(!beforeAfter, true));
   window.addEventListener('keydown', (e) => {
@@ -3518,7 +3720,24 @@ async function init(): Promise<void> {
     printPageEl.style.setProperty('--print-page-h', `${h}mm`);
     printPageEl.style.setProperty('--print-margin', `${printMargin.value}mm`);
     printPageStyle.textContent = `@page { size: ${w}mm ${h}mm; margin: 0; }`;
+    fitPrintPreview();
   }
+
+  // The preview page is real size (an A4 sheet is 1123px tall); in a shorter
+  // window most of it sat below the fold with no hint to scroll (visual pass
+  // 2026-09-18). Scale-to-fit down (never up) so the whole sheet reads at a
+  // glance; @media print resets the transform, the dialog prints at real size.
+  function fitPrintPreview(): void {
+    const box = printPageEl.parentElement;
+    if (!box || box.clientWidth === 0) return; // hidden module: no geometry
+    const availW = box.clientWidth - 48; // .print-content padding
+    const availH = box.clientHeight - 48;
+    const pageW = printPageEl.offsetWidth || 1;
+    const pageH = printPageEl.offsetHeight || 1;
+    const scale = Math.max(0.1, Math.min(1, availW / pageW, availH / pageH));
+    printPageEl.style.setProperty('--print-scale', String(scale));
+  }
+  window.addEventListener('resize', fitPrintPreview);
 
   function setPrintImage(blob: Blob | null): void {
     if (printObjectUrl) {
@@ -3577,7 +3796,7 @@ async function init(): Promise<void> {
   registerModule({
     id: 'library',
     root: document.querySelector('#module-library')!,
-    onShow: () => {},
+    onShow: () => refreshGrid(),
     onHide: () => {},
   });
   registerModule({
@@ -3805,17 +4024,31 @@ async function init(): Promise<void> {
           if (!record) continue;
           applyCullResult(record, await setCull(db, id, patch));
         }
+        // Position in the visible list BEFORE the marks land: refreshCullDependents
+        // rebuilds it, and the photo being marked may leave it (reject under
+        // hide-rejected, re-rate out of a collection).
+        const beforeList = visibleFiles ?? allFiles;
+        const refBefore = getState().selectedId;
+        const pos = refBefore === null ? -1 : beforeList.findIndex((f) => f.id === refBefore);
         refreshCullDependents();
-        // Auto-advance: move to next photo after rating/flagging if enabled.
-        if (
-          autoAdvanceCheckbox.checked &&
-          ids.length === 1 &&
-          getState().module === 'library' &&
-          (action.type === 'rate' || action.type === 'pick' || action.type === 'reject')
-        ) {
-          const currentIndex = allFiles.findIndex((f) => f.id === ids[0]);
-          const nextFile = allFiles[currentIndex + 1];
-          if (nextFile) await openFile(nextFile);
+        // Walk the grid's own list (the old version skipped to a photo the
+        // filter hides -- an off-screen "advance" is the phantom-selection bug
+        // re-imported). Advance when auto-advance is on, and ALWAYS when the
+        // reference photo left the view: X must not orphan the selection or
+        // reset the arrow cursor to the top of the grid (review #3).
+        const afterList = visibleFiles ?? allFiles;
+        const ref = getState().selectedId;
+        const refGone = ref === null || !afterList.some((f) => f.id === ref);
+        const wantAdvance = refGone ||
+          (autoAdvanceCheckbox.checked && ids.length === 1 &&
+            (action.type === 'rate' || action.type === 'pick' || action.type === 'reject'));
+        if (wantAdvance && getState().module === 'library' && pos >= 0) {
+          const afterIds = new Set(afterList.map((f) => f.id));
+          let next: FileRecord | null = null;
+          for (let i = pos + 1; i < beforeList.length; i++) {
+            if (afterIds.has(beforeList[i].id)) { next = beforeList[i]; break; }
+          }
+          if (next && next.id !== ref) await openFile(next);
         }
       } catch (err) {
         showError("Couldn't save the cull mark.", errorDetail(err));
@@ -3823,34 +4056,49 @@ async function init(): Promise<void> {
       return;
     }
 
-    // prev/next walk the flat, folder-ordered file list; with no selection
-    // yet, the first arrow selects the first file (Lightroom-ish).
+    // prev/next walk the same visible list the grid AND the filmstrip show,
+    // in every module -- so the arrow keys never land on a photo the user
+    // can't see; with no selection yet, the first arrow selects the first
+    // file (Lightroom-ish). Falls back to the flat list before the first
+    // rebuild.
     e.preventDefault();
-    const index = allFiles.findIndex((f) => f.id === getState().selectedId);
+    const walk = visibleFiles ?? allFiles;
+    const index = walk.findIndex((f) => f.id === getState().selectedId);
     const nextIndex = index === -1 ? 0 : action.type === 'next' ? index + 1 : index - 1;
-    const file = allFiles[nextIndex];
+    const file = walk[nextIndex];
     if (file) await openFile(file);
   });
 
-  // ---- cull filter bar (grid-only; the filmstrip always shows everything) ----
+  // ---- cull filter bar (grid + filmstrip + arrow navigation all follow it) ----
   function applyCullFilterControls(): void {
     cullFilter = {
       hideRejected: filterHideRejected.checked,
       pickedOnly: filterPicked.checked,
       minRating: Number(filterMinRating.value),
+      exactRating: exactRatingFilter,
     };
-    // The footer star chips mirror the left panel's Min rating select.
+    // The chips' active state tracks the exact filter they own -- no longer
+    // mirrored from the Min rating select (different semantics now).
     footerFilterButtons.forEach((btn) => {
-      btn.classList.toggle('active', Number(btn.dataset.minrating) === cullFilter.minRating);
+      btn.classList.toggle('active', Number(btn.dataset.minrating) === cullFilter.exactRating);
     });
     rebuildGrid();
   }
+  libraryEmpty.addEventListener('click', () => addFolderButton.click());
+  autoAdvanceCheckbox.checked = localStorage.getItem('candela.autoAdvance') === '1';
+  autoAdvanceCheckbox.addEventListener('change', () => {
+    localStorage.setItem('candela.autoAdvance', autoAdvanceCheckbox.checked ? '1' : '0');
+  });
+
   filterHideRejected.addEventListener('change', applyCullFilterControls);
   filterPicked.addEventListener('change', applyCullFilterControls);
   filterMinRating.addEventListener('change', applyCullFilterControls);
+  // Chip click toggles the exact-rating filter (click the active chip again
+  // to clear it -- same semantics as the grid stars clearing a rating).
   footerFilterButtons.forEach((btn) => {
     btn.addEventListener('click', () => {
-      filterMinRating.value = String(btn.dataset.minrating);
+      const v = Number(btn.dataset.minrating);
+      exactRatingFilter = exactRatingFilter === v ? 0 : v;
       applyCullFilterControls();
     });
   });
@@ -3876,12 +4124,16 @@ async function init(): Promise<void> {
   });
 
   // ---- filmstrip ----
+  // The strip shows the SAME set the grid shows (a 1-star filter that left 12
+  // thumbnails including 2-star photos beside a 1-photo grid read as a broken
+  // filter -- user report 2026-09-18). Counts refresh in repaintGrid.
   const filmstrip = createFilmstrip({
     scrollEl: filmstripScroll,
     trackEl: filmstripTrack,
-    getFiles: () => allFiles,
+    getFiles: () => visibleFiles ?? allFiles,
     getThumbnail,
     onSelect: (file) => openFile(file),
+    onRate: (file, rating) => void rateFile(file, rating),
   });
 
   // AbortError means the user opened the folder picker and dismissed it --
@@ -4174,6 +4426,13 @@ async function init(): Promise<void> {
   await renderCatalog();
   await renderCollections();
   await renderSmartCollections();
+
+  {
+    const lastId = Number(localStorage.getItem('candela.lastFile') ?? '0');
+    const rec = lastId ? allFiles.find((f) => f.id === lastId) : undefined;
+    if (rec) await openFile(rec);
+    else renderMetadata(); // no restored selection: the panel shows its hint
+  }
 
   try {
     presets = await listPresets(db);
