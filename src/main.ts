@@ -1,6 +1,8 @@
 import { Virtualizer, elementScroll, observeElementRect, observeElementOffset } from '@tanstack/virtual-core';
 import { Pipeline } from './gpu/pipeline';
 import { decode, DecodeError, type CameraMeta, type DecodedRaw } from './raw/decode';
+import { isWasmLoadError } from './raw/librawModule';
+import { DELTA_OP_KINDS, syncDeltaOps } from './catalog/syncOps';
 import { decodeImage, ImageDecodeError, type DecodedImage } from './raw/imageDecode';
 import { extractThumbnail } from './raw/thumbnail';
 import { cameraCalibrationKey, gainsToKelvin, gainsToTint, WB_NEUTRAL_KELVIN } from './gpu/uniforms';
@@ -27,7 +29,7 @@ import { cropHandleAt, cropOverlayRect, dragCropRect, isFreeformCrop, cropRegion
 import { isNeutralGeometry, type GeometryParams } from './gpu/geometry';
 import { effectiveMask, maskDims, maskHasPaint, maskToBytes, maskToOp, maskToOverlay, opToMask, paintStroke, type DodgeBurnParams } from './gpu/dodge';
 import { BW_FILTERS, BW_TONES, type BwFilterId } from './gpu/bw';
-import { getState, selectFile, setSelection, subscribe, type ModuleId } from './app/state';
+import { getState, setSelection, subscribe, type ModuleId } from './app/state';
 import { registerModule, switchModule } from './app/modules';
 import { createFilmstrip } from './app/filmstrip';
 import { keyToAction } from './app/shortcuts';
@@ -238,6 +240,7 @@ const presetSaveButton = document.querySelector<HTMLButtonElement>('#preset-save
 const presetImportButton = document.querySelector<HTMLButtonElement>('#preset-import')!;
 const presetListEl = document.querySelector<HTMLDivElement>('#preset-list')!;
 const syncBtn = document.querySelector<HTMLButtonElement>('#sync-btn')!;
+const developSyncBtn = document.querySelector<HTMLButtonElement>('#develop-sync-btn');
 const autoAdvanceCheckbox = document.querySelector<HTMLInputElement>('#auto-advance')!;
 const footerCounts = document.querySelector<HTMLSpanElement>('#footer-counts')!;
 const selectionInfo = document.querySelector<HTMLSpanElement>('#selection-info')!;
@@ -316,6 +319,24 @@ window.addEventListener('keydown', (e) => {
 
 function errorDetail(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+// One mapping for every "couldn't open this file" path: what the user can DO
+// about it, with the raw cause kept in the 'See detail' disclosure. A wasm
+// fetch failure (offline blip, tab opened mid-deploy) is retryable by simply
+// clicking the photo again -- librawModule no longer caches failed loads --
+// so it must not read as a corrupted file.
+function openFileError(err: unknown): [string, string?] {
+  if (err instanceof DecodeError) {
+    return ["Couldn't read this photo -- it may be corrupted or in an unsupported format.", `LibRaw error ${err.code}`];
+  }
+  if (err instanceof ImageDecodeError) {
+    return ["Couldn't read this image -- it may be corrupted or in an unsupported format.", err.message];
+  }
+  if (isWasmLoadError(err)) {
+    return ["Couldn't load the raw decoder. Check your connection, then click the photo again to retry.", errorDetail(err)];
+  }
+  return ['Something went wrong opening this file.', errorDetail(err)];
 }
 
 // Colors the slider track from its neutral point toward the thumb,
@@ -1223,12 +1244,40 @@ function opsToLabel(ops: Op[]): string {
     .join(' · ');
 }
 
+// One adjustment module per op kind -- the Sync dialog's checklist and the
+// merge predicate both key off this. dodgeBurn rides along with Tone (its
+// strength sliders live in that panel and a mask is meaningless without the
+// tone engine): there is no UI path that syncs the mask unless Tone is
+// checked, so the checkbox is the guard.
+const OP_MODULE: Record<Op['kind'], string> = {
+  profile: 'Profile',
+  exposure: 'Tone',
+  tone: 'Tone',
+  toneCurve: 'Tone Curve',
+  whiteBalance: 'White Balance',
+  presence: 'Presence',
+  vignette: 'Effects',
+  grain: 'Effects',
+  lightleak: 'Effects',
+  bw: 'B&W',
+  crop: 'Crop & Geometry',
+  geometry: 'Crop & Geometry',
+  frame: 'Frame',
+  dodgeBurn: 'Tone',
+};
+
+// The merge both presets and sync use: keep the target's ops whose kind the
+// incoming set doesn't cover, then the incoming ops win for the kinds they do.
+function mergeKinds(current: Op[], incoming: Op[]): Op[] {
+  const incomingKinds = new Set(incoming.map((o) => o.kind));
+  return [...current.filter((o) => !incomingKinds.has(o.kind)), ...incoming];
+}
+
 // Applying a preset merges, never replaces: ops whose kind the preset doesn't
 // cover stay as they are, and the preset's ops win for the kinds it does
 // cover. So a "contrast+curve" preset leaves your exposure untouched.
 function mergePresetOps(current: Op[], preset: Op[]): Op[] {
-  const presetKinds = new Set(preset.map((o) => o.kind));
-  return [...current.filter((o) => !presetKinds.has(o.kind)), ...preset];
+  return mergeKinds(current, preset);
 }
 
 // LrC-style histogram: R/G/B as translucent filled curves (overlaps show as
@@ -1515,12 +1564,12 @@ async function init(): Promise<void> {
     updateFooter();
     // Thumbnails share the session cache, so this re-render re-points <img>
     // srcs without re-extracting anything.
-    filmstrip.setFiles((visibleFiles ?? allFiles).length);
+    filmstrip.setFiles(stripScope().length);
     if (getState().module === 'contact') renderContactSheet();
   }
 
   // Multi-selection: the anchor for shift+click range selection. Plain clicks
-  // and keyboard navigation (selectFile) collapse selection to one file, so the
+  // and keyboard navigation (openFile's setSelection) collapse selection to one file, so the
   // anchor is only ever read after a ctrl/cmd or shift click set it.
   let selectionAnchor: number | null = null;
 
@@ -1565,6 +1614,19 @@ async function init(): Promise<void> {
     virtualizer.scrollRect = { width: libraryScroll.offsetWidth, height: libraryScroll.offsetHeight };
     virtualizer.scrollOffset = libraryScroll.scrollTop;
     rebuildGrid();
+  }
+
+  // What the filmstrip + arrow keys navigate, per module: in Library the strip
+  // is a mirror of the grid, so it honors the filter (showing non-matching
+  // photos beside a filtered grid read as a broken filter -- user report
+  // 2026-09-18). In the other modules the strip is the navigation rail
+  // (Lightroom's loupe filmstrip): filtering it there stranded a user who
+  // pressed the ★1 chip (one matching photo) and then couldn't switch to any
+  // other photo from Develop at all. Folder scope, unfiltered, matches how
+  // the strip was before the chips existed.
+  function stripScope(): FileRecord[] {
+    if (getState().module === 'library' && visibleFiles) return visibleFiles;
+    return allFiles;
   }
 
   // The files the grid currently shows, in reading order (collection / smart
@@ -2098,7 +2160,11 @@ async function init(): Promise<void> {
     // selected cell into view and re-renders its visible cells. Log how long
 
     const selStart = performance.now();
-    selectFile(record.id);
+    // Collapse-onto-clicked (LrC): even when the photo is ALREADY part of a
+    // multi-selection, a plain click/open makes it the sole selection --
+    // otherwise a stale multi-selection survives a 'single' click and the
+    // next Ctrl+click toggles against it instead of building a new one.
+    setSelection([record.id], record.id);
     console.log(`[app] selectFile sync block: ${(performance.now() - selStart).toFixed(1)}ms`);
     const requestId = ++openRequestId;
     try {
@@ -2155,13 +2221,7 @@ async function init(): Promise<void> {
       renderCameraInfo();
       renderHistory();
     } catch (err) {
-      if (err instanceof DecodeError) {
-        showError("Couldn't read this photo -- it may be corrupted or in an unsupported format.", `LibRaw error ${err.code}`);
-      } else if (err instanceof ImageDecodeError) {
-        showError("Couldn't read this image -- it may be corrupted or in an unsupported format.", err.message);
-      } else {
-        showError('Something went wrong opening this file.', errorDetail(err));
-      }
+      showError(...openFileError(err));
     }
 
   }
@@ -2353,11 +2413,7 @@ async function init(): Promise<void> {
         try {
           decodedImage = await decodeImage(fileBytes);
         } catch (err) {
-          if (err instanceof ImageDecodeError) {
-            showError("Couldn't read this image -- it may be corrupted or in an unsupported format.", err.message);
-          } else {
-            showError('Something went wrong opening this file.', errorDetail(err));
-          }
+          showError(...openFileError(err));
           return false;
         }
         if (requestId !== openRequestId) return false; // superseded during decode
@@ -2411,13 +2467,7 @@ async function init(): Promise<void> {
     try {
       await loadIntoPipeline(record, openRequestId);
     } catch (err) {
-      if (err instanceof DecodeError) {
-        showError("Couldn't read this photo -- it may be corrupted or in an unsupported format.", `LibRaw error ${err.code}`);
-      } else if (err instanceof ImageDecodeError) {
-        showError("Couldn't read this image -- it may be corrupted or in an unsupported format.", err.message);
-      } else {
-        showError('Something went wrong opening this file.', errorDetail(err));
-      }
+      showError(...openFileError(err));
     }
   }
 
@@ -3892,10 +3942,17 @@ async function init(): Promise<void> {
 
   // Keeps the topbar tab highlight in sync with the active module,
   // whichever path changed it (click or G/E shortcut).
+  let lastStripModule: string | null = null;
   subscribe(() => {
     const module = getState().module;
     for (const button of document.querySelectorAll<HTMLButtonElement>('[data-module]')) {
       button.classList.toggle('active', button.dataset.module === module);
+    }
+    // Entering/leaving Library swaps the strip's scope (see stripScope);
+    // rebuild its window once per switch, not per selection change.
+    if (module !== lastStripModule) {
+      lastStripModule = module;
+      filmstrip.setFiles(stripScope().length);
     }
   });
 
@@ -3909,12 +3966,18 @@ async function init(): Promise<void> {
     const { selectedId, selectedIds } = getState();
     const selected = new Set(selectedIds);
     for (const cell of libraryGrid.querySelectorAll<HTMLElement>('.catalog-cell')) {
-      cell.classList.toggle('selected', selected.has(Number(cell.dataset.fileId)));
+      const id = Number(cell.dataset.fileId);
+      cell.classList.toggle('selected', selected.has(id));
+      // The Sync reference = the last-clicked selected photo. Without a
+      // distinct frame the footer's 'sync from the last clicked' pointed at a
+      // photo nobody could find (LrC draws the source frame brighter).
+      cell.classList.toggle('sync-ref', selectedIds.length >= 2 && id === syncReference());
     }
     selectionInfo.textContent =
       selectedIds.length > 1 ? `${selectedIds.length} selected · sync from the last clicked` :
       selectedIds.length === 1 ? '1 selected' : '';
     syncBtn.disabled = !(selectedId !== null && selectedIds.length >= 2);
+    if (developSyncBtn) developSyncBtn.disabled = syncBtn.disabled;
     syncCollectionActions();
   });
 
@@ -3987,6 +4050,12 @@ async function init(): Promise<void> {
       await applyUndoRedo(action.type === 'redo');
       return;
     }
+    // S -- LrC's loupe Sync: the dialog itself enforces 'needs 2+ selected'.
+    if (action.type === 'sync') {
+      e.preventDefault();
+      if (getState().module === 'develop') openSyncDialog();
+      return;
+    }
 
     // Copy/paste settings (Develop module only).
     if (action.type === 'copy') {
@@ -4056,13 +4125,12 @@ async function init(): Promise<void> {
       return;
     }
 
-    // prev/next walk the same visible list the grid AND the filmstrip show,
-    // in every module -- so the arrow keys never land on a photo the user
-    // can't see; with no selection yet, the first arrow selects the first
-    // file (Lightroom-ish). Falls back to the flat list before the first
-    // rebuild.
+    // prev/next walk the same list the filmstrip shows (stripScope): the
+    // filtered view in Library, the whole folder in the other modules; with
+    // no selection yet, the first arrow selects the first file
+    // (Lightroom-ish).
     e.preventDefault();
-    const walk = visibleFiles ?? allFiles;
+    const walk = stripScope();
     const index = walk.findIndex((f) => f.id === getState().selectedId);
     const nextIndex = index === -1 ? 0 : action.type === 'next' ? index + 1 : index - 1;
     const file = walk[nextIndex];
@@ -4107,21 +4175,161 @@ async function init(): Promise<void> {
   // Copies the reference photo's current ops (last clicked) as a NEW snapshot
   // in every other selected photo's edit history -- non-destructive, so each
   // target can undo the sync individually, exactly like LrC's Sync.
-  syncBtn.addEventListener('click', async () => {
+  // ---- sync settings dialog (LrC's 'Sync Settings' / S) ----
+  // Module checklist first, then apply photo-by-photo with awaited yields,
+  // a live progress readout and cancel -- the UI never blocks on the batch.
+  let syncTargets: number[] = [];
+  let syncRefId: number | null = null;
+  let syncAborted = false;
+  const syncDialog = document.querySelector<HTMLDialogElement>('#sync-dialog')!;
+  const syncForm = document.querySelector<HTMLFormElement>('#sync-form')!;
+  const syncModulesEl = document.querySelector<HTMLDivElement>('#sync-modules')!;
+  const syncGoBtn = document.querySelector<HTMLButtonElement>('#sync-go')!;
+  const syncCancelBtn = document.querySelector<HTMLButtonElement>('#sync-cancel')!;
+  const syncProgressEl = document.querySelector<HTMLSpanElement>('#sync-progress')!;
+
+  // The sync source: the photo currently open in the loupe when it is part
+  // of the selection (LrC syncs FROM the active photo -- that's the one the
+  // user just edited), otherwise the last-clicked id (grid multi-select
+  // without ever entering Develop).
+  function syncReference(): number | null {
+    const { selectedId, selectedIds } = getState();
+    if (currentFileId !== null && selectedIds.includes(currentFileId)) return currentFileId;
+    return selectedId;
+  }
+
+  function openSyncDialog(): void {
     const { selectedId, selectedIds } = getState();
     if (selectedId === null || selectedIds.length < 2) return;
-    const targets = selectedIds.filter((id) => id !== selectedId);
+    syncRefId = syncReference(); // frozen: arrows/keys must not move the source mid-sync
+    syncTargets = selectedIds.filter((id) => id !== syncRefId);
+    syncAborted = false;
+    // Pre-check the modules from the last sync (LrC remembers the dialog).
+    // Empty storage = ALL checked (an empty string split()s to [''] -- which
+    // silently unchecked every box on a first-ever dialog).
+    const remembered = localStorage.getItem('candela.syncModules') ?? '';
+    const remember = remembered ? remembered.split(',') : null;
+    syncModulesEl.textContent = '';
+    for (const m of [...new Set(Object.values(OP_MODULE))]) {
+      const label = document.createElement('label');
+      const cb = document.createElement('input');
+      cb.type = 'checkbox';
+      cb.value = m;
+      cb.checked = remember === null || remember.includes(m);
+      label.append(cb, ' ' + m);
+      syncModulesEl.appendChild(label);
+    }
+    syncProgressEl.textContent = `${syncTargets.length} photos will receive the source's checked modules`;
+    syncGoBtn.disabled = false;
+    syncCancelBtn.hidden = true;
+    syncDialog.showModal();
+  }
+  syncBtn.addEventListener('click', openSyncDialog);
+  // LrC's Sync lives on the loupe too: edit in Develop, Cmd-click the strip,
+  // press S -- same dialog, same targets (the multi-selection).
+  if (developSyncBtn) developSyncBtn.addEventListener('click', openSyncDialog);
+
+  // Submit (not close) drives the dialog: the submit event carries the
+  // button's value, fires BEFORE any close, and preventDefault keeps the
+  // dialog OPEN while the sync runs -- so the progress line and Cancel are
+  // on screen the whole time. ESC / Cancel / ✕ close natively (value=cancel
+  // button); the close listener flips syncAborted and the loop notices at
+  // its next awaited yield. (The harness never fires 'close' for dialog
+  // closes -- verified -- so logic keys off submit, never returnValue.)
+  syncForm.addEventListener('submit', (e) => {
+    // A submit button clicked while the dialog is CLOSED (programmatic .click()
+    // reaches it even after close) must not fire a stale sync -- the previous
+    // run's targets/abort flag would still be live there.
+    if (!syncDialog.open) {
+      e.preventDefault();
+      return;
+    }
+    const submitter = (e as SubmitEvent).submitter as HTMLButtonElement | null;
+    if (submitter?.value !== 'sync') return; // Cancel/Close: let it close natively
+    const checked = [...syncModulesEl.querySelectorAll<HTMLInputElement>('input:checked')];
+    if (!checked.length) {
+      e.preventDefault();
+      syncProgressEl.textContent = 'Pick at least one module.';
+      return;
+    }
+    e.preventDefault(); // run inside the dialog
+    syncGoBtn.disabled = true;
+    syncCancelBtn.hidden = false;
+    for (const cb of syncModulesEl.querySelectorAll<HTMLInputElement>('input')) cb.disabled = true;
+    void runSync().then(() => {
+      // 'done' closes it via a microtask; the progress text already reports
+      // the outcome for the moment it lingers.
+      syncDialog.close('done');
+    });
+  });
+  syncDialog.addEventListener('close', () => { syncAborted = true; });
+
+  async function runSync(): Promise<void> {
+    const refId = syncRefId;
+    if (refId === null) return;
+    const checked = new Set(
+      [...syncModulesEl.querySelectorAll<HTMLInputElement>('input:checked')].map((cb) => cb.value),
+    );
+    localStorage.setItem('candela.syncModules', [...checked].join(','));
+    let done = 0;
+    let failed = 0;
     try {
-      const refOps = currentOps(await loadEditState(db, selectedId));
-      for (const id of targets) {
-        const state = await loadEditState(db, id);
-        await saveEditState(db, id, commitEdit(state, refOps));
+      const refState = await loadEditState(db, refId);
+      const refFull = currentOps(refState);
+      // Delta semantics (LrC's 'what changed', user spec 2026-09-18): the
+      // source contributes the CHANGE it made since import (history[0] =
+      // its as-imported snapshot) -- temp 5500 -> 6500 syncs +1000 onto each
+      // target's own temperature, not the absolute 6500. Kinds without
+      // meaningful deltas (curve points, crop rect, profile, frame, mask)
+      // copy absolutely.
+      const refBase = refState.history[0] ?? [];
+      const refPicked = refFull.filter((op) => checked.has(OP_MODULE[op.kind]));
+      const deltaKinds = new Set(DELTA_OP_KINDS);
+      const refAbsolute = refPicked.filter((op) => !deltaKinds.has(op.kind));
+      if (!refPicked.length) {
+        showError('Nothing to sync -- the source photo has no edits in the selected modules.');
+        return;
       }
-      selectionInfo.textContent = `✓ synced to ${targets.length} photo${targets.length > 1 ? 's' : ''}`;
+      for (const id of syncTargets) {
+        if (syncAborted) break;
+        // Awaited yield between saves: progress repaints, and Cancel stays
+        // clickable no matter how slow IndexedDB is.
+        await new Promise((r) => setTimeout(r));
+        syncProgressEl.textContent = `Syncing ${done + failed + 1} / ${syncTargets.length}…`;
+        try {
+          const state = await loadEditState(db, id);
+          const now = currentOps(state);
+          const applied = [...refAbsolute, ...syncDeltaOps(refBase, refPicked, now)];
+          await saveEditState(db, id, commitEdit(state, mergeKinds(now, applied)));
+          done++;
+        } catch {
+          failed++; // one broken row doesn't abandon the rest
+        }
+      }
+      const parts = [`✓ synced ${done} of ${syncTargets.length} photos`];
+      if (syncAborted) parts.push('(cancelled)');
+      if (failed) parts.push(`${failed} failed`);
+      selectionInfo.textContent = parts.join(' ');
+      syncProgressEl.textContent = parts.join(' ');
+      // If the LOUPE currently shows one of the photos we just wrote, its
+      // canvas is now stale -- the user reads 'synced but nothing changed'.
+      // Reload the persisted state into sliders + canvas + history.
+      if (currentFileId !== null && syncTargets.includes(currentFileId)) {
+        const state = await loadEditState(db, currentFileId);
+        currentEditState = state;
+        const ops = currentOps(state);
+        applyOpsToSliders(ops, currentCameraKey());
+        renderOps(ops);
+        renderHistory();
+      }
     } catch (err) {
       showError("Couldn't sync settings.", errorDetail(err));
+    } finally {
+      syncGoBtn.disabled = false;
+      syncCancelBtn.hidden = true;
+      for (const cb of syncModulesEl.querySelectorAll<HTMLInputElement>('input')) cb.disabled = false;
     }
-  });
+  }
 
   // ---- filmstrip ----
   // The strip shows the SAME set the grid shows (a 1-star filter that left 12
@@ -4130,10 +4338,11 @@ async function init(): Promise<void> {
   const filmstrip = createFilmstrip({
     scrollEl: filmstripScroll,
     trackEl: filmstripTrack,
-    getFiles: () => visibleFiles ?? allFiles,
+    getFiles: stripScope,
     getThumbnail,
     onSelect: (file) => openFile(file),
     onRate: (file, rating) => void rateFile(file, rating),
+    getSyncReference: syncReference,
   });
 
   // AbortError means the user opened the folder picker and dismissed it --

@@ -40,6 +40,12 @@ describe('keyToAction', () => {
     expect(keyToAction(ev({ key: 'u' }))).toEqual({ type: 'clearCull' });
   });
 
+  it("maps s to sync (LrC's loupe Sync Settings key)", () => {
+    expect(keyToAction(ev({ key: 's' }))).toEqual({ type: 'sync' });
+    expect(keyToAction(ev({ key: 's', shift: true }))).toBeNull(); // shift is not sync
+    expect(keyToAction(ev({ key: 's', meta: true }))).toBeNull(); // Cmd+S stays browser-save
+  });
+
   it('maps 1-5 to ratings and 6-9 to colors (red/yellow/green/blue)', () => {
     expect(keyToAction(ev({ key: '1' }))).toEqual({ type: 'rate', rating: 1 });
     expect(keyToAction(ev({ key: '5' }))).toEqual({ type: 'rate', rating: 5 });

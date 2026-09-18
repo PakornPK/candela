@@ -16,7 +16,8 @@ export type Action =
   | { type: 'rate'; rating: number } // 1..5 stars
   | { type: 'color'; color: number } // 1..4 red/yellow/green/blue (keys 6..9)
   | { type: 'copy' } // Ctrl+Shift+C -- copy current settings
-  | { type: 'paste' }; // Ctrl+Shift+V -- paste settings to selected
+  | { type: 'paste' } // Ctrl+Shift+V -- paste settings to selected
+  | { type: 'sync' }; // S -- Sync Settings dialog (LrC's loupe key)
 
 // The five event fields keyToAction reads. Structural: a real KeyboardEvent
 // satisfies it, and so do plain test objects (no DOM types needed).
@@ -50,6 +51,7 @@ export function keyToAction(e: KeyEventLike): Action | null {
   // Culling: single unmodified keys. Number-row and numpad both report the
   // digit in `key`, so 1..5 rate and 6..9 paint a color.
   if (e.ctrlKey || e.metaKey || e.shiftKey) return null;
+  if (key === 's') return { type: 'sync' };
   if (key === 'p') return { type: 'pick' };
   if (key === 'x') return { type: 'reject' };
   if (key === 'u') return { type: 'clearCull' };

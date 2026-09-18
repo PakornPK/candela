@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach } from 'vitest';
-import { getState, subscribe, selectFile, setSelection, setModule, type AppState } from './state';
+import { getState, subscribe, setSelection, setModule, type AppState } from './state';
 
 describe('app state', () => {
   beforeEach(() => {
@@ -13,22 +13,10 @@ describe('app state', () => {
     expect(getState()).toEqual({ module: 'library', selectedId: null, selectedIds: [] });
   });
 
-  it('selectFile sets the id and notifies exactly once', () => {
-    const seen: AppState[] = [];
-    subscribe((s) => seen.push({ ...s }));
-    selectFile(42);
+  it('a single click sets id and selection together', () => {
+    setSelection([42], 42);
     expect(getState().selectedId).toBe(42);
     expect(getState().selectedIds).toEqual([42]);
-    expect(seen.length).toBe(1);
-    expect(seen[0].selectedId).toBe(42);
-  });
-
-  it('selecting the same id again is a no-op', () => {
-    selectFile(7);
-    const seen: AppState[] = [];
-    subscribe((s) => seen.push({ ...s }));
-    selectFile(7);
-    expect(seen.length).toBe(0);
   });
 
   it('setSelection carries the multi-selection plus the reference (sync source)', () => {
@@ -37,9 +25,9 @@ describe('app state', () => {
     expect(getState().selectedId).toBe(22);
   });
 
-  it('selectFile collapses any multi-selection back to a single file', () => {
+  it('an open (plain click) collapses any multi-selection back to one file', () => {
     setSelection([11, 22, 33], 33);
-    selectFile(44);
+    setSelection([44], 44); // openFile's collapse path
     expect(getState().selectedIds).toEqual([44]);
     expect(getState().selectedId).toBe(44);
   });
@@ -66,7 +54,7 @@ describe('app state', () => {
     const seen: AppState[] = [];
     const unsubscribe = subscribe((s) => seen.push({ ...s }));
     unsubscribe();
-    selectFile(9);
+    setSelection([9], 9);
     expect(seen.length).toBe(0);
   });
 });

@@ -17,11 +17,25 @@ export interface LibRawModule {
   _free: (ptr: number) => void;
 }
 
+// A transient wasm fetch failure (offline blip, stale deploy racing a hard
+// refresh) must not be a permanent one: the Emscripten abort text ("both
+// async and sync fetching of the wasm failed") was un-retryable because the
+// REJECTED promise was cached forever -- only a page reload could recover.
+// Failed loads now drop the cache entry so the next open retries.
 let modulePromise: Promise<LibRawModule> | null = null;
 
 export function getLibRawModule(): Promise<LibRawModule> {
   if (!modulePromise) {
-    modulePromise = createLibRawModule() as Promise<LibRawModule>;
+    const pending = createLibRawModule() as Promise<LibRawModule>;
+    modulePromise = pending;
+    pending.catch(() => {
+      if (modulePromise === pending) modulePromise = null;
+    });
   }
   return modulePromise;
+}
+
+export function isWasmLoadError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes('fetching of the wasm failed') || msg.includes('WebAssembly');
 }

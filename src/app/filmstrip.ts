@@ -1,6 +1,6 @@
 import { Virtualizer, elementScroll, observeElementRect, observeElementOffset } from '@tanstack/virtual-core';
 import type { FileRecord } from '../catalog/types';
-import { getState, subscribe } from './state';
+import { getState, setSelection, subscribe } from './state';
 
 const CELL_WIDTH = 96; // px, matches index.html's .filmstrip-cell
 
@@ -13,6 +13,12 @@ export interface FilmstripOptions {
   // Star click on the strip's rating row rates THAT photo (same semantics as
   // the grid's cell stars). main.ts wires it to its rateFile + cull refresh.
   onRate(file: FileRecord, rating: number): void;
+  // The id Sync Settings will use as source (loupe-first rule in main.ts).
+  // The white 'source' frame must point at THAT photo -- a frame keyed on
+  // selectedId painted the strip's last-clicked photo while the dialog
+  // synced FROM the loupe (or vice versa), so the source looked wrong and
+  // users synced the wrong direction (report: 'sync แล้วภาพหลักก็โดน').
+  getSyncReference(): number | null;
 }
 
 export interface Filmstrip {
@@ -53,17 +59,51 @@ export function createFilmstrip(opts: FilmstripOptions): Filmstrip {
     trackEl.style.width = `${virtualizer.getTotalSize()}px`;
     trackEl.textContent = '';
     const files = getFiles();
-    const selectedId = getState().selectedId;
+    const { selectedIds } = getState();
+    const selected = new Set(selectedIds);
+    const ref = opts.getSyncReference();
     for (const item of virtualizer.getVirtualItems()) {
       const file = files[item.index];
       if (!file) continue;
 
       const cell = document.createElement('div');
-      cell.className = 'filmstrip-cell' + (file.id === selectedId ? ' selected' : '');
+      cell.className = 'filmstrip-cell'
+        + (selected.has(file.id) ? ' selected' : '')
+        + (selectedIds.length >= 2 && file.id === ref ? ' sync-ref' : '');
       cell.dataset.fileId = String(file.id); // lets selection paint in place (subscribe) without a rebuild
       cell.style.left = `${item.start}px`;
-      cell.title = file.name;
-      cell.addEventListener('click', () => onSelect(file));
+      cell.title = `${file.name} -- Ctrl/Cmd+click adds to the selection, Shift+click selects a range`;
+      // Same click grammar as the grid cells: plain click opens (single
+      // select), ctrl/cmd+click toggles into the multi-selection, shift+click
+      // ranges from the anchor. Without this the strip could never build the
+      // selection the footer's Sync Settings needs (user: 'ต้องกดยังไงให้เลือกได้
+      // มากกว่า 1' -- they were clicking the strip in Develop, where the grid's
+      // modifier hints don't reach).
+      cell.addEventListener('click', (e) => {
+        if (e.ctrlKey || e.metaKey) {
+          e.preventDefault();
+          const { selectedIds } = getState();
+          const adding = !selectedIds.includes(file.id);
+          const next = adding ? [...selectedIds, file.id] : selectedIds.filter((id) => id !== file.id);
+          stripAnchor = file.id;
+          setSelection(next, adding ? file.id : next[next.length - 1] ?? null);
+          return;
+        }
+        if (e.shiftKey) {
+          e.preventDefault();
+          const base = stripAnchor ?? getState().selectedId ?? file.id;
+          const ids = getFiles().map((x) => x.id);
+          const a = ids.indexOf(base);
+          const b = ids.indexOf(file.id);
+          if (a >= 0 && b >= 0) {
+            stripAnchor = file.id;
+            setSelection(ids.slice(Math.min(a, b), Math.max(a, b) + 1), file.id);
+          }
+          return;
+        }
+        stripAnchor = file.id;
+        onSelect(file);
+      });
       // Rating mirror AND control: the same clickable 5-star row the grid
       // cells carry. A static N-star glyph (the first pass here) reads as the
       // grid's widget but swallows clicks -- and "★★" on a 4-star photo
@@ -101,6 +141,9 @@ export function createFilmstrip(opts: FilmstripOptions): Filmstrip {
     }
   }
 
+  // Shift-range anchor on the strip, same role as the grid's selectionAnchor.
+  let stripAnchor: number | null = null;
+
   // Selection changed (grid click, arrow keys, module switch). A full
   // renderVisible() rebuild on every click was the strip "reloading" jank,
   // so when the selected cell is already fully on screen, paint the
@@ -120,8 +163,12 @@ export function createFilmstrip(opts: FilmstripOptions): Filmstrip {
       const start = item.start, end = start + CELL_WIDTH;
       const viewStart = scrollEl.scrollLeft, viewEnd = viewStart + scrollEl.clientWidth;
       if (start >= viewStart && end <= viewEnd) {
+        const { selectedIds } = getState();
+        const selected = new Set(selectedIds.map(String));
+        const refId = String(opts.getSyncReference());
         for (const cell of trackEl.querySelectorAll<HTMLElement>('.filmstrip-cell')) {
-          cell.classList.toggle('selected', cell.dataset.fileId === String(selectedId));
+          cell.classList.toggle('selected', selected.has(cell.dataset.fileId ?? ''));
+          cell.classList.toggle('sync-ref', selectedIds.length >= 2 && cell.dataset.fileId === refId);
         }
         return; // no scroll, no rebuild
       }
