@@ -9,7 +9,7 @@ import { cameraCalibrationKey, gainsToKelvin, gainsToTint, WB_NEUTRAL_KELVIN } f
 import { flippedDims } from './gpu/orient';
 import { getCameraXyz } from './gpu/ops';
 import { openCatalogDb } from './catalog/db';
-import { listFolders, listFiles } from './catalog/query';
+import { listFolders, listFiles, listMissingFiles } from './catalog/query';
 import { applyCullResult, setCull } from './catalog/culling';
 import { importFolder, importFolderFromHandle, isRawFileName } from './catalog/import';
 import { ensureReadPermission, queryReadPermission } from './catalog/permissions';
@@ -36,10 +36,52 @@ import { BW_FILTERS, BW_TONES, type BwFilterId } from './gpu/bw';
 import { getState, setSelection, subscribe, type ModuleId } from './app/state';
 import { registerModule, switchModule } from './app/modules';
 import { createFilmstrip } from './app/filmstrip';
-import { keyToAction } from './app/shortcuts';
+import { keyToAction, type ShortcutContext } from './app/shortcuts';
+// The three cull-workflow engines (gap P0-5 / P1-5 / P1-2). All logic lives in
+// these pure modules — main.ts only binds DOM to them (house rule: the engine
+// owns semantics, the wiring owns pixels).
+import {
+  applyFilters,
+  describeFilters,
+  FILTER_PRESETS,
+  isFilterActive,
+  NONE,
+  range,
+  toggleFilterValue,
+  type FilterColumn,
+  type FilterPresetId,
+  type FilterState,
+  type FilterValue,
+  type ColumnMap,
+} from './app/filters';
+import {
+  nextSurveyActive,
+  removeFromSurvey,
+  SURVEY_TILE_GAP,
+  surveyNeedsZoom,
+  surveyTileLayout,
+  surveyTileRect,
+} from './app/survey';
+import {
+  autoStackByCaptureTime,
+  stackCountFor,
+  toggleStackCollapsed,
+  unstack,
+  visibleFiles as stackVisibleFiles,
+  type Stack,
+} from './app/stacks';
 import { defaultViewState, viewStateToCropFrac, zoomToward, panBy, type ViewState } from './app/viewState';
-import { listCollections, createCollection, deleteCollection, addFilesToCollection, removeFilesFromCollection, type Collection } from './catalog/collections';
+// Catalog-integrity engines (gaps P0-3 / P0-4). All semantics live in these
+// pure+IDB modules; main.ts only binds DOM to them (house rule).
+import { applyMissingBadges, classifyHandleError, markMissing, probeFileHandle, promptRelink } from './catalog/missing';
+import { confirmMessage, deleteFilesFromDisk, deleteKeyVerb, removeFilesFromCatalog, type RemoveVerb } from './catalog/remove';
+import { listCollections, createCollection, deleteCollection, getCollection, addFilesToCollection, removeFilesFromCollection, isQuickCollection, describeTarget, ensureQuickCollection, getTargetCollectionId, setTargetCollection, toggleInTarget, type Collection } from './catalog/collections';
 import { listSmartCollections, createSmartCollection, updateSmartCollection, deleteSmartCollection, querySmartCollection, buildCriteria, criteriaToForm, describeCriteria, hasCriteria, type CriteriaForm, type SmartCollection, type SmartCollectionCriteria } from './catalog/smartCollections';
+// Keywords / IPTC / backup glue. The heavy logic lives in the catalog modules
+// (pure + IDB halves, unit-tested there); main.ts only binds DOM to it.
+import { addKeywords, addKeywordsToFiles, buildKeywordList, filesMatchingKeyword, keywordKey, normalizeKeyword, parseKeywordField, renameKeywordAcrossCatalog, renameKeywordIn } from './catalog/keywords';
+import { describePreset, fieldsFromPresetForm, listMetadataPresets, mergeIptc, newPresetId, presetToPatch, saveMetadataPreset, setFileIptc, type IptcFields, type MetadataPreset } from './catalog/iptc';
+import { wireCatalogBackup } from './catalog/backup';
 import { TetheredCapture } from './app/tetheredCapture';
 import { openControlsWindow, type ControlsWindow, type MirrorControl } from './app/secondMonitor';
 
@@ -303,6 +345,37 @@ const smartPreviewEl = document.querySelector<HTMLParagraphElement>('#smart-prev
 const tetheredStartBtn = document.querySelector<HTMLButtonElement>('#tethered-start-btn')!;
 const tetheredStopBtn = document.querySelector<HTMLButtonElement>('#tethered-stop-btn')!;
 const tetheredStatusEl = document.querySelector<HTMLDivElement>('#tethered-status')!;
+// Missing-file relink + Remove/Delete dialog + B-key target label (gaps
+// P0-3/P0-4/P1-4). Markup lives in index.html next to its panel.
+const locateMissingBtn = document.querySelector<HTMLButtonElement>('#locate-missing')!;
+const targetLabelEl = document.querySelector<HTMLSpanElement>('#target-label')!;
+const removeDialog = document.querySelector<HTMLDialogElement>('#remove-dialog')!;
+const removeDialogTitle = document.querySelector<HTMLHeadingElement>('#remove-dialog-title')!;
+const removeDialogBody = document.querySelector<HTMLParagraphElement>('#remove-dialog-body')!;
+const removeDialogSwitch = document.querySelector<HTMLButtonElement>('#remove-dialog-switch')!;
+const removeDialogCancel = document.querySelector<HTMLButtonElement>('#remove-dialog-cancel')!;
+const removeDialogConfirm = document.querySelector<HTMLButtonElement>('#remove-dialog-confirm')!;
+
+// Keywording panel (index.html's #keyword-* contract: one button.keyword-row
+// per tally, text node + span.keyword-count; active row .keyword-row.active).
+const keywordInput = document.querySelector<HTMLInputElement>('#keyword-input')!;
+const keywordAddBtn = document.querySelector<HTMLButtonElement>('#keyword-add')!;
+const keywordListEl = document.querySelector<HTMLDivElement>('#keyword-list')!;
+
+// IPTC panel. The six boxes are keyed by the field names iptc.ts understands,
+// so fieldsFromPresetForm reads them straight off this record.
+const iptcFieldsEls: Record<keyof IptcFields, HTMLInputElement> = {
+  title: document.querySelector<HTMLInputElement>('#iptc-title')!,
+  caption: document.querySelector<HTMLInputElement>('#iptc-caption')!,
+  headline: document.querySelector<HTMLInputElement>('#iptc-headline')!,
+  creator: document.querySelector<HTMLInputElement>('#iptc-creator')!,
+  copyright: document.querySelector<HTMLInputElement>('#iptc-copyright')!,
+  credit: document.querySelector<HTMLInputElement>('#iptc-credit')!,
+};
+const iptcPresetSelect = document.querySelector<HTMLSelectElement>('#iptc-preset')!;
+const iptcApplyPresetBtn = document.querySelector<HTMLButtonElement>('#iptc-apply-preset')!;
+const iptcSavePresetBtn = document.querySelector<HTMLButtonElement>('#iptc-save-preset')!;
+const iptcApplySelectionBtn = document.querySelector<HTMLButtonElement>('#iptc-apply-selection')!;
 
 function showError(message: string, detail?: string): void {
   errorMessageEl.textContent = message;
@@ -353,6 +426,14 @@ function openFileError(err: unknown): [string, string?] {
     return ["Couldn't load the raw decoder. Check your connection, then click the photo again to retry.", errorDetail(err)];
   }
   return ['Something went wrong opening this file.', errorDetail(err)];
+}
+
+// P0-3's single source for the "the file is gone" copy. openFileError maps
+// decode/decoder failures; this owns the ONE missing-file message, so the
+// badge title (missingBadgeTitle), the relink panel and this toast can be
+// cross-read without two paraphrases drifting apart.
+function missingFileCopy(name: string): string {
+  return `This photo is missing from disk — "${name}" moved, was renamed, or its drive is offline. Its edits are safe in the catalog: relink it with "Find missing photos" on the left, or re-add its folder.`;
 }
 
 // Colors the slider track from its neutral point toward the thumb,
@@ -1361,6 +1442,27 @@ async function init(): Promise<void> {
     return;
   }
 
+  // Catalog backup/restore (gap P0-2). One call binds #backup-export-btn /
+  // #backup-import-btn / #backup-import-input / #backup-status and asks
+  // Chrome for storage persistence; the module owns all of that control flow
+  // (unit-tested in backup.test.ts). A restore REPLACES every catalog table,
+  // so onRestored must re-read the world the same way an import does --
+  // reloadCatalog() re-queries folders/allFiles from IDB (dropping handles
+  // the restored rows never had) and repaints grid, strip and the keyword
+  // list via renderCatalog(). The count lands in the footer via
+  // flashSelectionInfo (the app's success-feedback channel, same as
+  // collection writes); errors go to the one error toast showError.
+  wireCatalogBackup({
+    db,
+    onRestored: (fileCount) => {
+      void reloadCatalog().then(
+        () => flashSelectionInfo(`✓ catalog restored — ${fileCount} photo${fileCount === 1 ? '' : 's'}`),
+        (err) => showError('Restored, but the grid could not reload. Reload the page.', errorDetail(err)),
+      );
+    },
+    onError: (title, detail) => showError(title, detail),
+  });
+
   try {
     pipeline = await Pipeline.create(canvas);
   } catch (err) {
@@ -1451,7 +1553,27 @@ async function init(): Promise<void> {
   let smartCollections: SmartCollection[] = [];
   let activeCollectionId: number | null = null;
   let activeSmartCollectionId: number | null = null;
+  // The B-key target collection (gap P1-4). null = the default Quick
+  // Collection tray; mirrored from the reserved '__target__' row inside
+  // renderCollections (the engine owns the truth, this cache drives paint).
+  let targetCollectionId: number | null = null;
   let searchQuery = '';
+  // The Keyword List's click-to-filter: one active keyword (null = off),
+  // ANDed with the folder/collection/search/cull conditions in rebuildGrid()
+  // -- same narrowing model as the search box, on top of the active view.
+  let keywordFilter: string | null = null;
+
+  // The Library filter bar (gap P0-5). One AND term on the active view, like
+  // keywordFilter beside it: applyFilters owns intra/inter-column semantics,
+  // this state only says which values are toggled on. Distinct from cullFilter
+  // below (the left-panel checkboxes + footer chips) -- the two stack.
+  let filterState: FilterState = { columns: {} };
+
+  // Capture-time stacks (gap P1-2). DISPLAY-LAYER ONLY: stacks reorder/hide
+  // grid cells (stacks.ts visibleFiles), they never rewrite FileRows -- cull
+  // writes still target FileRecord rows by id. Session state; re-derived from
+  // allFiles whenever Auto-stack runs.
+  let stacks: Stack[] = [];
 
   // Culling filter state. The grid and the contact sheet follow it; allFiles
   // (filmstrip + arrow navigation) is always unfiltered, Lightroom-style.
@@ -1494,34 +1616,317 @@ async function init(): Promise<void> {
     return true;
   }
 
+  // ---- Library filter bar (gap P0-5) --------------------------------------
+  // DOM contract (index.html's #filter-bar): #filter-columns holds one
+  // .filter-group per surfaced FilterColumn; each group is a .filter-group-label
+  // plus .filter-chip buttons carrying data-col/data-val. #filter-presets'
+  // buttons carry data-preset; #filter-clear and #filter-summary are static.
+  const filterColumnsEl = document.querySelector<HTMLDivElement>('#filter-columns')!;
+  const filterClearBtn = document.querySelector<HTMLButtonElement>('#filter-clear')!;
+  const filterSummaryEl = document.querySelector<HTMLSpanElement>('#filter-summary')!;
+  const stackAutoBtn = document.querySelector<HTMLButtonElement>('#stack-auto')!;
+  const stackClearBtn = document.querySelector<HTMLButtonElement>('#stack-clear')!;
+  const stackGapInput = document.querySelector<HTMLInputElement>('#stack-gap')!;
+
+  // Minimum viable set from the gap analysis. Lens/Focal stay unsurfaced:
+  // JPEG-only catalogs have nothing to derive, and every column that could be
+  // empty would add a label with no chips under it.
+  const FILTER_BAR_COLUMNS: Array<{ column: FilterColumn; label: string }> = [
+    { column: 'rating', label: 'Rating' },
+    { column: 'flag', label: 'Flag' },
+    { column: 'label', label: 'Label' },
+    { column: 'camera', label: 'Camera' },
+    { column: 'iso', label: 'ISO' },
+    { column: 'date', label: 'Date' },
+    { column: 'keywords', label: 'Keywords' },
+    { column: 'missing', label: 'Files' },
+    { column: 'fileType', label: 'Type' },
+  ];
+
+  // Which engine value a chip stands for, encoded in the DOM as a plain
+  // string and decoded back here on every click. Keeps the DOM contract
+  // (data-val) readable in devtools while covering the whole FilterValue
+  // vocabulary the engine accepts (numbers, strings, NONE, exact ranges).
+  function encodeFilterValue(v: FilterValue): string {
+    if (typeof v === 'object' && 'kind' in v) {
+      if (v.kind === 'none') return 'none';
+      return `range:${v.from ?? ''}:${v.to ?? ''}`;
+    }
+    return String(v);
+  }
+  function decodeFilterValue(encoded: string): FilterValue {
+    if (encoded === 'none') return NONE;
+    if (encoded.startsWith('range:')) {
+      const [, from, to] = encoded.split(':');
+      return range(from === '' ? undefined : Number(from), to === '' ? undefined : Number(to));
+    }
+    // 0 is a real rating value (unrated reads through NONE, but the column is
+    // numeric), so no falsy check — only /d+ shape decides.
+    return /^\d+$/.test(encoded) ? Number(encoded) : encoded;
+  }
+
+  // Distinct catalog-derived values per column. Derived from allFiles on each
+  // renderFilterBar() call (see renderCatalog) so a newly-imported camera
+  // appears without any other code path knowing about the filter bar.
+  function filterColumnValues(column: FilterColumn): FilterValue[] {
+    const push = new Set<string>();
+    const numbers = new Set<number>();
+    for (const f of allFiles) {
+      switch (column) {
+        case 'rating':
+          numbers.add(f.rating ?? 0);
+          break;
+        case 'flag':
+          if (f.flag !== undefined) push.add(f.flag ? 'picked' : 'rejected');
+          break;
+        case 'label':
+          if (f.color) push.add(['red', 'yellow', 'green', 'blue'][f.color - 1] ?? '');
+          break;
+        case 'camera':
+          if (f.cameraModel) push.add(f.cameraModel);
+          break;
+        case 'iso':
+          if (f.iso !== undefined) numbers.add(f.iso);
+          break;
+        case 'date':
+          // One chip per distinct capture DAY (engine matches exact ms, so
+          // the chip stores the local-day [from,to] range).
+          if (f.dateTaken !== undefined) numbers.add(dayKey(f.dateTaken));
+          break;
+        case 'keywords':
+          for (const kw of f.keywords ?? []) push.add(kw);
+          break;
+        case 'missing':
+          push.add(f.missing ? 'missing' : 'present');
+          break;
+        case 'fileType':
+          push.add(isRawFileName(f.name) ? 'raw' : 'image');
+          break;
+        case 'lens':
+        case 'focal':
+          break; // unsurfaced columns (see FILTER_BAR_COLUMNS)
+      }
+    }
+    const values: FilterValue[] = [...numbers].sort((a, b) => a - b).map((n) =>
+      column === 'date' ? range(n, n + 86_400_000 - 1) : n,
+    );
+    for (const s of [...push].sort()) if (s) values.push(s);
+    // Enum-like columns show their WHOLE vocabulary (LrC's menu lists every
+    // star/flag/label even when nothing matches yet — a chip that vanishes
+    // because no photo has that value yet is unclickable exactly when you
+    // want to set up the view). Metadata columns (camera/iso/date/keywords)
+    // stay derived so a new import grows them.
+    if (column === 'rating') return [NONE, 1, 2, 3, 4, 5];
+    if (column === 'flag') return ['picked', 'rejected'];
+    if (column === 'label') return ['red', 'yellow', 'green', 'blue'];
+    if (column === 'missing') return ['missing', 'present'];
+    if (column === 'fileType') return ['raw', 'image'];
+    return values;
+  }
+
+  // Local calendar-day bucket (midnight ms) — the date column filters by day,
+  // not by the capture instant, matching LrC's date menu.
+  function dayKey(ms: number): number {
+    const d = new Date(ms);
+    return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  }
+
+  function chipLabel(column: FilterColumn, v: FilterValue): string {
+    if (typeof v === 'object' && 'kind' in v) {
+      if (v.kind === 'none') return column === 'rating' ? 'unrated' : 'none';
+      if (column === 'date' && typeof v.from === 'number') return formatDay(v.from);
+      if (typeof v.from === 'number' && v.from === v.to) return String(v.from);
+      return `${v.from ?? ''}–${v.to ?? ''}`;
+    }
+    return String(v);
+  }
+
+  // Local YYYY-MM-DD (the chip labels the bucket dayKey created). NOT the
+  // engine's describeFilters formatDate, which reads UTC and would print the
+  // previous day for a +07 user — the summary line is the engine's voice,
+  // this is ours.
+  function formatDay(ms: number): string {
+    const d = new Date(ms);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  }
+
+  function renderFilterBar(): void {
+    filterColumnsEl.textContent = '';
+    for (const { column, label } of FILTER_BAR_COLUMNS) {
+      const values = filterColumnValues(column);
+      if (values.length === 0) continue; // nothing derived (e.g. no EXIF yet)
+      // DOM-built, never innerHTML: camera models and keywords are user data.
+      const group = document.createElement('div');
+      group.className = 'filter-group';
+      group.dataset.column = column;
+      group.setAttribute('role', 'group');
+      group.setAttribute('aria-label', `${label} filter`);
+      const groupLabel = document.createElement('span');
+      groupLabel.className = 'filter-group-label';
+      groupLabel.textContent = label;
+      group.appendChild(groupLabel);
+      for (const value of values) {
+        const chip = document.createElement('button');
+        chip.type = 'button';
+        chip.className = 'filter-chip';
+        chip.dataset.col = column;
+        chip.dataset.val = encodeFilterValue(value);
+        if (column === 'label' && typeof value === 'string') {
+          chip.classList.add('filter-chip-label');
+          const dot = document.createElement('span');
+          dot.className = `filter-chip-dot filter-chip-dot-${value}`;
+          chip.appendChild(dot);
+          chip.appendChild(document.createTextNode(value));
+        } else {
+          chip.textContent = chipLabel(column, value);
+        }
+        chip.title = `${label}: ${chip.textContent}`;
+        chip.setAttribute('aria-label', `Filter by ${label} ${chip.textContent}`);
+        chip.addEventListener('click', () => setFilterToggled(column, chip.dataset.val ?? ''));
+        group.appendChild(chip);
+      }
+      filterColumnsEl.appendChild(group);
+    }
+    paintFilterState();
+  }
+
+  // Toggle one chip's value and repaint everything the filter touches. The
+  // engine owns the semantics; this only moves DOM state (rebuildGrid repaints
+  // the grid, paintFilterBarState repaints chip/preset/clear/summary).
+  function setFilterToggled(column: FilterColumn, encoded: string): void {
+    filterState = toggleFilterValue(filterState, column, decodeFilterValue(encoded));
+    rebuildGrid();
+  }
+
+  // One entry after EVERY filterState change (chip, clear, preset): the
+  // summary and the clear button can never disagree with the state the grid
+  // was built from, because nothing repaints them except this.
+  function paintFilterState(): void {
+    const active = isFilterActive(filterState);
+    filterSummaryEl.textContent = active ? describeFilters(filterState) : '';
+    filterClearBtn.hidden = !active;
+    filterClearBtn.disabled = !active;
+    const activePairs = new Set<string>();
+    for (const column of Object.keys(filterState.columns) as FilterColumn[]) {
+      for (const v of filterState.columns[column] ?? []) activePairs.add(`${column}|${encodeFilterValue(v)}`);
+    }
+    for (const chip of filterColumnsEl.querySelectorAll<HTMLButtonElement>('.filter-chip')) {
+      chip.classList.toggle('active', activePairs.has(`${chip.dataset.col}|${chip.dataset.val}`));
+      chip.setAttribute('aria-pressed', chip.classList.contains('active') ? 'true' : 'false');
+    }
+    // A preset reads "active" only while its exact column set is what's on.
+    for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-preset]')) {
+      const preset = FILTER_PRESETS[btn.dataset.preset as FilterPresetId];
+      const on = !!preset && describeFilters(filterState) === describeFilters(preset);
+      btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    }
+  }
+
+  // ---- Stacks wiring (gap P1-2) -------------------------------------------
+  // fileId -> the stack its cell's badge represents. Rebuilt by rebuildGrid
+  // (cleared at the top, filled at the bottom); renderVisibleRows reads it to
+  // decide which cells get a badge. Keeps the per-cell render path free of a
+  // stackCountFor scan (O(stack) per cell).
+  const stackBadges = new Map<number, { stack: Stack; count: number }>();
+
+  function syncStackControls(): void {
+    stackClearBtn.disabled = stacks.length === 0;
+    stackClearBtn.title = stacks.length
+      ? `Dissolve ${stacks.length} stack${stacks.length === 1 ? '' : 's'} (photos keep their ratings)`
+      : 'No active stacks';
+  }
+
+  // Control wiring. Click-time only (init runs before any grid exists), so
+  // rebuildGrid/renderFilterBar are safe forward references here.
+  filterClearBtn.addEventListener('click', () => {
+    filterState = { columns: {} };
+    rebuildGrid();
+  });
+  for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-preset]')) {
+    btn.addEventListener('click', () => {
+      const preset = FILTER_PRESETS[btn.dataset.preset as FilterPresetId];
+      if (!preset) return;
+      // Clone before assigning: FILTER_PRESETS entries are shared objects and
+      // toggleFilterValue would otherwise mutate the template's column arrays
+      // when the user tweaks a chip after clicking a preset.
+      const columns: ColumnMap = {};
+      for (const key of Object.keys(preset.columns) as FilterColumn[]) columns[key] = [...(preset.columns[key] ?? [])];
+      filterState = { columns };
+      rebuildGrid();
+    });
+  }
+  stackAutoBtn.addEventListener('click', () => {
+    const gapSeconds = Math.max(0, Number(stackGapInput.value) || 0);
+    // Engine call: dateTaken only (JPEGs without EXIF are never stacked —
+    // stacks.ts explains why the mtime fallback would be wrong).
+    stacks = autoStackByCaptureTime(
+      allFiles.map((f) => ({ id: f.id, dateTaken: f.dateTaken })),
+      gapSeconds,
+    );
+    rebuildGrid();
+    flashSelectionInfo(
+      stacks.length
+        ? `${stacks.length} stack${stacks.length === 1 ? '' : 's'} (${stacks.reduce((n, s) => n + s.fileIds.length, 0)} photos)`
+        : 'No bursts within that gap',
+    );
+  });
+  stackClearBtn.addEventListener('click', () => {
+    stacks = [];
+    rebuildGrid();
+  });
+
   // Re-chunks allFiles into grid entries honoring folderFilter, cullFilter,
   // activeCollection, activeSmartCollection, and searchQuery, then repaints.
   // Called after a filter change or a cull keypress (which mutates allFiles
   // in place); keeps the DB out of the hot path.
   function rebuildGrid(): void {
     gridEntries = [];
+    stackBadges.clear();
+    // Paint the filter bar's summary/clear/chips alongside the grid: this is
+    // the one function every filter-state change funnels through, so the bar
+    // can never disagree with the rows on screen.
+    paintFilterState();
     scopeRating = [0, 0, 0, 0, 0, 0];
     scopeTotal = 0;
     
     // Determine which files to show based on active filter
     let filesToShow = allFiles;
-    
+
+    // Keyword filter (Keyword List click) -- an AND term on top of whichever
+    // view is active, applied FIRST so every branch below narrows the already
+    // keyword-scoped set. Ids come from filesMatchingKeyword over allFiles;
+    // the Set keeps each branch's filter O(1) on a 100k catalog.
+    if (keywordFilter) {
+      const tagIds = new Set(filesMatchingKeyword(allFiles, keywordFilter));
+      filesToShow = filesToShow.filter((f) => tagIds.has(f.id));
+    }
+
+    // Filter bar (gap P0-5) -- the second AND term on top of the view, applied
+    // exactly like keywordFilter: one call over filesToShow before the
+    // view-scope branches narrow it. applyFilters owns intra-column OR /
+    // inter-column AND, so an inactive state is a no-op (guarded to skip the
+    // array copy it would otherwise make on a 100k catalog every repaint).
+    if (isFilterActive(filterState)) {
+      filesToShow = applyFilters(filesToShow, filterState);
+    }
+
     // Collection filter
     if (activeCollectionId !== null) {
       const collection = collections.find(c => c.id === activeCollectionId);
       if (collection) {
         const idSet = new Set(collection.fileIds);
-        filesToShow = allFiles.filter(f => idSet.has(f.id));
+        filesToShow = filesToShow.filter(f => idSet.has(f.id));
       }
     } else if (activeSmartCollectionId !== null) {
       const smart = smartCollections.find(s => s.id === activeSmartCollectionId);
       if (smart) {
-        filesToShow = querySmartCollection(allFiles, smart.criteria);
+        filesToShow = querySmartCollection(filesToShow, smart.criteria);
       }
     } else if (searchQuery) {
       // Search filter
       const query = searchQuery.toLowerCase();
-      filesToShow = allFiles.filter(f => 
+      filesToShow = filesToShow.filter(f => 
         f.path.toLowerCase().includes(query) ||
         (f as any).cameraModel?.toLowerCase().includes(query) ||
         (f as any).lensModel?.toLowerCase().includes(query)
@@ -1530,8 +1935,11 @@ async function init(): Promise<void> {
       // Folder filter
       for (const folder of folders) {
         if (folderFilter !== null && folder.id !== folderFilter) continue;
-        const visible = filesToShow.filter((f) => f.folderId === folder.id && matchesCullFilter(f));
-        const inFolder = allFiles.filter((f) => f.folderId === folder.id);
+        let visible = filesToShow.filter((f) => f.folderId === folder.id && matchesCullFilter(f));
+        // Stacks apply per folder too (see the main branch's note): a folder
+        // row's collapsed stack must read the same in the folder view.
+        if (stacks.length > 0) visible = stackVisibleFiles(visible, stacks);
+        const inFolder = filesToShow.filter((f) => f.folderId === folder.id);
         tallyScope(inFolder);
         if (visible.length === 0) continue;
         gridEntries.push({ kind: 'heading', folderName: folder.name });
@@ -1546,6 +1954,11 @@ async function init(): Promise<void> {
     // Apply cull filter to the filtered set
     tallyScope(filesToShow);
     filesToShow = filesToShow.filter(matchesCullFilter);
+    // Stacks (gap P1-2): the display-layer ordering term, AFTER every filter
+    // has decided membership -- collapsed stacks drop to their top photo, so
+    // a member filtered out by rating never "leaks" back via its stack, and
+    // the engine's visibleFiles only reorders/hides, it never invents rows.
+    if (stacks.length > 0) filesToShow = stackVisibleFiles(filesToShow, stacks);
     
     // Group by folder for display
     const filesByFolder = new Map<number, FileRecord[]>();
@@ -1581,6 +1994,10 @@ async function init(): Promise<void> {
     // Thumbnails share the session cache, so this re-render re-points <img>
     // srcs without re-extracting anything.
     filmstrip.setFiles(stripScope().length);
+    // setFiles re-rendered the strip's cells AFTER renderVisibleRows painted
+    // the badges, so repaint the strip side here (grid paint already ran at
+    // the renderVisibleRows tail; re-running it is a no-op).
+    repaintMissingBadges();
     if (getState().module === 'contact') renderContactSheet();
   }
 
@@ -1605,20 +2022,39 @@ async function init(): Promise<void> {
     // (no rebuild -- a per-keystroke image rebuild would flicker the strip).
     filmstrip.syncRatings();
     if (getState().module === 'compare') renderCompareView();
+    // Survey tiles carry stars + pick/reject too; rebuild the tiles (cheap --
+    // thumbnails come from the shared session cache).
+    if (getState().module === 'survey') renderSurvey();
+  }
+
+  // ---- cull writes (the ONE write path) -----------------------------------
+  // One file's cull patch through setCull (DB) -> applyCullResult (in-memory
+  // record) -> refreshCullDependents (grid/strip/compare repaint). rateFile,
+  // flagFile, the Survey tiles' buttons and the keyboard handler below all
+  // compose on top of these two, so a click and a keypress cannot drift.
+  async function writeCullToFile(file: FileRecord, patch: { flag?: boolean; rating?: number; color?: number }): Promise<void> {
+    try {
+      applyCullResult(file, await setCull(db, file.id, patch));
+      refreshCullDependents();
+    } catch (err) {
+      showError("Couldn't save the cull mark.", errorDetail(err));
+    }
   }
 
   // Applies a rating to the file whose stars were clicked; clicking the current
   // rating again clears it. The keyboard path (1..5) is the selection-wide one
   // (see the cull key handler): a key press names no target, so it rates every
   // selected photo, while a click names exactly one.
-  async function rateFile(file: FileRecord, rating: number): Promise<void> {
-    try {
-      const patch = file.rating === rating ? { rating: 0 } : { rating };
-      applyCullResult(file, await setCull(db, file.id, patch));
-      refreshCullDependents();
-    } catch (err) {
-      showError("Couldn't save the rating.", errorDetail(err));
-    }
+  function rateFile(file: FileRecord, rating: number): Promise<void> {
+    const patch = file.rating === rating ? { rating: 0 } : { rating };
+    return writeCullToFile(file, patch);
+  }
+
+  // Click-path pick/reject (Survey tiles' ✓/✕): the same toggle semantics the
+  // keyboard family uses, on exactly one named photo.
+  function flagFile(file: FileRecord, picked: boolean): Promise<void> {
+    const patch = file.flag === picked ? { flag: undefined } : { flag: picked };
+    return writeCullToFile(file, patch);
   }
 
   // The one entry point for "the grid must now match the world": resync the
@@ -1643,6 +2079,39 @@ async function init(): Promise<void> {
   function stripScope(): FileRecord[] {
     if (getState().module === 'library' && visibleFiles) return visibleFiles;
     return allFiles;
+  }
+
+  // One call paints grid + filmstrip badges from the CURRENT visible lists.
+  // applyMissingBadges is idempotent and only touches cells under the roots,
+  // so calling it after every render (and after every selection-driven strip
+  // rebuild) is cheap and keeps the two views from ever disagreeing.
+  function repaintMissingBadges(): void {
+    applyMissingBadges(visibleFiles ?? [], libraryGrid);
+    applyMissingBadges(stripScope(), filmstripTrack);
+  }
+
+  // P0-3 write-half: flag a record missing in the DB AND the in-memory row
+  // the grid renders from, then repaint. One owner so the probe path and the
+  // exception path can never drift.
+  async function markRecordMissing(record: FileRecord): Promise<void> {
+    await markMissing(db, record.id, true);
+    record.missing = true;
+    repaintMissingBadges();
+  }
+
+  // Classify an exception thrown while reading `record`'s handle. Restricted
+  // to DOMException on purpose: classifyHandleError's fallback calls anything
+  // unnamed 'unreadable', and DecodeError/ImageDecodeError are plain Errors —
+  // trusting them would badge a corrupt-but-PRESENT file as missing, which
+  // is a lie relinking cannot fix. 'denied' stays unbudgeted too: the restore
+  // banner owns lost grants (one reload must not badge the whole catalog).
+  async function flagMissingFromError(record: FileRecord, err: unknown): Promise<boolean> {
+    if (!(err instanceof DOMException)) return false;
+    const reason = classifyHandleError(err);
+    if (reason === 'denied') return false;
+    await markRecordMissing(record);
+    showError(missingFileCopy(record.name));
+    return true;
   }
 
   // The files the grid currently shows, in reading order (collection / smart
@@ -1672,6 +2141,21 @@ async function init(): Promise<void> {
       if (entry.kind === 'row') files.push(...entry.files);
     }
     visibleFiles = files;
+    // Badge bookkeeping for the grid path. stackCountFor is the engine's
+    // "how many live in this file's stack"; the map additionally records the
+    // stack object so a badge click knows what to toggle/unstack. The badge
+    // rides the FIRST PRESENT member whether the stack is collapsed (count +
+    // expand affordance) or expanded (collapse affordance).
+    // Simplifications vs LrC (documented for P1-2): no per-stack menu — the
+    // badge click toggles collapse and Shift+click unstacks that one stack;
+    // Ungroup-all dissolves the rest.
+    stackBadges.clear();
+    for (const s of stacks) {
+      if (s.fileIds.length < 2) continue;
+      const topId = s.fileIds.find((id) => files.some((f) => f.id === id));
+      if (topId !== undefined) stackBadges.set(topId, { stack: s, count: stackCountFor(topId, stacks) });
+    }
+    syncStackControls();
   }
 
   // Star-chip tooltips carry the per-rating counts; the footer shows the total
@@ -2096,6 +2580,30 @@ async function init(): Promise<void> {
           c.className = `cell-color cell-color-${file.color}`;
           cell.appendChild(c);
         }
+        // Collapsed-stack badge (gap P1-2): the member count on the stack's
+        // top cell. The badge IS the affordance — Enter/click expands the
+        // stack in place; unstack-all lives on #stack-clear (documented
+        // simplification in collectVisibleFiles). stopPropagation keeps a
+        // badge click from opening the photo (same rule as the stars).
+        const badge = stackBadges.get(file.id);
+        if (badge) {
+          const b = document.createElement('button');
+          b.type = 'button';
+          b.className = 'stack-badge';
+          b.textContent = String(badge.count);
+          b.title = badge.stack.collapsed
+            ? `Stack of ${badge.count} photos — click to expand (Shift+click: unstack)`
+            : `Stack expanded — click to collapse (Shift+click: unstack)`;
+          b.setAttribute('aria-label', `Stack of ${badge.count} photos starting at ${file.name}`);
+          b.addEventListener('click', (e) => {
+            e.stopPropagation(); // the badge is not opening the photo
+            stacks = e.shiftKey
+              ? unstack(stacks, badge.stack.id)
+              : toggleStackCollapsed(stacks, badge.stack.id);
+            rebuildGrid();
+          });
+          cell.appendChild(b);
+        }
         row.appendChild(cell);
 
         getThumbnail(file).then((blob) => {
@@ -2112,6 +2620,10 @@ async function init(): Promise<void> {
       }
       libraryGrid.appendChild(row);
     }
+    // Badges paint at the render tail so a row flagged missing in an EARLIER
+    // session shows its '!' on first sight, without the user clicking it
+    // (the flag is persisted on the file row; this is what makes it visible).
+    repaintMissingBadges();
   }
 
   // Rebuilds the flattened catalog (folders, allFiles) from the database,
@@ -2131,6 +2643,16 @@ async function init(): Promise<void> {
     allFiles = loaded;
     rebuildGrid(); // repaintGrid() refreshes the filmstrip count
     renderFolderList();
+    // The Keyword List is a tally over the catalog (buildKeywordList scans
+    // file rows), so every path that swaps allFiles -- import, folder/tethered
+    // reloads, and a backup restore -- repaints it here; nothing else needs
+    // to remember to. (Later waves: a file-removal pass calls this too, via
+    // reloadCatalog().)
+    renderKeywordList();
+    // Same reason for the filter bar: its Camera/ISO/Date/Keywords chips are
+    // derived from allFiles, so a newly-imported camera appears the moment the
+    // catalog reloads, without anything else knowing the bar exists.
+    renderFilterBar();
   }
 
   // Every view switch goes through here. The collection panels read allFiles, so
@@ -2153,30 +2675,80 @@ async function init(): Promise<void> {
 
   async function renderCollections(): Promise<void> {
     collections = await listCollections(db);
+    targetCollectionId = await getTargetCollectionId(db);
     collectionListEl.textContent = '';
+    // The header label always states where B actually lands (a dangling
+    // pointer reads as the Quick Collection, matching toggleInTarget).
+    targetLabelEl.textContent = describeTarget(collections, targetCollectionId);
     for (const collection of collections) {
+      const quick = isQuickCollection(collection);
+      // A null pointer means B lands in the Quick Collection (the default
+      // tray), so that row IS the target then — the label must not lie.
+      const isTarget = targetCollectionId === collection.id ||
+        (targetCollectionId === null && quick);
       const row = document.createElement('div');
-      row.className = 'collection-row' + (activeCollectionId === collection.id ? ' active' : '');
-      row.innerHTML = `
-        <span class="collection-name">${collection.name}</span>
-        <span class="collection-count">${collection.fileIds.length}</span>
-        <button class="collection-add" title="Add the selected photos to this collection">＋</button>
-        <button class="collection-delete" title="Delete collection">×</button>
-      `;
+      row.className =
+        'collection-row' +
+        (activeCollectionId === collection.id ? ' active' : '') +
+        (isTarget ? ' target' : '');
+      const name = document.createElement('span');
+      name.className = 'collection-name';
+      name.textContent = collection.name; // DOM-built: collection names are user data
+      const count = document.createElement('span');
+      count.className = 'collection-count';
+      count.textContent = String(collection.fileIds.length);
+      // Target button: makes this the B-key collection. On the Quick
+      // Collection it is the target by definition (the default tray), so
+      // it stays disabled rather than resetting the pointer to null.
+      const targetBtn = document.createElement('button');
+      targetBtn.type = 'button';
+      targetBtn.className = 'collection-target';
+      targetBtn.textContent = 'B';
+      targetBtn.title = isTarget
+        ? 'Target collection — the B key adds the selection here'
+        : 'Make this the target collection (B adds the selection here)';
+      targetBtn.setAttribute('aria-label', targetBtn.title);
+      if (isTarget) targetBtn.disabled = true;
+      targetBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        void setTargetCollection(db, collection.id!).then(() => renderCollections());
+      });
+      const addBtn = document.createElement('button');
+      addBtn.type = 'button';
+      addBtn.className = 'collection-add';
+      addBtn.textContent = '＋';
+      addBtn.title = 'Add the selected photos to this collection';
+      const delBtn = document.createElement('button');
+      delBtn.type = 'button';
+      delBtn.className = 'collection-delete';
+      delBtn.textContent = '×';
+      if (quick) {
+        // deleteCollection THROWS for the Quick Collection (it is the
+        // permanent B tray). Prevent the click rather than catching the
+        // rejection after the fact: a dead-looking button with an honest
+        // tooltip beats an error toast.
+        delBtn.disabled = true;
+        delBtn.title = 'The Quick Collection cannot be deleted — press B on a selection to empty it';
+      } else {
+        delBtn.title = 'Delete collection (photos stay in the catalog)';
+      }
+      row.append(name, count, targetBtn, addBtn, delBtn);
       row.addEventListener('click', (e) => {
         const target = e.target as HTMLElement;
-        if (target.classList.contains('collection-add')) {
+        if (target === addBtn) {
           e.stopPropagation();
           void addSelectionToCollection(collection);
           return;
         }
-        if (target.classList.contains('collection-delete')) {
+        if (target === delBtn) {
           e.stopPropagation();
+          if (quick) return; // guarded twice (disabled + here) on purpose
           if (confirm(`Delete collection "${collection.name}"?`)) {
             deleteCollection(db, collection.id!).then(() => renderCollections());
           }
           return;
         }
+        if (target === targetBtn) return; // handled on the button itself
         activeCollectionId = collection.id!;
         activeSmartCollectionId = null;
         folderFilter = null;
@@ -2393,6 +2965,30 @@ async function init(): Promise<void> {
         renderVisibleRows();
       }
 
+      // P0-3: the click is the moment the stored handle gets checked. The
+      // Library grid does not decode (that would be a byte read per click),
+      // so without this a moved/deleted file would show its stale thumbnail
+      // forever and only Develop would notice. probeFileHandle() is one
+      // getFile() -- file metadata, no bytes -- so it belongs on this path.
+      // 'denied' is NOT missing: it is a lost grant, and the restore banner
+      // owns it (badgeing it would flag the whole catalog after one reload).
+      const probe = await probeFileHandle(record.handle);
+      if (requestId !== openRequestId) return; // superseded while probing
+      if (!probe.ok && probe.reason !== 'denied') {
+        await markMissing(db, record.id, true);
+        record.missing = true; // the in-memory row the grid renders from
+        repaintMissingBadges();
+        showError(missingFileCopy(record.name));
+        return;
+      }
+      if (record.missing === true) {
+        // The file is back on its own (Finder moved it home, the drive
+        // reconnected): clear the stale badge so it matches the probe.
+        await markMissing(db, record.id, false);
+        delete record.missing;
+        repaintMissingBadges();
+      }
+
       const editState = await loadEditState(db, record.id);
       if (requestId !== openRequestId) return; // superseded while loading edit state
 
@@ -2430,7 +3026,13 @@ async function init(): Promise<void> {
       renderCameraInfo();
       renderHistory();
     } catch (err) {
-      showError(...openFileError(err));
+      // A handle that died mid-open (volume ejected between probe and read)
+      // reads as a DOMException NotFoundError — same badge path as the probe.
+      // Anything else keeps the existing openFileError mapping (one source
+      // per kind of failure).
+      if (!(await flagMissingFromError(record, err))) {
+        showError(...openFileError(err));
+      }
     }
 
   }
@@ -2682,7 +3284,12 @@ async function init(): Promise<void> {
     try {
       await loadIntoPipeline(record, openRequestId);
     } catch (err) {
-      showError(...openFileError(err));
+      // Develop-entry can be the first read attempt after a reload+restore
+      // or a file that moved since the grid click — classify the same way
+      // openFile does (badge + safe-edits copy for notfound/unreadable).
+      if (!(await flagMissingFromError(record, err))) {
+        showError(...openFileError(err));
+      }
     }
   }
 
@@ -4274,7 +4881,163 @@ async function init(): Promise<void> {
   });
   applyPrintLayout();
 
-  // ---- module wiring ----
+  // ---- Survey (gap P1-5) ----
+  // LrC's N view: the review set IS the multi-selection (getState().selectedIds),
+  // tiles are laid out by survey.ts geometry, and every cull write goes through
+  // the same setCull path the grid uses. surveyActiveId is the on-screen cursor
+  // (the white-framed tile); it is deliberately NOT the selection reference —
+  // moving it must not shrink the review set.
+  const surveyGridEl = document.querySelector<HTMLDivElement>('#survey-grid')!;
+  const surveyCountEl = document.querySelector<HTMLSpanElement>('#survey-count')!;
+  const surveyHintEl = document.querySelector<HTMLSpanElement>('#survey-hint')!;
+  const surveyZoomNoteEl = document.querySelector<HTMLSpanElement>('#survey-zoom-note')!;
+  let surveyActiveId: number | null = null;
+  // The id list renderSurvey last tiled. The selection subscriber compares
+  // against it so the x-button path (setSelection -> notify -> render) never
+  // re-renders twice and a tile click (which does NOT touch selection) never
+  // re-renders at all.
+  let surveyRenderedKey = '';
+
+  function renderSurvey(): void {
+    const ids = getState().selectedIds;
+    surveyRenderedKey = ids.join(',');
+    surveyGridEl.textContent = '';
+    surveyCountEl.textContent = ids.length
+      ? `${ids.length} photo${ids.length === 1 ? '' : 's'} · ←/→ move · 0-5 rate · P pick · X reject`
+      : '';
+    surveyHintEl.hidden = ids.length >= 2;
+    if (ids.length < 2) {
+      surveyZoomNoteEl.hidden = true;
+      surveyActiveId = null;
+      return;
+    }
+    if (surveyActiveId === null || !ids.includes(surveyActiveId)) surveyActiveId = ids[0];
+    const boxW = surveyGridEl.clientWidth;
+    const boxH = surveyGridEl.clientHeight;
+    surveyZoomNoteEl.hidden = !surveyNeedsZoom(ids.length, boxW, boxH);
+    const layout = surveyTileLayout(ids.length, boxW, boxH, SURVEY_TILE_GAP);
+    for (let i = 0; i < ids.length; i++) {
+      const id = ids[i];
+      const file = allFiles.find((f) => f.id === id);
+      if (!file) continue; // left the catalog (removed) while survey was open
+      const rect = surveyTileRect(i, { ...layout, gap: SURVEY_TILE_GAP }, boxW);
+      const tile = document.createElement('div');
+      tile.className = 'survey-tile' + (id === surveyActiveId ? ' active' : '');
+      tile.dataset.fileId = String(id);
+      tile.style.left = `${rect.x}px`;
+      tile.style.top = `${rect.y}px`;
+      tile.style.width = `${Math.max(0, rect.w)}px`;
+      tile.style.height = `${Math.max(0, rect.h)}px`;
+      tile.title = file.path;
+      tile.setAttribute('role', 'group');
+      tile.setAttribute('aria-label', `Survey tile ${i + 1} of ${ids.length}: ${file.name}`);
+      // Click the tile = move the cursor only (selection stays the review set).
+      tile.addEventListener('click', () => {
+        surveyActiveId = id;
+        paintSurveyActive();
+      });
+
+      const removeBtn = document.createElement('button');
+      removeBtn.type = 'button';
+      removeBtn.className = 'survey-remove';
+      removeBtn.textContent = '×';
+      removeBtn.title = 'Remove from Survey — keeps the photo and its rating';
+      removeBtn.setAttribute('aria-label', `Remove ${file.name} from this survey`);
+      removeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        // removeFromSurvey is non-destructive by design (survey.ts): the
+        // photo's rating/flag never move here, only the review set shrinks.
+        // setSelection notifies; the subscriber above repaints the tiles.
+        const next = removeFromSurvey(getState().selectedIds, id);
+        if (surveyActiveId === id) surveyActiveId = nextSurveyActive(next, null, 1);
+        setSelection(next, next[0] ?? null);
+      });
+      tile.appendChild(removeBtn);
+
+      const nameEl = document.createElement('div');
+      nameEl.className = 'survey-name';
+      nameEl.textContent = file.name;
+      tile.appendChild(nameEl);
+
+      const stars = document.createElement('div');
+      stars.className = 'cell-stars';
+      for (let n = 1; n <= 5; n++) {
+        const s = document.createElement('span');
+        s.className = 'cell-star' + (n <= (file.rating ?? 0) ? ' on' : '');
+        s.textContent = '★';
+        s.title = `${n}\u2605 (rate this photo; click again to clear)`;
+        s.addEventListener('click', (e) => {
+          e.stopPropagation(); // rating a photo is not moving the cursor
+          void rateFile(file, n);
+        });
+        stars.appendChild(s);
+      }
+      tile.appendChild(stars);
+
+      const cullRow = document.createElement('div');
+      cullRow.className = 'survey-cull';
+      const pickBtn = document.createElement('button');
+      pickBtn.type = 'button';
+      pickBtn.textContent = '✓';
+      pickBtn.title = 'Pick (P)';
+      pickBtn.className = file.flag === true ? 'active' : '';
+      pickBtn.setAttribute('aria-label', `Pick ${file.name}`);
+      pickBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        void flagFile(file, true);
+      });
+      const rejectBtn = document.createElement('button');
+      rejectBtn.type = 'button';
+      rejectBtn.textContent = '✕';
+      rejectBtn.title = 'Reject (X)';
+      rejectBtn.className = file.flag === false ? 'active' : '';
+      rejectBtn.setAttribute('aria-label', `Reject ${file.name}`);
+      rejectBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        void flagFile(file, false);
+      });
+      cullRow.append(pickBtn, rejectBtn);
+      tile.appendChild(cullRow);
+
+      surveyGridEl.appendChild(tile);
+
+      // Thumbnail: same getThumbnail cache the grid cells use (shared session
+      // blobs — survey after library costs no extra extraction).
+      getThumbnail(file).then((blob) => {
+        if (!blob) return;
+        const img = document.createElement('img');
+        img.src = URL.createObjectURL(blob);
+        img.alt = '';
+        img.addEventListener('load', () => URL.revokeObjectURL(img.src), { once: true });
+        img.addEventListener('error', () => {
+          URL.revokeObjectURL(img.src);
+          img.remove();
+        }, { once: true });
+        tile.prepend(img); // under the overlays
+      });
+    }
+  }
+
+  function paintSurveyActive(): void {
+    for (const tile of surveyGridEl.querySelectorAll<HTMLElement>('.survey-tile')) {
+      tile.classList.toggle('active', Number(tile.dataset.fileId) === surveyActiveId);
+    }
+  }
+
+  // Selection changed while Survey is on screen (review-set edits from the
+  // x buttons; Library edits surface on the next entry). The join guard stops
+  // the x path's renderSurvey() from looping the subscriber.
+  subscribe(() => {
+    if (getState().module !== 'survey') return;
+    const key = getState().selectedIds.join(',');
+    if (key === surveyRenderedKey) return;
+    renderSurvey();
+  });
+  // Layout follows the window: re-tile on resize while Survey is visible.
+  window.addEventListener('resize', () => {
+    if (getState().module === 'survey') renderSurvey();
+  });
+
   // ---- module wiring ----
   registerModule({
     id: 'library',
@@ -4344,6 +5107,12 @@ async function init(): Promise<void> {
     onShow: () => {
       renderCompareView();
     },
+    onHide: () => {},
+  });
+  registerModule({
+    id: 'survey',
+    root: document.querySelector('#module-survey')!,
+    onShow: () => renderSurvey(),
     onHide: () => {},
   });
   registerModule({
@@ -4432,6 +5201,226 @@ async function init(): Promise<void> {
     setTimeout(() => { selectionInfo.textContent = ''; }, 2000);
   }
 
+  // The grid's reading-order walk used by both auto-advance-after-rating and
+  // Shift+B: the first photo AFTER `fromId` (in the list as it was BEFORE the
+  // write) that still survives in the new list. Stopping at the end without
+  // wrapping is deliberate (LrC stops advancing at the last photo; wrapping
+  // to the top yanks the user's cursor across the catalog mid-cull).
+  function nextVisibleAfter(
+    beforeList: FileRecord[],
+    afterList: FileRecord[],
+    fromId: number | null,
+  ): FileRecord | null {
+    if (fromId === null) return null;
+    const afterIds = new Set(afterList.map((f) => f.id));
+    const pos = beforeList.findIndex((f) => f.id === fromId);
+    if (pos < 0) return null;
+    for (let i = pos + 1; i < beforeList.length; i++) {
+      if (afterIds.has(beforeList[i].id)) return beforeList[i];
+    }
+    return null;
+  }
+
+  // ---- target collection / Quick Collection (gap P1-4) --------------------
+  // LrC's B-family: B toggles membership in the TARGET (any collection can
+  // be made the target; the default tray is the permanent Quick Collection),
+  // Shift+B adds and advances, Cmd/Ctrl+B jumps to the target view,
+  // Cmd/Ctrl+Alt+B saves the tray as a real collection. The engine
+  // (collections.ts) owns toggle semantics, tray identity (`quick` flag +
+  // legacy adoption in ensureQuickCollection) and the pointer; this is DOM
+  // glue only.
+  async function flashTargetToggle(report: { added: number[]; removed: number[] }): Promise<void> {
+    const label = describeTarget(collections, targetCollectionId);
+    const parts: string[] = [];
+    if (report.added.length) parts.push(`added ${report.added.length} to`);
+    if (report.removed.length) parts.push(`removed ${report.removed.length} from`);
+    // B on a mixed selection can add some and remove others (splitToggle).
+    flashSelectionInfo(`✓ ${parts.join(' / ')} ${label}`);
+  }
+
+  async function handleTargetToggle(advance: boolean): Promise<void> {
+    const ids = selectionTargets();
+    if (!ids.length) {
+      flashSelectionInfo('select photos first');
+      return;
+    }
+    const beforeList = visibleFiles ?? allFiles;
+    const lastId = getState().selectedId;
+    const report = await toggleInTarget(db, ids);
+    // renderCollections refreshes `collections` + `targetCollectionId` (the
+    // label and row counts read from them); rebuildGrid re-applies the
+    // membership change when the target IS the open collection view.
+    await renderCollections();
+    rebuildGrid();
+    await flashTargetToggle(report);
+    if (advance && getState().module === 'library') {
+      const next = nextVisibleAfter(beforeList, visibleFiles ?? [], lastId);
+      if (next && next.id !== getState().selectedId) await openFile(next);
+    }
+  }
+
+  // Cmd/Ctrl+B: open the target's view. State resets mirror the collection
+  // row click (folder and smart-collection scoping are mutually exclusive
+  // with a collection view), plus the search box: B's whole point is seeing
+  // the tray, and a stale search term over it would show an empty grid.
+  async function openTargetCollection(): Promise<void> {
+    const quick = await ensureQuickCollection(db);
+    const targetId = (await getTargetCollectionId(db)) ?? quick.id ?? null;
+    if (targetId === null) return;
+    activeCollectionId = targetId;
+    activeSmartCollectionId = null;
+    folderFilter = null;
+    searchQuery = '';
+    searchInput.value = '';
+    await reloadCatalog();
+  }
+
+  // Cmd/Ctrl+Alt+B: save the tray as a real collection, then reset the
+  // pointer to the default (LrC: the saved collection is a kept set, B keeps
+  // collecting in the tray). A cancelled/blank prompt is not an error.
+  async function convertTargetToCollection(): Promise<void> {
+    const name = window.prompt('Save the target collection as:', 'Culled selection');
+    if (!name || !name.trim()) return;
+    const quick = await ensureQuickCollection(db);
+    const target =
+      (targetCollectionId !== null ? await getCollection(db, targetCollectionId) : null) ?? quick;
+    const created = await createCollection(db, name.trim());
+    await addFilesToCollection(db, created.id!, target.fileIds);
+    await setTargetCollection(db, null);
+    await renderCollections();
+    flashSelectionInfo(`✓ "${created.name}" saved with ${target.fileIds.length} photo${target.fileIds.length === 1 ? '' : 's'} (target reset to Quick Collection)`);
+  }
+
+  // ---- Remove vs Delete-from-disk (gap P0-4) -------------------------------
+  // The trust boundary: membership removal (inside a collection) is silent,
+  // everything else routes through the two-verb dialog, which OPENS ON THE
+  // SAFE VERB. The destructive verb is only ever reachable by an explicit
+  // switch, and its confirm copy (names + count + trash) comes verbatim from
+  // confirmMessage — the UI never paraphrases it.
+  let pendingRemove: { verb: RemoveVerb; ids: number[]; sampleName: string } | null = null;
+
+  function paintRemoveDialog(): void {
+    if (!pendingRemove) return;
+    const copy = confirmMessage(pendingRemove.verb, pendingRemove.ids.length, pendingRemove.sampleName);
+    removeDialogTitle.textContent = copy.title;
+    removeDialogBody.textContent = copy.body; // verbatim: the engine owns the trust copy
+    removeDialogConfirm.textContent = copy.confirmLabel;
+    // Red styling follows ConfirmCopy.destructive -- the safe verb can never
+    // borrow it (and a user reading a red button as "this destroys files" is
+    // exactly the signal the color is there to carry).
+    removeDialogConfirm.classList.toggle('destructive', copy.destructive);
+    removeDialogSwitch.textContent =
+      pendingRemove.verb === 'remove-from-catalog' ? 'Delete from disk instead…' : '…keep files on disk (Remove from catalog)';
+    removeDialogSwitch.title =
+      pendingRemove.verb === 'remove-from-catalog'
+        ? 'Switch to deleting the files themselves (they go to the system trash)'
+        : 'Switch back to removing only the catalog rows (the files stay on disk)';
+    // Dynamic labels: the accessible name must track the painted text.
+    removeDialogSwitch.setAttribute('aria-label', removeDialogSwitch.textContent ?? '');
+    removeDialogConfirm.setAttribute('aria-label', copy.confirmLabel);
+  }
+
+  function openRemoveDialog(ids: number[]): void {
+    const first = allFiles.find((f) => f.id === ids[0]) ?? allFiles.find((f) => ids.includes(f.id));
+    pendingRemove = { verb: 'remove-from-catalog', ids, sampleName: first?.name ?? 'the selected photo' };
+    paintRemoveDialog();
+    removeDialog.showModal();
+    // Default focus on the confirm button, and the confirm button is the
+    // SAFE verb -- an Enter slip removes rows, never touches a file.
+    removeDialogConfirm.focus();
+  }
+
+  async function executeRemoveVerb(verb: RemoveVerb, ids: number[]): Promise<void> {
+    try {
+      if (verb === 'delete-from-disk') {
+        const wanted = new Set(ids);
+        const records = allFiles.filter((f) => wanted.has(f.id));
+        // Disk FIRST, catalog second: a file that refuses to die (locked,
+        // ejected) must not lose its catalog row -- the row keeps pointing
+        // at a file that exists, and a failed relink/badge path covers it.
+        const report = await deleteFilesFromDisk(records.map((r) => r.handle));
+        const failedNames = new Set(report.failed.map((f) => f.name));
+        // Name->id mapping: any name with a failure keeps ALL its rows
+        // (two same-named rows where one failed must not lose the other --
+        // conservative in the safe direction).
+        const deletedIds = records
+          .filter((r) => r.handle && !failedNames.has(r.handle.name))
+          .map((r) => r.id);
+        if (deletedIds.length) await removeFilesFromCatalog(db, deletedIds);
+        if (report.failed.length) {
+          showError(
+            `${report.failed.length} file${report.failed.length === 1 ? '' : 's'} could not be deleted — their catalog rows were kept.`,
+            report.failed.map((f) => `${f.name}: ${f.reason}`).join('\n'),
+          );
+        }
+        await reloadCatalog();
+        renderKeywordList();
+        setSelection([], null);
+        flashSelectionInfo(`✓ ${report.deleted} file${report.deleted === 1 ? '' : 's'} moved to the system trash and removed from the catalog`);
+      } else {
+        const removed = await removeFilesFromCatalog(db, ids);
+        await reloadCatalog();
+        renderKeywordList();
+        setSelection([], null);
+        flashSelectionInfo(`✓ ${removed} photo${removed === 1 ? '' : 's'} removed from the catalog (the files stay on disk)`);
+      }
+    } catch (err) {
+      showError("Couldn't complete that removal.", errorDetail(err));
+    }
+  }
+
+  removeDialogCancel.addEventListener('click', () => {
+    pendingRemove = null;
+    removeDialog.close('cancel');
+  });
+  removeDialogSwitch.addEventListener('click', () => {
+    if (!pendingRemove) return;
+    pendingRemove = {
+      ...pendingRemove,
+      verb: pendingRemove.verb === 'remove-from-catalog' ? 'delete-from-disk' : 'remove-from-catalog',
+    };
+    paintRemoveDialog();
+    removeDialogConfirm.focus(); // the switched-to verb needs a fresh deliberate Enter
+  });
+  removeDialogConfirm.addEventListener('click', () => {
+    const pending = pendingRemove;
+    if (!pending) return;
+    pendingRemove = null;
+    removeDialog.close('confirm');
+    void executeRemoveVerb(pending.verb, pending.ids);
+  });
+  // Escape closes natively; make sure a closed dialog can never leave a
+  // pending verb behind (the confirm handler has already cleared it).
+  removeDialog.addEventListener('close', () => { pendingRemove = null; });
+
+  async function handleRemoveOrDelete(inCollection: boolean): Promise<void> {
+    const verb = deleteKeyVerb({ inCollection });
+    const ids = selectionTargets();
+    if (!ids.length) {
+      // Refuse with a flash rather than opening a dialog about zero photos.
+      flashSelectionInfo('Nothing selected — select photos first');
+      return;
+    }
+    if (verb === 'remove-membership') {
+      const collection = collections.find((c) => c.id === activeCollectionId);
+      if (!collection) {
+        flashSelectionInfo('No collection open');
+        return;
+      }
+      const wanted = new Set(ids);
+      const removedCount = collection.fileIds.filter((fid) => wanted.has(fid)).length;
+      // NO dialog (LrC): inside a collection, Delete only lifts membership.
+      await removeFilesFromCollection(db, collection.id!, ids);
+      await renderCollections();
+      await reloadCatalog();
+      setSelection([], null);
+      flashSelectionInfo(`✓ ${removedCount} removed from ${collection.name} (photos stay in the catalog)`);
+      return;
+    }
+    openRemoveDialog(ids);
+  }
+
+
   // Copy/paste settings. Named functions, not shortcut-only code: the Second
   // Monitor window's Copy/Paste buttons run the same two, so a clipboard
   // round-trip behaves identically whichever window started it.
@@ -4472,8 +5461,46 @@ async function init(): Promise<void> {
 
   // ---- shortcuts ----
   window.addEventListener('keydown', async (e) => {
-    const action = keyToAction(e);
+    // The collection context decides Delete's verb (membership-only vs the
+    // two-verb dialog) -- keyToAction owns the mapping, this passes the view.
+    const shortcutContext: ShortcutContext = { inCollection: activeCollectionId !== null };
+    let action = keyToAction(e, shortcutContext);
+
+    // Survey's 0-key (clear the active tile's rating, LrC's zero): keyToAction
+    // maps 1-5/6-9 only, so normalize it INTO a rate action here and let the
+    // one cull handler below write it -- same patch, same DB path, no second
+    // implementation. The editable-target guard mirrors keyToAction's own
+    // (typing '0' in the stack-gap input must not clear a rating).
+    if (getState().module === 'survey') {
+      const tag = (e.target as HTMLElement | null)?.tagName ?? '';
+      const inField = tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA';
+      if (!inField && e.key === '0' && !e.ctrlKey && !e.metaKey && !e.shiftKey && !e.altKey) {
+        e.preventDefault();
+        action = { type: 'rate', rating: 0 };
+      }
+    }
     if (!action) return;
+
+    // While the Remove dialog is modal, keyboard focus lives inside it and
+    // its buttons own the interaction; a stray B/Delete keydown must not
+    // re-open (showModal on an open dialog throws) or B-toggle behind it.
+    // Escape reaches the dialog natively (not through this handler).
+    if (removeDialog.open) return;
+
+    // Survey owns its cursor: ←/→ move surveyActiveId via the engine's
+    // wrapping nextSurveyActive instead of walking the filmstrip. This must
+    // run before the generic prev/next fall-through below, which calls
+    // openFile and would collapse the review set to one photo.
+    if (getState().module === 'survey' && (action.type === 'prev' || action.type === 'next')) {
+      e.preventDefault();
+      if (getState().selectedIds.length >= 2) {
+        surveyActiveId = nextSurveyActive(
+          getState().selectedIds, surveyActiveId, action.type === 'next' ? 1 : -1,
+        );
+        paintSurveyActive();
+      }
+      return;
+    }
 
     if (action.type === 'grid' || action.type === 'loupe') {
       e.preventDefault();
@@ -4506,17 +5533,60 @@ async function init(): Promise<void> {
       return;
     }
 
+    // B-family (gap P1-4). Like the cull keys these work from any module:
+    // LrC's Quick Collection is reachable from Grid, Loupe and Survey alike.
+    // keyToAction's isEditable guard already keeps these out of text fields.
+    if (action.type === 'toggleTargetCollection' || action.type === 'addToTargetAndAdvance') {
+      e.preventDefault();
+      try {
+        await handleTargetToggle(action.type === 'addToTargetAndAdvance');
+      } catch (err) {
+        showError("Couldn't update the target collection.", errorDetail(err));
+      }
+      return;
+    }
+    if (action.type === 'openTargetCollection') {
+      e.preventDefault();
+      try {
+        await openTargetCollection();
+      } catch (err) {
+        showError("Couldn't open the target collection.", errorDetail(err));
+      }
+      return;
+    }
+    if (action.type === 'convertTargetToCollection') {
+      e.preventDefault();
+      try {
+        await convertTargetToCollection();
+      } catch (err) {
+        showError("Couldn't save the target collection.", errorDetail(err));
+      }
+      return;
+    }
+    // Delete/Backspace (gap P0-4): membership-only inside a collection view,
+    // otherwise the two-verb dialog. The refusal (nothing selected) is a
+    // flash, so the keyboard path is discoverable without clicking anything.
+    if (action.type === 'removeOrDelete') {
+      e.preventDefault();
+      await handleRemoveOrDelete(action.inCollection);
+      return;
+    }
+
 
     // Culling marks on the selected file(s), applied to the in-memory records
     // so the grid repaints instantly (no DB re-query). Like LrC, the mark hits
     // every photo in the multi-selection; with no multi-selection it hits just
-    // the selected file.
+    // the selected file. In Survey the selection IS the review set, so the
+    // same keys hit only the ACTIVE tile — the one the cursor frames.
     if (
       action.type === 'pick' || action.type === 'reject' || action.type === 'clearCull' ||
       action.type === 'rate' || action.type === 'color'
     ) {
       e.preventDefault();
-      const ids = selectionTargets();
+      const surveyMode = getState().module === 'survey';
+      const ids = surveyMode && surveyActiveId !== null
+        ? [surveyActiveId]
+        : selectionTargets();
       if (!ids.length) return;
       const patch =
         action.type === 'pick' ? { flag: true } :
@@ -4535,7 +5605,6 @@ async function init(): Promise<void> {
         // hide-rejected, re-rate out of a collection).
         const beforeList = visibleFiles ?? allFiles;
         const refBefore = getState().selectedId;
-        const pos = refBefore === null ? -1 : beforeList.findIndex((f) => f.id === refBefore);
         refreshCullDependents();
         // Walk the grid's own list (the old version skipped to a photo the
         // filter hides -- an off-screen "advance" is the phantom-selection bug
@@ -4548,12 +5617,11 @@ async function init(): Promise<void> {
         const wantAdvance = refGone ||
           (autoAdvanceCheckbox.checked && ids.length === 1 &&
             (action.type === 'rate' || action.type === 'pick' || action.type === 'reject'));
-        if (wantAdvance && getState().module === 'library' && pos >= 0) {
-          const afterIds = new Set(afterList.map((f) => f.id));
-          let next: FileRecord | null = null;
-          for (let i = pos + 1; i < beforeList.length; i++) {
-            if (afterIds.has(beforeList[i].id)) { next = beforeList[i]; break; }
-          }
+        if (wantAdvance && getState().module === 'library') {
+          // Same walk the Shift+B advance uses (extracted to
+          // nextVisibleAfter — one owner for "next surviving photo after the
+          // reference", guarded by pos>=0 inside it).
+          const next = nextVisibleAfter(beforeList, afterList, refBefore);
           if (next && next.id !== ref) await openFile(next);
         }
       } catch (err) {
@@ -4782,6 +5850,13 @@ async function init(): Promise<void> {
     getSyncReference: syncReference,
   });
 
+  // The strip rebuilds its visible cells on every selection change (its own
+  // subscribe inside createFilmstrip). Registering AFTER createFilmstrip puts
+  // this listener behind the strip's in notify() order, so badges repaint on
+  // the freshly-built cells; repaintMissingBadges is idempotent, so an
+  // in-place paint (no rebuild) is a cheap no-op pass.
+  subscribe(() => repaintMissingBadges());
+
   // AbortError means the user opened the folder picker and dismissed it --
   // the single most common outcome of clicking this button. That's not an
   // error worth surfacing; anything else (a real I/O failure, a rejected
@@ -4790,8 +5865,9 @@ async function init(): Promise<void> {
   addFolderButton.addEventListener('click', async () => {
     addFolderButton.disabled = true;
     try {
-      await importFolder(db);
+      const result = await importFolder(db);
       await reloadCatalog();
+      flashImportResult(result);
     } catch (err) {
       if (err instanceof DOMException && err.name === 'AbortError') return;
       showError("Couldn't import that folder.", errorDetail(err));
@@ -4799,6 +5875,18 @@ async function init(): Promise<void> {
       addFolderButton.disabled = false;
     }
   });
+
+  // Success feedback for imports (gap P1-8): the count is the reassurance,
+  // the parenthetical explains why a re-import of a copied folder added
+  // nothing -- silent skipping reads as a broken import.
+  function flashImportResult(result: { imported: number; skippedDuplicates: number }): void {
+    const base = `✓ imported ${result.imported} photo${result.imported === 1 ? '' : 's'}`;
+    flashSelectionInfo(
+      result.skippedDuplicates > 0
+        ? `${base} (${result.skippedDuplicates} duplicate${result.skippedDuplicates === 1 ? '' : 's'} skipped)`
+        : base,
+    );
+  }
 
   // Restore banner: after a reload Chrome drops the File System Access
   // grants, every developed render fails, and the strip/grid silently fall
@@ -4819,6 +5907,49 @@ async function init(): Promise<void> {
       renderVisibleRows();
     } finally {
       restoreBannerBtn.disabled = false;
+    }
+  });
+
+  // ---- locate missing photos (gap P0-3) ------------------------------------
+  // LrC's 'Find All Missing Photos' + Locate-with-repair. The engine owns
+  // matching and writing (promptRelink/relinkFromDirectory); this binds it to
+  // the picker, the thumbnail cache, and the in-memory records the grid draws.
+  locateMissingBtn.addEventListener('click', async () => {
+    locateMissingBtn.disabled = true;
+    try {
+      const missing = await listMissingFiles(db);
+      if (missing.length === 0) {
+        flashSelectionInfo('No missing photos');
+        return;
+      }
+      // pick() must be invoked in the click's gesture window — promptRelink
+      // calls it synchronously enough, and a cancelled picker is NOT an
+      // error (resolve null, the engine treats it as a clean no-op).
+      const pick = async (): Promise<FileSystemHandle | null> => {
+        try {
+          return await window.showDirectoryPicker({ mode: 'read' });
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') return null;
+          throw err;
+        }
+      };
+      const summary = await promptRelink(missing, pick, db);
+      // relinkFromDirectory mutated the FileRecords we passed (the same
+      // objects allFiles holds when the view shows them); bust each relinked
+      // id's cached thumbnail promise so the cell re-reads the NEW file.
+      for (const record of missing) {
+        if (!record.missing) thumbnailRequests.delete(record.id);
+      }
+      await reloadCatalog();
+      if (summary.relinked === 0 && summary.stillMissing > 0) {
+        flashSelectionInfo(`0 relinked, ${summary.stillMissing} still missing`);
+      } else {
+        flashSelectionInfo(`✓ relinked ${summary.relinked}, ${summary.stillMissing} still missing`);
+      }
+    } catch (err) {
+      showError("Couldn't relink the missing photos.", errorDetail(err));
+    } finally {
+      locateMissingBtn.disabled = false;
     }
   });
 
@@ -5047,6 +6178,250 @@ async function init(): Promise<void> {
     rebuildGrid();
   });
 
+  // ---- keywords (LrC P0-6) ----
+  // The Keyword List is derived from file rows (keywords.ts has no registry),
+  // so rendering it is a scan of allFiles -- the same in-memory list the grid
+  // reads. Writes go through keywords.ts (get-merge-put on the full row);
+  // main.ts patches the matching in-memory records afterwards so the grid
+  // repaints without re-querying IndexedDB, exactly like the cull key handler.
+
+  function renderKeywordList(): void {
+    const tallies = buildKeywordList(allFiles);
+    keywordListEl.textContent = '';
+    for (const tally of tallies) {
+      // DOM-built, never innerHTML: keywords are user strings.
+      const row = document.createElement('button');
+      row.type = 'button'; // inside no form, but explicit like the footer chips
+      row.className = 'keyword-row' + (keywordFilter === tally.keyword ? ' active' : '');
+      row.dataset.keyword = tally.keyword;
+      row.append(document.createTextNode(tally.keyword));
+      const count = document.createElement('span');
+      count.className = 'keyword-count';
+      count.textContent = String(tally.count);
+      row.append(count);
+      row.title = 'Click: filter the grid to photos tagged with this keyword (click again to clear). Double-click or F2: rename across the catalog.';
+      row.addEventListener('click', () => toggleKeywordFilter(tally.keyword));
+      row.addEventListener('dblclick', () => void renameKeywordFromRow(tally.keyword));
+      // dblclick is mouse-only; F2 is the standard keyboard rename gesture, so
+      // the affordance is reachable without a pointer (house a11y rule).
+      row.addEventListener('keydown', (e) => {
+        if (e.key === 'F2') {
+          e.preventDefault();
+          void renameKeywordFromRow(tally.keyword);
+        }
+      });
+      keywordListEl.appendChild(row);
+    }
+  }
+
+  // Click = the grid's filter chip for one keyword; re-clicking the active row
+  // clears it (same toggle model as the footer star chips). Only the active
+  // class moves here -- the list itself hasn't changed, so no rebuild.
+  function toggleKeywordFilter(keyword: string): void {
+    keywordFilter = keywordFilter === keyword ? null : keyword;
+    for (const row of keywordListEl.querySelectorAll<HTMLButtonElement>('.keyword-row')) {
+      row.classList.toggle('active', row.dataset.keyword === keywordFilter);
+    }
+    rebuildGrid();
+  }
+
+  // Add #keyword-input's comma-separated tags to the selection. With nothing
+  // selected the input keeps its text (the draft is the thing being typed) and
+  // the footer says why -- 'select photos first' is the app's standing
+  // no-selection feedback (see addSelectionToCollection).
+  async function addKeywordsToSelection(): Promise<void> {
+    const tags = parseKeywordField(keywordInput.value);
+    if (!tags.length) return; // nothing but separators: keep the draft
+    const ids = selectionTargets();
+    if (!ids.length) {
+      flashSelectionInfo('select photos first');
+      return;
+    }
+    try {
+      await addKeywordsToFiles(db, ids, tags);
+      // Patch the in-memory records with the SAME merge the IDB layer applied
+      // (addKeywords + drop-the-key-when-empty, keywords.ts writeKeywords),
+      // so the grid and the derived list agree without a re-query.
+      for (const id of ids) {
+        const record = allFiles.find((f) => f.id === id);
+        if (!record) continue;
+        const merged = addKeywords(record.keywords, tags);
+        if (merged.length === 0) delete record.keywords;
+        else record.keywords = merged;
+      }
+      keywordInput.value = '';
+      renderKeywordList();
+      renderFilterBar(); // the Keywords column derives from the same rows
+      rebuildGrid(); // a keyword filter may now match more photos
+      flashSelectionInfo(`✓ ${tags.length} keyword${tags.length === 1 ? '' : 's'} → ${ids.length} photo${ids.length === 1 ? '' : 's'}`);
+    } catch (err) {
+      showError("Couldn't save the keywords.", errorDetail(err));
+    }
+  }
+
+  // Double-click (or F2) rename: catalog-wide through renameKeywordAcrossCatalog.
+  // The in-memory patch mirrors that function's own two passes so the session's
+  // records match the rows the DB just rewrote: find the display spelling the
+  // catalog already uses for the target (renameKeywordIn merges into it rather
+  // than re-casing), then map old -> that spelling on every record, deduping.
+  async function renameKeywordFromRow(from: string): Promise<void> {
+    const entered = window.prompt(`Rename keyword "${from}" across the catalog:`, from);
+    if (entered === null) return; // cancelled
+    const to = normalizeKeyword(entered);
+    if (!to || keywordKey(to) === keywordKey(from)) return; // blank or unchanged
+    try {
+      const display =
+        allFiles
+          .flatMap((f) => f.keywords ?? [])
+          .find((kw) => keywordKey(kw) === keywordKey(to)) ?? to;
+      const changed = await renameKeywordAcrossCatalog(db, from, display);
+      for (const record of allFiles) {
+        if (!record.keywords) continue;
+        const renamed = renameKeywordIn(record.keywords, from, display);
+        if (!renamed) continue;
+        if (renamed.length === 0) delete record.keywords;
+        else record.keywords = renamed;
+      }
+      // Keep an active filter following its tag's new name, or it would point
+      // at a spelling no row carries any more.
+      if (keywordFilter && keywordKey(keywordFilter) === keywordKey(from)) keywordFilter = display;
+      renderKeywordList();
+      renderFilterBar(); // renamed keyword: the bar's chip must follow it
+      rebuildGrid();
+      flashSelectionInfo(changed
+        ? `✓ renamed in ${changed} photo${changed === 1 ? '' : 's'}`
+        : `"${from}" wasn't on any photo`);
+    } catch (err) {
+      showError("Couldn't rename the keyword.", errorDetail(err));
+    }
+  }
+
+  keywordAddBtn.addEventListener('click', () => void addKeywordsToSelection());
+  keywordInput.addEventListener('keydown', (e) => {
+    // Enter commits like LrC's keywording field; the button stays for mouse.
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      void addKeywordsToSelection();
+    }
+  });
+
+  // ---- metadata / IPTC (LrC P1-7) ----
+  // Six boxes mirror the first selected photo's `iptc` bag. With 2+ selected,
+  // LrC shows a mixed-state indicator; the simplest complete behavior here is
+  // to show the FIRST selected file's values, and writes hit the whole
+  // selection. Payloads always go through fieldsFromPresetForm/presetToPatch
+  // (iptc.ts): they drop blanks, so an untouched box never overwrites data.
+
+  let metadataPresets: MetadataPreset[] = [];
+
+  function iptcFormValues(): Record<string, string> {
+    const form: Record<string, string> = {};
+    for (const [key, el] of Object.entries(iptcFieldsEls)) form[key] = el.value;
+    return form;
+  }
+
+  // The panel's "selection changed" repaint. subscribe() is where every
+  // selection mutation -- grid click, filmstrip, arrow keys, ctrl/shift --
+  // funnels (same hook the outline painting uses), so the boxes can never
+  // lag the selection.
+  function renderIptcPanel(): void {
+    const { selectedId, selectedIds } = getState();
+    const firstId = selectedIds[0] ?? selectedId;
+    const file = firstId !== null ? allFiles.find((f) => f.id === firstId) : undefined;
+    for (const [key, el] of Object.entries(iptcFieldsEls)) {
+      el.value = file?.iptc?.[key as keyof IptcFields] ?? '';
+    }
+  }
+  subscribe(renderIptcPanel);
+
+  // Push an applied patch onto the in-memory rows with iptc.ts's merge
+  // semantics (present-blank clears, absent keeps) and the same
+  // delete-when-empty discipline setFileIptc uses on the stored row.
+  function applyIptcToRecords(ids: readonly number[], patch: IptcFields): void {
+    for (const id of ids) {
+      const record = allFiles.find((f) => f.id === id);
+      if (!record) continue;
+      const merged = mergeIptc(record.iptc, patch);
+      if (Object.keys(merged).length === 0) delete record.iptc;
+      else record.iptc = merged;
+    }
+  }
+
+  async function applyIptcToSelection(fields: IptcFields, done: string): Promise<void> {
+    const ids = selectionTargets();
+    if (!ids.length) {
+      flashSelectionInfo('select photos first');
+      return;
+    }
+    try {
+      await setFileIptc(db, ids, fields);
+      applyIptcToRecords(ids, fields);
+      renderIptcPanel(); // the boxes re-read the merged result, incl. blanks
+      flashSelectionInfo(done);
+    } catch (err) {
+      showError("Couldn't save the photo metadata.", errorDetail(err));
+    }
+  }
+
+  iptcApplySelectionBtn.addEventListener('click', () => {
+    // fieldsFromPresetForm drops blank boxes, so "Apply to selection" stamps
+    // what's typed and leaves what isn't alone (no accidental clears).
+    const fields = fieldsFromPresetForm(iptcFormValues());
+    if (Object.keys(fields).length === 0) return; // nothing typed: no-op
+    void applyIptcToSelection(
+      fields,
+      `✓ metadata applied to ${selectionTargets().length} photo${selectionTargets().length === 1 ? '' : 's'}`,
+    );
+  });
+
+  async function renderMetadataPresetOptions(): Promise<void> {
+    metadataPresets = await listMetadataPresets(db);
+    iptcPresetSelect.textContent = '';
+    const none = document.createElement('option');
+    none.value = '';
+    none.textContent = 'None';
+    iptcPresetSelect.append(none);
+    for (const preset of metadataPresets) {
+      const option = document.createElement('option');
+      option.value = preset.id;
+      option.textContent = preset.name; // DOM-built: preset names are user strings
+      option.title = describePreset(preset); // which fields it actually stamps
+      iptcPresetSelect.append(option);
+    }
+  }
+
+  iptcApplyPresetBtn.addEventListener('click', () => {
+    const preset = metadataPresets.find((p) => p.id === iptcPresetSelect.value);
+    if (!preset) return; // 'None'
+    // presetToPatch: only the preset's non-blank fields ride along, so a
+    // copyright-only preset can't wipe a caption on the photos.
+    const patch = presetToPatch(preset);
+    void applyIptcToSelection(
+      patch,
+      `✓ preset "${preset.name}" applied to ${selectionTargets().length} photo${selectionTargets().length === 1 ? '' : 's'}`,
+    );
+  });
+
+  iptcSavePresetBtn.addEventListener('click', async () => {
+    const name = window.prompt('Preset name:');
+    if (!name || !name.trim()) return; // cancelled or blank: nothing to save
+    try {
+      await saveMetadataPreset(db, {
+        id: newPresetId(),
+        name: name.trim(),
+        fields: fieldsFromPresetForm(iptcFormValues()),
+      });
+      await renderMetadataPresetOptions();
+      flashSelectionInfo(`✓ preset "${name.trim()}" saved`);
+    } catch (err) {
+      showError("Couldn't save the metadata preset.", errorDetail(err));
+    }
+  });
+
+  // Panel init is independent of the catalog; a failed preset read leaves an
+  // empty picker rather than blocking boot (iptc.ts tolerates a missing store).
+  void renderMetadataPresetOptions();
+
   // ---- drag & drop folder import ----
   const libraryContent = document.querySelector<HTMLElement>('#module-library .content')!;
   libraryContent.addEventListener('dragover', (e) => {
@@ -5066,10 +6441,11 @@ async function init(): Promise<void> {
           try {
             const handle = await (item as any).getAsFileSystemHandle();
             if (handle?.kind === 'directory') {
-              await importFolderFromHandle(db, handle);
+              const result = await importFolderFromHandle(db, handle);
               await reloadCatalog();
               await renderCollections();
               await renderSmartCollections();
+              flashImportResult(result);
             }
 
           } catch (err) {
@@ -5090,6 +6466,12 @@ async function init(): Promise<void> {
       }
     }
   });
+
+  // The Quick Collection tray must exist before the first paint: the B key
+  // and the target label both assume it. ensureQuickCollection owns tray
+  // identity — it stamps the `quick` flag on create and adopts unflagged
+  // legacy rows by their reserved name, so no second tray can ever be minted.
+  await ensureQuickCollection(db);
 
   await renderCatalog();
   await renderCollections();

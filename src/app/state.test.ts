@@ -50,6 +50,13 @@ describe('app state', () => {
     expect(seen).toEqual(['develop']);
   });
 
+  // Survey (LrC's N view) is a module now; this pins the union member so a
+  // future edit cannot drop it while main.ts still routes the N shortcut.
+  it('setModule accepts survey', () => {
+    setModule('survey');
+    expect(getState().module).toBe('survey');
+  });
+
   it('unsubscribing stops notifications', () => {
     const seen: AppState[] = [];
     const unsubscribe = subscribe((s) => seen.push({ ...s }));

@@ -1,6 +1,32 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, beforeAll, beforeEach } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { decode, DecodeError } from './decode';
+// @ts-expect-error -- Emscripten glue has no bundled types (same waiver as librawModule.ts)
+import createLibRawModule from '../wasm/libraw.js';
+import { decode, DecodeError, identify, IdentifyError, IDENTIFY_STALE_WASM_CODE } from './decode';
+import { exifToRecordFields } from './exif';
+import type { ExifIdentify } from './exif';
+import type { LibRawModule } from './librawModule';
+
+// getLibRawModule is swapped for a mutable ref so the identify() error-path
+// tests below can hand decode.ts a fake wasm module (a stale blob without
+// the new exports, a malloc refusal, a non-zero error_code) without needing
+// a real one -- the success tests use the REAL module, seeded once in
+// beforeAll and restored in beforeEach, exactly as the pre-existing decode
+// tests did (they loaded the module lazily through the real getter).
+const wasmRef = vi.hoisted(() => ({ current: null as unknown }));
+vi.mock('./librawModule', () => ({
+  getLibRawModule: async () => wasmRef.current as LibRawModule,
+}));
+
+let realModule: unknown;
+
+beforeAll(async () => {
+  realModule = await createLibRawModule();
+});
+
+beforeEach(() => {
+  wasmRef.current = realModule;
+});
 
 function loadFixture(name: string): ArrayBuffer {
   const buffer = readFileSync(new URL(`./__fixtures__/${name}`, import.meta.url));
@@ -171,5 +197,178 @@ describe('decode: synthetic Bayer DNG', () => {
     // LibRaw reports, which is what the WB-calibration key consumes.
     expect(result.make).toBe('Nikon');
     expect(result.model).toBe('D800');
+  });
+});
+
+// ---- identify(): the EXIF-at-import path --------------------------------
+//
+// Success cases run against the REAL wasm module (it loads under node, and
+// the fixtures prove the wrapper end-to-end); error cases run against fake
+// module objects because they exercise exactly what the fakes can model --
+// a stale cached blob without the new exports, a refused malloc, a null
+// result pointer, a non-zero error_code -- none of which the real module
+// can be made to produce on demand.
+
+describe('identify (real wasm)', () => {
+  it('reads the Fuji fixture EXIF without unpacking (matches the decode identity)', async () => {
+    const e = await identify(loadFixture('sample.raf'));
+    // Same identity decode() reports for this file -- the identify-only pass
+    // must agree with the full decode pass.
+    expect(e.make).toBe('Fujifilm');
+    expect(e.model).toBe('X100V');
+    // Fixed-lens camera: LibRaw's parse_exif never sees a LensModel tag here.
+    expect(e.lens).toBe('');
+    // Camera wall-clock ("YYYY:MM:DD HH:MM:SS"); the exact instant lives in
+    // the user's pixels, so only the SHAPE is pinned -- the value the
+    // browser proof quotes comes from this same string.
+    expect(e.datetimeOriginal).toMatch(/^\d{4}:\d{2}:\d{2} \d{2}:\d{2}:\d{2}$/);
+    expect(e.iso).toBe(320); // fixture EXIF ISO 320
+    expect(e.focalLength).toBeCloseTo(23, 0); // X100V fixed 23mm
+    // Effective area sizes (sensor margins cropped; wrapper falls back to
+    // raw dims when zero). Portrait file: identify reports the SENSOR grid
+    // dims (width > height); flip 6 is the rotation applied downstream.
+    expect(e.width).toBeGreaterThan(6000);
+    expect(e.height).toBeGreaterThan(4000);
+    expect(e.flip).toBe(6); // EXIF Orientation 6, same as decode()'s flip
+    // The full mapping import.ts stores, so this file's IndexedDB row shape
+    // is pinned here too: cameraModel feeds main.ts search + smart
+    // collections' camera rule.
+    expect(exifToRecordFields(e).cameraModel).toBe('Fujifilm X100V');
+  });
+
+  it('rejects a garbage buffer with an IdentifyError carrying the LibRaw code', async () => {
+    const garbage = new Uint8Array([1, 2, 3, 4, 5]).buffer;
+    await expect(identify(garbage)).rejects.toBeInstanceOf(IdentifyError);
+    await expect(identify(garbage)).rejects.toMatchObject({ code: expect.any(Number) });
+  });
+});
+
+describe('identify error paths (fake modules)', () => {
+  // Builds a minimal module stand-in. The impl closure ignores the
+  // interface's generic conditional return, so one cast at the mock
+  // boundary keeps the fakes readable.
+  function fakeModule(
+    impl: (name: string, args: unknown[]) => unknown,
+    overrides: Partial<LibRawModule> = {},
+  ): LibRawModule {
+    return {
+      _malloc: () => 4096,
+      _free: () => {},
+      HEAPU8: new Uint8Array(64 * 1024),
+      ccall: ((name: string, _ret: string, _argTypes: string[], args: unknown[]) =>
+        impl(name, args)) as unknown as LibRawModule['ccall'],
+      ...overrides,
+    } as LibRawModule;
+  }
+
+  it('throws IdentifyError (not TypeError) on a stale wasm blob lacking the export', async () => {
+    // The exact failure the decode_result_flip guard models: a browser HTTP
+    // cache still serving the pre-identify libraw.wasm. ccall's lookup is
+    // Module['_identify'] === undefined, so calling it throws TypeError --
+    // identify() must convert that to its typed error so import.ts's single
+    // try/catch covers the case.
+    let freed = 0;
+    wasmRef.current = fakeModule(
+      (name) => {
+        throw new TypeError(`${name} is not a function`);
+      },
+      {
+        _free: () => {
+          freed += 1;
+        },
+      },
+    );
+    await expect(identify(new ArrayBuffer(8))).rejects.toMatchObject({
+      name: 'IdentifyError',
+      code: IDENTIFY_STALE_WASM_CODE,
+    });
+    // The input buffer is freed even on this path (no 58MB leak per file).
+    expect(freed).toBe(1);
+  });
+
+  it('throws IdentifyError when _malloc returns 0 (heap growth refused)', async () => {
+    const calls: string[] = [];
+    wasmRef.current = fakeModule(
+      (name) => {
+        calls.push(name);
+        return 0;
+      },
+      {
+        _malloc: () => {
+          calls.push('malloc');
+          return 0;
+        },
+        _free: () => calls.push('free'),
+      },
+    );
+    await expect(identify(new ArrayBuffer(16))).rejects.toMatchObject({ code: -1003 });
+    // The malloc-failure path must not write through the null pointer nor
+    // call identify/free at all.
+    expect(calls).toEqual(['malloc']);
+  });
+
+  it('throws IdentifyError when identify() returns a null struct pointer', async () => {
+    wasmRef.current = fakeModule((name) => {
+      if (name !== 'identify') throw new Error(`unexpected ccall ${name} after null result`);
+      return 0;
+    });
+    await expect(identify(new ArrayBuffer(8))).rejects.toMatchObject({ code: -1002 });
+  });
+
+  it('propagates a non-zero error_code as IdentifyError and frees the struct', async () => {
+    const freed: number[] = [];
+    wasmRef.current = fakeModule((name, args) => {
+      if (name === 'identify') return 555; // struct pointer
+      if (name === 'identify_result_error_code') return -100009; // LIBRAW_FILE_UNSUPPORTED
+      if (name === 'free_identify') {
+        freed.push(args[0] as number);
+        return 0;
+      }
+      throw new Error(`unexpected ccall ${name}`);
+    });
+    await expect(identify(new ArrayBuffer(8))).rejects.toMatchObject({ code: -100009 });
+    // The free contract survives the error path: exactly one free_identify
+    // for the one identify call (mirrors decode.ts's DecodeError handling).
+    expect(freed).toEqual([555]);
+  });
+
+  it('returns the full struct when every getter answers', async () => {
+    const values: Record<string, unknown> = {
+      identify: 555,
+      identify_result_error_code: 0,
+      identify_result_make: 'Nikon',
+      identify_result_model: 'D800',
+      identify_result_lens: 'AF-S 50mm f/1.8G',
+      identify_result_datetime_original: '2012:07:01 10:20:30',
+      identify_result_iso: 200,
+      identify_result_focal: 50,
+      identify_result_width: 4928,
+      identify_result_height: 3280,
+      identify_result_flip: 0,
+    };
+    wasmRef.current = fakeModule((name) => {
+      if (name === 'free_identify') return 0; // success path frees the struct at the end
+      if (!(name in values)) throw new Error(`unexpected ccall ${name}`);
+      return values[name];
+    });
+    const e: ExifIdentify = await identify(new ArrayBuffer(8));
+    expect(e).toEqual({
+      make: 'Nikon',
+      model: 'D800',
+      lens: 'AF-S 50mm f/1.8G',
+      datetimeOriginal: '2012:07:01 10:20:30',
+      iso: 200,
+      focalLength: 50,
+      width: 4928,
+      height: 3280,
+      flip: 0,
+    });
+    expect(exifToRecordFields(e)).toEqual({
+      cameraModel: 'Nikon D800',
+      lensModel: 'AF-S 50mm f/1.8G',
+      iso: 200,
+      focalLength: 50,
+      dateTaken: expect.any(Number),
+    });
   });
 });

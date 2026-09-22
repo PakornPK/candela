@@ -13,3 +13,4 @@ light_frames/
 .vscode/
 
 dogfood-output/
+qa-report.json

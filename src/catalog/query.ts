@@ -26,3 +26,18 @@ export function listFiles(db: IDBDatabase, folderId: number, pathPrefix = ''): P
     request.onerror = () => reject(request.error);
   });
 }
+
+// Every file whose handle stopped resolving (gap P0-3's 'Find All Missing
+// Photos'). A full getAll with a truthy-`missing` filter, not an index query:
+// the flag is an optional schemaless field (types.ts) with no index, and
+// creating one would force a DB_VERSION bump for a query that runs when the
+// user opens the Missing view — not on every scroll. The catalog scan is the
+// same cost the keyword list already accepts (types.ts:22-25).
+export function listMissingFiles(db: IDBDatabase): Promise<FileRecord[]> {
+  return new Promise((resolve, reject) => {
+    const request = db.transaction('files', 'readonly').objectStore('files').getAll();
+    request.onsuccess = () =>
+      resolve((request.result as FileRecord[]).filter((f) => f.missing === true));
+    request.onerror = () => reject(request.error);
+  });
+}

@@ -7,7 +7,9 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "qa": "node scripts/qa-loop.mjs",
+    "qa:fast": "node scripts/qa-loop.mjs --fast"
   },
   "devDependencies": {
     "@types/node": "26.2.0",

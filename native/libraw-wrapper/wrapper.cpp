@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 #include <exception>
 #include <memory>
 #include "wrapper_core.h"
@@ -515,6 +516,170 @@ EMSCRIPTEN_KEEPALIVE
 void free_thumbnail(ThumbnailResult* r) {
     if (!r) return;
     delete[] r->data;
+    delete r;
+}
+
+// Ownership/lifecycle mirrors DecodeResult/decode() above -- JS must call
+// free_identify() exactly once per identify() call, success or failure,
+// except when identify() itself returns nullptr (nothing to free).
+//
+// Why a separate identify-only entry point: catalog import walks thousands
+// of files and only needs EXIF metadata (camera/lens/date/ISO for search
+// and smart collections -- the fields FileRecord carries and the readers in
+// main.ts and smartCollections.ts already query). A full decode() unpacks
+// the Bayer grid (~1.6s per 26MP Fuji file, ~58MB heap copy) which is
+// unacceptable across a 10,000-file folder. This follows extract_thumbnail:
+// open_buffer() runs LibRaw's identify() (EXIF parse, camera tables) and we
+// read imgdata fields only -- no unpack(), no pixel work.
+struct IdentifyResult {
+    // Camera identity from imgdata.idata (EXIF Make/Model). 64 bytes matches
+    // libraw_iparams_t; empty when the file reports none. Fixed buffers (not
+    // heap), read on the JS side via UTF8ToString on the returned pointer --
+    // same pattern as DecodeResult's make/model.
+    char make[64] = {};
+    char model[64] = {};
+    // EXIF LensModel (imgdata.lens.Lens, parsed from tag 0xa434 by
+    // parse_exif during open_buffer). Empty string when the file reports no
+    // lens (fixed-lens cameras like the X100V record none).
+    char lens[128] = {};
+    // EXIF DateTimeOriginal, formatted back to the canonical
+    // "YYYY:MM:DD HH:MM:SS" wall-clock string the camera recorded.
+    //
+    // NOTE (deviation from the original plan): LibRaw 0.22.2 has NO
+    // imgdata.idata.datetime_original field (checked libraw_types.h --
+    // libraw_iparams_t carries only make/model/software...). The EXIF
+    // DateTimeOriginal string is consumed by get_timestamp() during
+    // identify (misc_parsers.cpp:533, via tag 0x9003) and stored as a
+    // time_t in imgdata.other.timestamp, built with mktime() -- i.e. the
+    // browser's local timezone inside wasm. Re-formatting it with
+    // localtime_r yields exactly the camera's recorded wall-clock digits
+    // again, so the TS side (exif.ts parseExifDateTime) can rebuild the
+    // epoch with new Date(y,m-1,...) in the same zone without any
+    // double-shift. 0 timestamp ("not reported") -> empty string.
+    char datetime_original[20] = {};
+    // imgdata.other.iso_speed rounded to uint32; 0 = not reported.
+    // imgdata.other.focal_len in mm; 0.0 = not reported.
+    uint32_t iso_speed = 0;
+    float focal_len = 0.0f;
+    // Effective area (imgdata.sizes.width/height) -- the cropped image, not
+    // the raw sensor buffer. Falls back to raw_width/raw_height when the
+    // format leaves sizes zero (mirrors decode()'s guard). NOT used by the
+    // catalog today; carried so future smart filters (megapixel rules)
+    // don't need another wasm round-trip.
+    uint32_t width = 0;
+    uint32_t height = 0;
+    // Sensor-orientation flip code (imgdata.sizes.flip, 0..7), final after
+    // open_buffer()'s identify -- decode()'s comment documents semantics.
+    int flip = 0;
+    // 0 = success, LibRaw error codes otherwise (open_buffer failure; all
+    // LibRaw codes are <= 0), -1001 = allocation/exception raised by the
+    // wrapper's own code. Same convention as DecodeResult.
+    int error_code = 0;
+};
+
+EMSCRIPTEN_KEEPALIVE
+IdentifyResult* identify(const uint8_t* file_bytes, uint32_t length) {
+    IdentifyResult* result = nullptr;
+
+    try {
+        result = new IdentifyResult{};
+
+        LibRaw processor;
+
+        // open_buffer() runs the whole identify/EXIF pass and returns an
+        // int code -- any LibRaw-internal throw is caught inside
+        // open_buffer (utils/open.cpp) and converted to a return code, but
+        // only because both sides were built with -fexceptions (see
+        // build.sh); without that flag a throw traps the module instead.
+        int ret = processor.open_buffer(const_cast<uint8_t*>(file_bytes), length);
+        if (ret != LIBRAW_SUCCESS) {
+            result->error_code = ret;
+            return result;
+        }
+
+        const auto& idata = processor.imgdata.idata;
+        std::strncpy(result->make, idata.make, sizeof(result->make) - 1);
+        std::strncpy(result->model, idata.model, sizeof(result->model) - 1);
+
+        std::strncpy(result->lens, processor.imgdata.lens.Lens, sizeof(result->lens) - 1);
+
+        // DateTimeOriginal round-trip (see the struct field comment):
+        // other.timestamp is the camera's wall-clock converted to epoch
+        // through mktime() *inside this wasm module*, so the browser's
+        // zone; localtime_r inverts exactly that.
+        const time_t ts = processor.imgdata.other.timestamp;
+        if (ts != 0) {
+            struct tm tm_local {};
+            if (localtime_r(&ts, &tm_local) != nullptr) {
+                // EXIF's canonical separator is colons in the DATE part
+                // ("2023:04:16 21:18:27") -- keep it byte-compatible with
+                // raw EXIF so TS parses one documented shape. %Y prints 4
+                // digits for any post-1900 year; buffers are 20 bytes and
+                // the format yields exactly 19 chars + NUL.
+                strftime(result->datetime_original, sizeof(result->datetime_original),
+                         "%Y:%m:%d %H:%M:%S", &tm_local);
+            }
+        }
+
+        // 0.0 is LibRaw's "not reported" sentinel for both fields (same as
+        // decode()'s camera_meta). Round ISO (float) to whole stops.
+        const float iso = processor.imgdata.other.iso_speed;
+        result->iso_speed = iso > 0.0f ? static_cast<uint32_t>(iso + 0.5f) : 0;
+        result->focal_len = processor.imgdata.other.focal_len;
+
+        const auto& sz = processor.imgdata.sizes;
+        result->width = sz.width > 0 ? sz.width : sz.raw_width;
+        result->height = sz.height > 0 ? sz.height : sz.raw_height;
+        result->flip = sz.flip;
+
+        result->error_code = 0;
+    } catch (const std::exception&) {
+        // Same contract as decode(): a throw here can only come from the
+        // wrapper's own allocations (LibRaw's throws are int return codes
+        // inside open_buffer thanks to -fexceptions). If the result struct
+        // itself is null there is nothing to report through or free.
+        if (result == nullptr) {
+            return nullptr;
+        }
+        result->error_code = -1001;
+    }
+
+    return result;
+}
+
+EMSCRIPTEN_KEEPALIVE
+const char* identify_result_make(IdentifyResult* r) { return r->make; }
+
+EMSCRIPTEN_KEEPALIVE
+const char* identify_result_model(IdentifyResult* r) { return r->model; }
+
+EMSCRIPTEN_KEEPALIVE
+const char* identify_result_lens(IdentifyResult* r) { return r->lens; }
+
+EMSCRIPTEN_KEEPALIVE
+const char* identify_result_datetime_original(IdentifyResult* r) { return r->datetime_original; }
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t identify_result_iso(IdentifyResult* r) { return r->iso_speed; }
+
+EMSCRIPTEN_KEEPALIVE
+float identify_result_focal(IdentifyResult* r) { return r->focal_len; }
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t identify_result_width(IdentifyResult* r) { return r->width; }
+
+EMSCRIPTEN_KEEPALIVE
+uint32_t identify_result_height(IdentifyResult* r) { return r->height; }
+
+EMSCRIPTEN_KEEPALIVE
+int identify_result_flip(IdentifyResult* r) { return r->flip; }
+
+EMSCRIPTEN_KEEPALIVE
+int identify_result_error_code(IdentifyResult* r) { return r->error_code; }
+
+EMSCRIPTEN_KEEPALIVE
+void free_identify(IdentifyResult* r) {
+    if (!r) return;
     delete r;
 }
 

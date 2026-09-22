@@ -1,5 +1,5 @@
 const DB_NAME = 'candela-catalog';
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 
 export function openCatalogDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -40,6 +40,14 @@ export function openCatalogDb(): Promise<IDBDatabase> {
         // is a content check, not an invalidation protocol (see
         // catalog/thumbnails.ts). The camera image stays in `thumbnails`.
         db.createObjectStore('editedThumbnails', { keyPath: 'fileId' });
+      }
+
+      if (event.oldVersion < 6) {
+        // IPTC metadata presets (LrC's "stamp my copyright on every shoot").
+        // Unlike keywords -- whose list is derived from file rows (see
+        // keywords.ts) -- a preset exists before any photo carries it, so it
+        // needs its own store. Rows: { id, name, fields } (iptc.ts).
+        db.createObjectStore('metadataPresets', { keyPath: 'id' });
       }
     };
 

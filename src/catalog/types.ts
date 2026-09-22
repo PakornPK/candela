@@ -1,3 +1,5 @@
+import type { IptcFields } from './iptc';
+
 export interface FolderRecord {
   id: number;
   handle: FileSystemDirectoryHandle;
@@ -18,6 +20,36 @@ export interface FileRecord {
   flag?: boolean; // true = picked, false = rejected; absent = unflagged
   rating?: number; // 1..5 stars, absent = unrated
   color?: number; // 1..4 red/yellow/green/blue, absent = none
+  // Keywords (LrC's third organization axis, after folders and collections).
+  // Flat per-file list; the catalog-wide keyword LIST is derived by scanning
+  // files rather than kept in its own store -- one source of truth, so a
+  // rename/delete can never desync a registry from the photos it claims.
+  keywords?: string[];
+  // Editable IPTC metadata (title/caption/copyright/...), stored whole under
+  // ONE key for the same schemaless-optional-field reason as the marks above:
+  // one object means a partial update can never tear a half-written record,
+  // and backup/restore carries one value (see catalog/iptc.ts mergeIptc).
+  iptc?: IptcFields;
+  // EXIF captured at import (LibRaw's identify() pass, no Bayer decode).
+  // Names match the readers that already existed in smartCollections.ts and
+  // main.ts's search filter -- both read `cameraModel`/`lensModel`, and
+  // nothing ever wrote them, so camera/lens search and any camera- or
+  // lens-based smart collection silently matched zero photos.
+  cameraModel?: string; // normalized "MAKE MODEL", e.g. "Fujifilm X100V"
+  lensModel?: string;
+  iso?: number;
+  focalLength?: number; // mm
+  // Capture time in ms epoch from EXIF DateTimeOriginal. Sorting and any date
+  // rule must use THIS, not `lastModified` -- the latter is when the file was
+  // copied onto the disk, which for an imported archive is one ingest date
+  // for a decade of photos.
+  dateTaken?: number;
+  // Set when a stored handle can no longer resolve its file (moved/renamed
+  // outside the app, or the volume went away). Edits/ratings live in this
+  // record, not the file, so a missing photo keeps everything and relinking
+  // restores the look -- the badge exists to make that state visible instead
+  // of showing a stale thumbnail forever. Cleared on a successful read.
+  missing?: boolean;
 }
 
 // The tone curve op has two shapes -- LrC's "Adjust:" modes. `region` is the

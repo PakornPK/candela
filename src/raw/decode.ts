@@ -1,4 +1,5 @@
 import { getLibRawModule } from './librawModule';
+import type { ExifIdentify } from './exif';
 
 // LibRaw's LibRaw::COLOR() return values, matched to wrapper.cpp's packing:
 // 0=R, 1=G, 2=B, 3=G (second green in a Bayer quad).
@@ -24,6 +25,13 @@ export class DecodeError extends Error {
   constructor(public readonly code: number) {
     super(`LibRaw decode failed with code ${code}`);
     this.name = 'DecodeError';
+  }
+}
+
+export class IdentifyError extends Error {
+  constructor(public readonly code: number) {
+    super(`LibRaw identify failed with code ${code}`);
+    this.name = 'IdentifyError';
   }
 }
 
@@ -239,4 +247,97 @@ export async function decode(fileBytes: ArrayBuffer): Promise<DecodedRaw> {
     make,
     model,
   };
+}
+
+// Sentinel IdentifyError code for a stale cached wasm blob that predates the
+// identify() export (the browser HTTP cache can serve the previous
+// libraw.wasm after a deploy). Deliberately outside LibRaw's code range (all
+// <= 0 but >= -100) and clear of the wrapper's own -1000/-1001 and decode's
+// -1002/-1003 so callers can tell "wasm too old" from "file unreadable"
+// without guessing -- import.ts treats both identically (skip EXIF), but a
+// console diagnostic naming the cause is worth the one constant.
+export const IDENTIFY_STALE_WASM_CODE = -1005;
+
+// Identify-only EXIF read: wrapper.cpp's identify() runs open_buffer()
+// (LibRaw's full EXIF parse) WITHOUT unpacking the Bayer grid -- a full
+// decode() costs ~1.6s per 26MP file, which across a 10,000-file import
+// would add hours for data that's a few hundred bytes per file. Catalog
+// import is the only caller today (see src/catalog/import.ts).
+//
+// Every failure -- unreadable file (LibRaw code), malloc refused (-1003),
+// struct alloc failed (-1002), stale blob without the export (-1005) --
+// surfaces as IdentifyError so the single try/catch in import.ts can cover
+// "no EXIF for this row" uniformly.
+export async function identify(fileBytes: ArrayBuffer): Promise<ExifIdentify> {
+  const module = await getLibRawModule();
+  const bytes = new Uint8Array(fileBytes);
+
+  const inputPtr = module._malloc(bytes.length);
+  // _malloc returns 0 on failure rather than throwing; writing through a
+  // null pointer via HEAPU8.set would corrupt address 0 instead of failing
+  // cleanly, so this must be checked before the write. Mirrors decode().
+  if (inputPtr === 0) {
+    throw new IdentifyError(-1003);
+  }
+  module.HEAPU8.set(bytes, inputPtr);
+
+  // A stale cached wasm blob has no `identify` export: ccall's lookup
+  // returns undefined and the call throws a raw TypeError (the exact shape
+  // decode.ts guards for decode_result_flip with a catch-to-default). Here
+  // the whole feature is the new export, so there is nothing to default to
+  // -- convert it to a typed IdentifyError instead of leaking a TypeError
+  // past the "identify only ever throws IdentifyError" contract.
+  let resultPtr: number;
+  try {
+    resultPtr = module.ccall('identify', 'number', ['number', 'number'], [inputPtr, bytes.length]);
+  } catch {
+    module._free(inputPtr);
+    throw new IdentifyError(IDENTIFY_STALE_WASM_CODE);
+  }
+  module._free(inputPtr);
+
+  // identify() returns null (0) only when the IdentifyResult allocation
+  // itself failed -- nothing to free, no error_code to read. Mirrors decode().
+  if (resultPtr === 0) {
+    throw new IdentifyError(-1002);
+  }
+
+  let exif: ExifIdentify;
+  try {
+    const errorCode = module.ccall('identify_result_error_code', 'number', ['number'], [resultPtr]);
+    if (errorCode !== 0) {
+      module.ccall('free_identify', null, ['number'], [resultPtr]);
+      throw new IdentifyError(errorCode);
+    }
+    // 'string' returns copy the struct's fixed char buffers out via the
+    // glue's UTF8ToString (see librawModule.ts contract); empty C string
+    // -> '', never null/undefined.
+    exif = {
+      make: module.ccall('identify_result_make', 'string', ['number'], [resultPtr]),
+      model: module.ccall('identify_result_model', 'string', ['number'], [resultPtr]),
+      lens: module.ccall('identify_result_lens', 'string', ['number'], [resultPtr]),
+      datetimeOriginal: module.ccall('identify_result_datetime_original', 'string', ['number'], [resultPtr]),
+      iso: module.ccall('identify_result_iso', 'number', ['number'], [resultPtr]),
+      focalLength: module.ccall('identify_result_focal', 'number', ['number'], [resultPtr]),
+      width: module.ccall('identify_result_width', 'number', ['number'], [resultPtr]),
+      height: module.ccall('identify_result_height', 'number', ['number'], [resultPtr]),
+      flip: module.ccall('identify_result_flip', 'number', ['number'], [resultPtr]),
+    };
+  } catch (err) {
+    // A mid-list getter missing from a partial/stale blob throws TypeError
+    // after resultPtr is live; free what we can (defensively -- a stale
+    // blob may lack free_identify too) so one import doesn't leak structs.
+    if (!(err instanceof IdentifyError)) {
+      try {
+        module.ccall('free_identify', null, ['number'], [resultPtr]);
+      } catch {
+        // nothing freeable in a blob that predates the whole API
+      }
+      throw new IdentifyError(IDENTIFY_STALE_WASM_CODE);
+    }
+    throw err;
+  }
+
+  module.ccall('free_identify', null, ['number'], [resultPtr]);
+  return exif;
 }
