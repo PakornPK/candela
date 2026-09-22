@@ -1,5 +1,5 @@
 const DB_NAME = 'candela-catalog';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 
 export function openCatalogDb(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
@@ -32,6 +32,14 @@ export function openCatalogDb(): Promise<IDBDatabase> {
         db.createObjectStore('collections', { keyPath: 'id', autoIncrement: true });
         // Smart collections: auto-updating based on criteria.
         db.createObjectStore('smartCollections', { keyPath: 'id', autoIncrement: true });
+      }
+
+      if (event.oldVersion < 5) {
+        // Developed-thumbnail renders: { fileId, blob, digest, renderedAt }.
+        // `digest` fingerprints the op chain the render shows, so freshness
+        // is a content check, not an invalidation protocol (see
+        // catalog/thumbnails.ts). The camera image stays in `thumbnails`.
+        db.createObjectStore('editedThumbnails', { keyPath: 'fileId' });
       }
     };
 

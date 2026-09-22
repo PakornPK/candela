@@ -4,6 +4,7 @@ import blitShader from '../shaders/blit.wgsl?raw';
 import export16Shader from '../shaders/export16.wgsl?raw';
 import downscaleShader from '../shaders/downscale.wgsl?raw';
 import { packCfa6, shiftCfa6 } from './uniforms';
+import { orientationFromFlip, flippedDims, remapCfa6 } from './orient';
 import { OP_RENDERERS, presentOpIndices, setAsShotGains, setCameraColorMatrix, setCameraXyz, setImageSize } from './ops';
 import { cropRegion } from './crop';
 import { maskDims } from './dodge';
@@ -47,6 +48,9 @@ export class Pipeline {
 
   private readonly levelsBuffer: GPUBuffer;
   private readonly cfaBuffer: GPUBuffer;
+  // Orientation uniform for the unpack (normalize) pass: the flip bit flags
+  // + the effective-area rect inside the raw grid. See unpack.wgsl.
+  private readonly orientationBuffer: GPUBuffer;
   // Blit uniforms (blit.wgsl binding 2): the crop mask fraction the blit
   // samples. The canvas always shows the full texture (window view = crop +
   // bars) so its buffer holds (1,1) forever; the histogram/export blits use a
@@ -156,6 +160,9 @@ export class Pipeline {
     });
 
     this.levelsBuffer = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
+    // 8 x u32 = 32 bytes: {swap, flipY, flipX, _pad, srcLeft, srcTop, srcWidth, srcHeight}
+    // -- matches the Orientation struct in unpack.wgsl.
+    this.orientationBuffer = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
     // 9 x vec4<u32> = 144 bytes -- the 6x6 CFA, one color per component
     // (packCfa6 emits 36 u32s filling all 144 bytes).
     this.cfaBuffer = device.createBuffer({ size: 144, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
@@ -255,28 +262,53 @@ export class Pipeline {
     // raw_width/raw_height include sensor margins (Fuji X100V: 6384x4182 buffer,
     // 6240x4160 real); rendering the full buffer shows the unused margin as a
     // dark column -- the tone's black-floor lift turns the zeros into a visible
-    // near-black bar down the right edge. The crop happens at the bayer upload:
-    // the texture IS the effective area, so every downstream pass, the histogram
-    // and the canvas blit are auto-cropped. No shader changes.
+    // near-black bar down the right edge.
+    //
+    // ORIENTATION lives in the normalize (unpack) pass, not at upload: the bayer
+    // texture keeps the FULL raw grid (upload stays a plain sub-rect copy, zero
+    // CPU work), and the unpack pass reads the effective-area rect
+    // [leftMargin, topMargin, effW, effH] and scatter-writes black/white-level
+    // normalized values into a flipped-space output texture (outW x outH =
+    // effW/effH transposed when flip & 4). Flip composes AFTER the effective
+    // crop, matching LibRaw's own order (raw2image/copy_bayer crops by margins,
+    // the flip applies at output gather -- dcraw_process interpolates the
+    // cropped sensor grid before flip_index writers).
+    //
+    // Why normalize and not demosaic.wgsl: every downstream consumer (op
+    // chain, canvas blit, histogram, exportImage, readDisplayRegion,
+    // offscreen renderer, main.ts canvas sizing) reads the normalized/
+    // demosaiced textures, and if the flip happens at normalize ALL of them
+    // are automatically portrait -- zero changes, one source of truth. The
+    // alternative (scatter inside demosaic's read) would need the CFA
+    // remap inside the shader's ring/cross sampling AND a second mapping
+    // for its own output coords; doing the index math once, on the scalar
+    // pass, keeps demosaic orientation-agnostic. The only orientation
+    // metadata demosaic still needs is the 6x6 CFA, remapped ONCE here in
+    // JS (36 bytes = metadata, the same CPU-legal standing as packCfa6).
     const effW = raw.effectiveWidth ?? raw.width;
     const effH = raw.effectiveHeight ?? raw.height;
     const cropLeft = raw.leftMargin ?? 0;
     const cropTop = raw.topMargin ?? 0;
-    const size = [effW, effH];
+    const flip = raw.flip ?? 0;
+    const [outW, outH] = flippedDims(flip, effW, effH);
+    const size = [outW, outH];
 
+    // The bayer texture is the FULL raw grid (not the effective crop): the
+    // upload stays a straight whole-buffer copy (writeTexture with the raw
+    // row pitch), and the unpack pass crops to the effective rect by only
+    // normalizing texels inside it. A rotated file (flip & 4) can't express
+    // its flipped layout as an upload sub-rect anyway -- the transpose IS
+    // the normalize pass's scatter now.
     this.bayerTexture = this.device.createTexture({
-      size,
+      size: [raw.width, raw.height],
       format: 'r16uint',
       usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     });
-    // Sub-rect copy: the row stride is the FULL raw row width and the data
-    // starts at the crop origin, so only the effective area lands in the
-    // texture (writeTexture reads rows bytesPerRow apart from byte 0 of data).
     this.device.queue.writeTexture(
       { texture: this.bayerTexture },
-      raw.bayerData.subarray(cropTop * raw.width + cropLeft),
+      raw.bayerData,
       { bytesPerRow: raw.width * 2 },
-      { width: effW, height: effH },
+      { width: raw.width, height: raw.height },
     );
 
     this.normalizedTexture = this.device.createTexture({
@@ -300,8 +332,9 @@ export class Pipeline {
     // The dodge/burn mask texture is created (empty) per file so its dims track
     // the loaded image; main.ts uploads the painted bytes via setDodgeMask.
     // The neutral fill is 128 (density 0) -- byte 0 would sample to density -1
-    // (full burn).
-    const [maskW, maskH] = maskDims(effW, effH);
+    // (full burn). Dims track the DISPLAY (flipped) size -- the mask is
+    // painted on the upright loupe view, which samples it in output space.
+    const [maskW, maskH] = maskDims(outW, outH);
     this.dodgeMaskTexture = this.device.createTexture({
       size: [maskW, maskH],
       format: 'r8unorm',
@@ -310,7 +343,22 @@ export class Pipeline {
     this.setDodgeMask(new Uint8Array(maskW * maskH).fill(128));
 
     this.device.queue.writeBuffer(this.levelsBuffer, 0, new Float32Array([raw.blackLevel, raw.whiteLevel, 0, 0]));
-    this.device.queue.writeBuffer(this.cfaBuffer, 0, packCfa6(shiftCfa6(raw.cfa6, cropLeft, cropTop)));
+    // Orientation uniform for the normalize pass's scatter (see unpack.wgsl).
+    const or = orientationFromFlip(flip);
+    this.device.queue.writeBuffer(this.orientationBuffer, 0, new Uint32Array([
+      or.swap, or.flipY, or.flipX, 0, cropLeft, cropTop, effW, effH,
+    ]));
+    // CFA phase + orientation, as ONE static table: shiftCfa6 re-indexes
+    // for the effective-area origin (source space), then remapCfa6 carries
+    // the pattern through the same flip mapping the normalize pass applies
+    // to pixels -- demosaic samples colorAt(output texel), so it needs the
+    // pattern in OUTPUT space (the normalized texture it reads is already
+    // flipped; transpose+mirror of the CFA lattice is what LibRaw's
+    // sensor-space demosaic + output-gather flip is equivalent to -- see
+    // orient.ts). flip=0: remapCfa6 is a no-op copy, so the unrotated path
+    // (Bayer DNG, all landscape files) feeds the exact same bytes as before.
+    const flippedCfa6 = remapCfa6(shiftCfa6(raw.cfa6, cropLeft, cropTop), flip, effW, effH);
+    this.device.queue.writeBuffer(this.cfaBuffer, 0, packCfa6(flippedCfa6));
     // Always a valid 3x3 (decode.ts fills identity when the camera has no
     // matrix). The profile op's packParams reads this via setCameraColorMatrix.
     setCameraColorMatrix(raw.colorMatrix);
@@ -322,13 +370,16 @@ export class Pipeline {
     // whiteBalance op's packParams reads this when no WB op is present.
     setAsShotGains(raw.asShotGains ?? { r: 1, g: 1, b: 1 });
     // The crop op's geometry, and the vignette/frame cropFrac it feeds, are
-    // fractions of the effective size -- module-level in ops.ts so packParams
-    // can resolve them from the current image.
-    setImageSize(effW, effH);
+    // fractions of the DISPLAY size (flipped effective area) -- module-level
+    // in ops.ts so packParams can resolve them from the current image.
+    setImageSize(outW, outH);
 
     const encoder = this.device.createCommandEncoder();
+    // Unpack iterates the SOURCE (effective sensor) rect inside the bayer
+    // texture and scatter-writes into the flipped (outW, outH) normalized
+    // texture; demosaic then works purely in output space.
     this.dispatchUnpack(encoder, effW, effH);
-    this.dispatchDemosaic(encoder, effW, effH);
+    this.dispatchDemosaic(encoder, outW, outH);
     this.device.queue.submit([encoder.finish()]);
 
     // Before the first render() the blit source is the raw demosaiced data
@@ -375,6 +426,13 @@ export class Pipeline {
       format: 'rgba16float',
       usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
     });
+    // Standard images arrive upright (the browser's imageBitmap path owns any
+    // EXIF rotation), so the orientation flip never runs for them: reset the
+    // uniform to identity (src rect = the full texture, no flags). Without
+    // this, a previous raw's flip settings would linger in the buffer --
+    // unused by loadImage itself (no unpack dispatch) but a stale-state trap
+    // for any future pass that reads it.
+    this.device.queue.writeBuffer(this.orientationBuffer, 0, new Uint32Array([0, 0, 0, 0, 0, 0, image.width, image.height]));
     this.opA = this.device.createTexture({ size, format: 'rgba16float', usage: workUsage });
     this.opB = this.device.createTexture({ size, format: 'rgba16float', usage: workUsage });
 
@@ -473,6 +531,7 @@ export class Pipeline {
         { binding: 0, resource: this.bayerTexture!.createView() },
         { binding: 1, resource: this.normalizedTexture!.createView() },
         { binding: 2, resource: { buffer: this.levelsBuffer } },
+        { binding: 3, resource: { buffer: this.orientationBuffer } },
       ],
     });
     const pass = encoder.beginComputePass();
@@ -690,6 +749,88 @@ export class Pipeline {
       console.error('[gpu] histogram readback failed:', err);
     } finally {
       this.histogramInFlight = false;
+    }
+  }
+
+  // Reads back the CURRENT display output -- the exact pixels render() last
+  // produced for the loupe -- into an ImageData capped at `longEdge`, sampling
+  // a texture-normalized region. NO op re-dispatch and no LibRaw re-decode:
+  // this is the loupe's real-time developed image, which is what the Navigator
+  // and the loupe file's developed thumbnail must show. The capture gets its
+  // own uniform buffer (a cropBlitUniform write would race with a histogram
+  // pass still executing from the previous submit) and its own
+  // texture/read-buffer pair, recreated only when the requested size changes.
+  // One capture in flight; concurrent calls return null.
+  private navTexture: GPUTexture | null = null;
+  private navReadBuffer: GPUBuffer | null = null;
+  private navUniform: GPUBuffer | null = null;
+  private navDims: [number, number] = [0, 0];
+  private navInFlight = false;
+
+  async readDisplayRegion(region: [number, number, number, number], longEdge = 512): Promise<ImageData | null> {
+    const src = this.displayTexture;
+    if (!src || this.navInFlight) return null;
+    this.navInFlight = true;
+    try {
+      const s = Math.min(1, longEdge / Math.max(src.width * region[2], src.height * region[3]));
+      const tw = Math.max(1, Math.round(src.width * region[2] * s));
+      const th = Math.max(1, Math.round(src.height * region[3] * s));
+      const bytesPerRow = Math.ceil((tw * 4) / 256) * 256;
+      if (this.navDims[0] !== tw || this.navDims[1] !== th) {
+        this.navTexture?.destroy();
+        this.navReadBuffer?.destroy();
+        this.navTexture = this.device.createTexture({
+          size: [tw, th],
+          format: 'rgba8unorm',
+          usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+        });
+        this.navReadBuffer = this.device.createBuffer({
+          size: bytesPerRow * th,
+          usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+        });
+        this.navDims = [tw, th];
+      }
+      this.navUniform ??= this.device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+      });
+      this.device.queue.writeBuffer(this.navUniform, 0, new Float32Array(region));
+      const encoder = this.device.createCommandEncoder();
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{
+          view: this.navTexture!.createView(),
+          loadOp: 'clear',
+          storeOp: 'store',
+          clearValue: { r: 0, g: 0, b: 0, a: 1 },
+        }],
+      });
+      pass.setPipeline(this.exportBlitPipeline);
+      pass.setBindGroup(0, this.device.createBindGroup({
+        layout: this.exportBlitPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: src.createView() },
+          { binding: 1, resource: this.blitSampler },
+          { binding: 2, resource: { buffer: this.navUniform } },
+        ],
+      }));
+      pass.draw(3);
+      pass.end();
+      encoder.copyTextureToBuffer(
+        { texture: this.navTexture! },
+        { buffer: this.navReadBuffer!, bytesPerRow },
+        { width: tw, height: th },
+      );
+      this.device.queue.submit([encoder.finish()]);
+      await this.navReadBuffer!.mapAsync(GPUMapMode.READ);
+      const mapped = new Uint8Array(this.navReadBuffer!.getMappedRange());
+      const out = new Uint8ClampedArray(tw * th * 4);
+      for (let row = 0; row < th; row++) {
+        out.set(mapped.subarray(row * bytesPerRow, row * bytesPerRow + tw * 4), row * tw * 4);
+      }
+      this.navReadBuffer!.unmap();
+      return new ImageData(out, tw, th);
+    } finally {
+      this.navInFlight = false;
     }
   }
 
@@ -931,6 +1072,7 @@ export class Pipeline {
     this.histogramReadBuffer.destroy();
     this.canvasBlitUniform.destroy();
     this.cropBlitUniform.destroy();
+    this.orientationBuffer.destroy();
     this.dodgeMaskTexture?.destroy();
     this.frameStrips.destroy();
     this.leakTextures.destroy();

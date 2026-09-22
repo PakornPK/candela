@@ -50,6 +50,13 @@ export interface DecodedRaw {
   blackLevel: number;
   whiteLevel: number;
   cfaPattern: string;
+  // Sensor-orientation flip code from LibRaw imgdata.sizes.flip (0..7),
+  // computed at open() from EXIF Orientation / makernote rotation. Applied
+  // GPU-side by the normalize pass (pipeline.load / unpack.wgsl) -- never
+  // CPU pixel work. 0 = render the sensor grid as-is (landscape cameras and
+  // files with no rotation metadata); 6 = EXIF "Rotate 90 CW" (the Fuji
+  // portrait sample). See src/gpu/orient.ts for the mapping semantics.
+  flip: number;
   // Full 6x6 CFA from the wrapper (one byte per position, row-major, 0=R
   // 1=G 2=B). Bayer cameras tile their 2x2 to fill it, so demosaic.wgsl can
   // always use a 6x6 lookup.
@@ -121,6 +128,16 @@ export async function decode(fileBytes: ArrayBuffer): Promise<DecodedRaw> {
   const blackLevel = module.ccall('decode_result_black_level', 'number', ['number'], [resultPtr]);
   const whiteLevel = module.ccall('decode_result_white_level', 'number', ['number'], [resultPtr]);
   const cfaPacked = module.ccall('decode_result_cfa_pattern', 'number', ['number'], [resultPtr]);
+  // sizes.flip -- present only in rebuilt wrappers; an older cached wasm blob
+  // (e.g. a stale browser HTTP cache serving the previous libraw.wasm) throws
+  // from ccall on a missing export, so default to 0 (landscape, pre-fix
+  // behaviour) rather than failing the decode outright.
+  let flip = 0;
+  try {
+    flip = module.ccall('decode_result_flip', 'number', ['number'], [resultPtr]);
+  } catch {
+    flip = 0;
+  }
   const bayerPtr = module.ccall('decode_result_bayer_ptr', 'number', ['number'], [resultPtr]);
   const cfa6Ptr = module.ccall('decode_result_cfa6', 'number', ['number'], [resultPtr]);
   const colorMatrixPtr = module.ccall('decode_result_color_matrix', 'number', ['number'], [resultPtr]);
@@ -211,6 +228,7 @@ export async function decode(fileBytes: ArrayBuffer): Promise<DecodedRaw> {
     blackLevel,
     whiteLevel,
     cfaPattern: unpackCfaPattern(cfaPacked),
+    flip,
     cfa6,
     bayerData,
     colorMatrix,

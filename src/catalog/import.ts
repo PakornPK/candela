@@ -97,8 +97,15 @@ async function upsertFile(
 
 // Opens the browser's folder picker, recursively finds every raw file
 // under it, and upserts the folder + its files into the catalog.
+// mode 'readwrite' (not 'read'): kept for existing-catalog compatibility.
+// The sidecar write-back path that motivated it was removed (Export is
+// download-only), but catalogs already hold readwrite handles and a
+// handle's grant mode cannot be changed after import -- downgrading the
+// picker would split old and new catalogs into two permission shapes for
+// no gain (the read-only escalation pain behind user report 2026-09-18:
+// both sidecar buttons did nothing -- stays impossible this way).
 export async function importFolder(db: IDBDatabase): Promise<void> {
-  const dirHandle = await window.showDirectoryPicker({ mode: 'read' });
+  const dirHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
   await importFolderFromHandle(db, dirHandle);
 }
 

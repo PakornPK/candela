@@ -9,6 +9,15 @@ import { defineConfig } from 'vitest/config';
 // ponytail: no router, so relative base has no history-API caveats here.
 export default defineConfig({
   base: './',
+  server: {
+    // Pin the dev port: the dogfood browser tab lives on localhost:5173, and
+    // a second `npm run dev` silently drifting to 5174/5175 means the tab
+    // keeps loading stale code (or nothing). Two vite instances sharing
+    // node_modules/.vite also ping-pong re-optimizations and wedge the first
+    // server, so a port collision must fail loudly instead of drifting.
+    port: 5173,
+    strictPort: true,
+  },
   test: {
     // Agent tooling drops its own node:test fixtures into .agents/.claude/
     // .hermes (untracked, not part of the app). Vitest picked them up and

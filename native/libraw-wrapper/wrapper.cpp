@@ -50,6 +50,20 @@ struct DecodeResult {
     uint32_t effective_height = 0;
     uint32_t left_margin = 0;
     uint32_t top_margin = 0;
+    // Sensor-orientation flip code (imgdata.sizes.flip, 0..7), computed by
+    // LibRaw during open_buffer()->identify() from EXIF Orientation /
+    // makernote rotation flags. Semantics (dcraw-style, applied at OUTPUT
+    // GATHER time by flip_index(), src/write/file_write.cpp:20):
+    //   flip & 4 => transpose (swap rows/cols; "rotate 90"),
+    //   flip & 2 => reverse rows (vertical mirror),
+    //   flip & 1 => reverse cols (horizontal mirror).
+    // EXIF 6 (Rotate 90 CW) yields flip=6: transpose + col-reverse.
+    // LibRaw 0.22.2 does NOT pixel-flip the bitmap anywhere (grep: no
+    // flip_image()); iheight/iwidth swap at src/utils/utils_libraw.cpp:439
+    // and the writers walk the sensor grid through flip_index(). This app
+    // renders the raw grid on the GPU, so it must apply the same mapping
+    // itself -- JS reads this and composes it into the normalize pass.
+    int flip = 0;
     uint32_t black_level = 0;
     uint32_t white_level = 0;
     // CFA pattern packed into 4 bytes of one uint32_t, most-significant byte
@@ -184,6 +198,11 @@ DecodeResult* decode(const uint8_t* file_bytes, uint32_t length) {
         result->effective_height = sz.height > 0 ? sz.height : height;
         result->left_margin = sz.left_margin > 0 ? sz.left_margin : 0;
         result->top_margin = sz.top_margin > 0 ? sz.top_margin : 0;
+        // sizes.flip is final after open_buffer (identify) -- unpack() and
+        // adjust_bl() never touch it; only raw2image_start()'s user_flip /
+        // degrees conversion (src/preprocessing/raw2image.cpp:28-41), which
+        // this wrapper never runs, would.
+        result->flip = sz.flip;
         size_t pixel_count = static_cast<size_t>(width) * height;
         if (result->data_error > pixel_count / 100) {
             result->error_code = -1004;
@@ -371,6 +390,9 @@ uint32_t decode_result_left_margin(DecodeResult* r) { return r->left_margin; }
 
 EMSCRIPTEN_KEEPALIVE
 uint32_t decode_result_top_margin(DecodeResult* r) { return r->top_margin; }
+
+EMSCRIPTEN_KEEPALIVE
+int decode_result_flip(DecodeResult* r) { return r->flip; }
 
 EMSCRIPTEN_KEEPALIVE
 uint32_t decode_result_black_level(DecodeResult* r) { return r->black_level; }

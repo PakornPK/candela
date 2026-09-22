@@ -16,6 +16,11 @@ describe('decode', () => {
     expect(result.bayerData.length).toBe(result.width * result.height);
     expect(result.whiteLevel).toBeGreaterThan(result.blackLevel);
     expect(result.cfaPattern).toMatch(/^[RGB]{4}$/);
+    // Sensor orientation: this X100V portrait shot records EXIF Orientation
+    // 6 (Rotate 90 CW); LibRaw maps it to dcraw flip=6 (transpose + row
+    // mirror -- tiff.cpp:631 "50132467"[o&7], identify.cpp:1287). The GPU
+    // normalize pass renders the flipped portrait from this.
+    expect(result.flip).toBe(6);
     // The full 6x6 CFA is always present, one byte per position.
     expect(result.cfa6.length).toBe(36);
     expect([...result.cfa6].every((c) => c === 0 || c === 1 || c === 2)).toBe(true);
@@ -119,6 +124,11 @@ describe('decode: synthetic Bayer DNG', () => {
     expect(result.effectiveHeight).toBe(48);
     expect(result.leftMargin).toBe(0);
     expect(result.topMargin).toBe(0);
+    // No rotation metadata in this synthetic DNG -> flip 0: the unrotated
+    // (landscape) path must stay byte-identical to the pre-orientation
+    // pipeline (remapCfa6 no-op, normalize scatter degenerates to the old
+    // identity copy).
+    expect(result.flip).toBe(0);
 
     // The raw strip is a smooth gradient up from black; top-left is R at
     // exactly black, the pixel to its right is G at 512 + (WHITE-BLACK)/112

@@ -6,17 +6,21 @@ import { DELTA_OP_KINDS, syncDeltaOps } from './catalog/syncOps';
 import { decodeImage, ImageDecodeError, type DecodedImage } from './raw/imageDecode';
 import { extractThumbnail } from './raw/thumbnail';
 import { cameraCalibrationKey, gainsToKelvin, gainsToTint, WB_NEUTRAL_KELVIN } from './gpu/uniforms';
+import { flippedDims } from './gpu/orient';
 import { getCameraXyz } from './gpu/ops';
 import { openCatalogDb } from './catalog/db';
 import { listFolders, listFiles } from './catalog/query';
 import { applyCullResult, setCull } from './catalog/culling';
 import { importFolder, importFolderFromHandle, isRawFileName } from './catalog/import';
 import { ensureReadPermission, queryReadPermission } from './catalog/permissions';
+import { sidecarFileName, sidecarSaveBlocker, type SidecarMode } from './catalog/sidecar';
 import { loadEditState, saveEditState } from './catalog/editsStore';
 import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
 import { parsePreset, serializePreset, PRESET_FILE_EXT } from './catalog/presetFiles';
 import { commitEdit, undo, redo, currentOps, createEditState } from './catalog/editHistory';
-import { getOrExtractThumbnail } from './catalog/thumbnails';
+import { getThumbnailBlob, getEmbeddedThumbnail, needsEditedThumbnail, saveEditedThumbnail, opDigest } from './catalog/thumbnails';
+import { OffscreenRenderer } from './gpu/offscreenRenderer';
+import { containBox, navigatorRectCss, panToNavigatorPoint, imagePointUnderCursor } from './app/navigator';
 import { buildContactSheets, CONTACT_SHEET_SIZE } from './app/contactSheet';
 import { isExposureOp, isBwOp, isCropOp, isDodgeBurnOp, isFrameOp, isGeometryOp, isGrainOp, isLightleakOp, isPresenceOp, isProfileOp, isToneCurveOp, isToneOp, isVignetteOp, isWhiteBalanceOp, type Op, type EditState, type FileRecord, type FolderRecord, type ProfileKind, type FilmStockId, type FrameStyle, type AspectPreset, type WbGains, type BwMix, type BwToneId } from './catalog/types';
 import { FILM_STOCKS } from './gpu/film';
@@ -243,6 +247,18 @@ const syncBtn = document.querySelector<HTMLButtonElement>('#sync-btn')!;
 const developSyncBtn = document.querySelector<HTMLButtonElement>('#develop-sync-btn');
 const autoAdvanceCheckbox = document.querySelector<HTMLInputElement>('#auto-advance')!;
 const footerCounts = document.querySelector<HTMLSpanElement>('#footer-counts')!;
+// Restore banner above the shared filmstrip: shown whenever developed
+// renders are failing (see failedEditRenders), clickable from any module.
+const restoreBanner = document.querySelector<HTMLDivElement>('#restore-banner')!;
+const restoreBannerText = document.querySelector<HTMLSpanElement>('#restore-banner-text')!;
+const restoreBannerBtn = document.querySelector<HTMLButtonElement>('#restore-banner-btn')!;
+// Developed-thumbnail renders that failed this session (typically: the
+// folder's read grant was lost on reload, so every offscreen re-render
+// throws). The grid silently keeps showing camera JPEGs -- the user can't
+// tell 'unedited' from 'edits exist but the preview didn't render', so the
+// footer names the degradation (user report: previews 'not updating' with
+// zero feedback). Reset on any permission transition (see openFile).
+let failedEditRenders = 0;
 const selectionInfo = document.querySelector<HTMLSpanElement>('#selection-info')!;
 const footerFilterButtons = document.querySelectorAll<HTMLButtonElement>('#footer-filters [data-minrating]');
 const bwSection = document.querySelector<HTMLDetailsElement>('#bw-section')!;
@@ -1684,6 +1700,27 @@ async function init(): Promise<void> {
     footerCounts.textContent = scope.length === scopeTotal
       ? `${scopeTotal} photo${scopeTotal === 1 ? '' : 's'}`
       : `${scope.length} of ${scopeTotal} photos`;
+    // Failed developed renders are otherwise invisible (the grid degrades to
+    // camera JPEGs, which looks intentional) -- say so, and say what fixes it.
+    // The banner above the filmstrip is the actionable half: the footer
+    // suffix only shows in Library, but a user sitting in Develop sees the
+    // same stale camera thumbs with no explanation (user report: 'ยัง render
+    // แบบกล้องอยู่'). Same counter drives both; the restore button clears it.
+    if (failedEditRenders > 0) {
+      footerCounts.textContent += ` · previews not updated`;
+      footerCounts.title =
+        `${failedEditRenders} edited preview${failedEditRenders === 1 ? '' : 's'} could not render ` +
+        `(folder access was lost after reload) -- open a photo once to re-grant access, ` +
+        `and the grid retries automatically.`;
+      const plural = failedEditRenders === 1 ? '' : 's';
+      restoreBanner.hidden = false;
+      restoreBannerText.textContent =
+        `${failedEditRenders} preview${plural} could not render — photo access was lost after reload. ` +
+        `Restore access to re-render them.`;
+    } else {
+      footerCounts.removeAttribute('title');
+      restoreBanner.hidden = true;
+    }
   }
 
   // Caches the in-flight or resolved thumbnail request per file id, so
@@ -1705,10 +1742,170 @@ async function init(): Promise<void> {
   function getThumbnail(file: FileRecord): Promise<Blob | undefined> {
     let promise = thumbnailRequests.get(file.id);
     if (!promise) {
-      promise = getOrExtractThumbnail(db, file).catch(() => undefined);
+      promise = getThumbnailBlob(db, file)
+        .then((b) => {
+          void maybeQueueDevelopedRender(file);
+          return b;
+        })
+        .catch(() => undefined);
       thumbnailRequests.set(file.id, promise);
     }
     return promise;
+  }
+
+  // ---- Developed-thumbnail render queue (footer strip, grid, contact sheet) ----
+  //
+  // When a photo's committed edits have no current render (see thumbnails.ts
+  // opDigest freshness), an offscreen pipeline renders it to a small JPEG and
+  // the cells re-point at it. Strictly serial, deduped by fileId (one render
+  // per queued edit, not per repaint), and the loupe never waits on it.
+  // gpuExclusive is set while a batch export / compare render is using the
+  // same offscreen textures -- interleaving would trash a half-used image.
+  const offscreen = new OffscreenRenderer();
+  const editRenderQueue: number[] = [];
+  let editRenderBusy = false;
+  // Files whose developed render failed THIS session (permission lost, read
+  // error). They stay in the camera-image state until a permission
+  // transition re-queues them (see openFile) -- retrying into the same
+  // 'prompt' state every scroll frame is exactly the churn this queue was
+  // built to avoid, so re-tries are event-driven, not polling.
+  const failedRenderIds = new Set<number>();
+  // Wired by the Navigator block further down: every renderOps (slider tick,
+  // commit, undo, zoom, pan) moves the navigator's view-frame AND repaints
+  // its bitmap from the loupe's own GPU output (pipeline.readDisplayRegion)
+  // -- the navigator is the real developed render, never the camera JPEG.
+  let updateNavigatorFrame: (() => void) | null = null;
+  // The digest of the ops the loupe's displayTexture currently holds (set in
+  // renderOps). Lets the thumbnail queue render a CURRENT-LOUPE file straight
+  // through the main pipeline (no second LibRaw decode, no second GPU image).
+  let loupeRenderDigest: string | null = null;
+
+  // A cell that just showed a file's thumbnail schedules the developed render
+  // if the file has edits but no current render (the thumbnail path is the
+  // one place grid/strip/contact all meet, so unopened sync targets converge
+  // without each view re-implementing it). needsEditedThumbnail cheap-outs
+  // unedited files before any GPU work; the queue dedupes by fileId.
+  async function maybeQueueDevelopedRender(file: FileRecord): Promise<void> {
+    try {
+      const state = await loadEditState(db, file.id);
+      if (await needsEditedThumbnail(db, file.id, currentOps(state), isRawFileName(file.name))) {
+        queueEditedThumbnail(file.id);
+      }
+    } catch {
+      // A broken edit row just keeps showing the camera image.
+    }
+  }
+
+  function queueEditedThumbnail(fileId: number): void {
+    if (!editRenderQueue.includes(fileId)) editRenderQueue.push(fileId);
+    void drainEditRenders();
+  }
+
+  // A permission transition (openFile's not-granted -> granted block after
+  // a reload) is the moment files become readable again, so the renders that
+  // failed on the old 'prompt' state should now converge. Re-queue exactly
+  // the recorded failures rather than queueEditedThumbnail for every file:
+  // needsEditedThumbnail over allFiles would read every edit state from IDB
+  // on a click, which is the per-click cost this whole queue avoids.
+  function retryFailedEditRenders(): void {
+    if (!failedRenderIds.size) return;
+    for (const fileId of failedRenderIds) {
+      if (!editRenderQueue.includes(fileId)) editRenderQueue.push(fileId);
+    }
+    // Cleared up front: if the retry fails again, drainEditRenders re-marks
+    // (and re-counts) the file, so the counter can't double-count.
+    failedRenderIds.clear();
+    failedEditRenders = 0;
+    updateFooter();
+    void drainEditRenders();
+  }
+
+  async function drainEditRenders(): Promise<void> {
+    if (editRenderBusy) return;
+    editRenderBusy = true;
+    try {
+      while (editRenderQueue.length) {
+        const fileId = editRenderQueue.shift()!;
+        const record = allFiles.find((f) => f.id === fileId);
+        if (!record) continue;
+        try {
+          const state = await loadEditState(db, fileId);
+          const ops = currentOps(state);
+          const digest = opDigest(ops);
+          if (!(await needsEditedThumbnail(db, fileId, ops, isRawFileName(record.name)))) continue;
+          let blob: Blob;
+          if (fileId === loadedFileId && digest === loupeRenderDigest) {
+            // The main pipeline already holds THIS file's pixels with exactly
+            // these ops: export the thumbnail through it (box pyramid to
+            // 320px, no re-decode, no second 58MP texture set).
+            blob = await pipeline.exportImage(ops, { format: 'jpeg', bitDepth: 8, longEdge: 320 });
+          } else {
+            blob = await offscreen.renderThumbnail(record, ops, 320);
+          }
+          await saveEditedThumbnail(db, fileId, blob, digest);
+          // A previously-failed file that now renders drops off the failure
+          // list (and the footer suffix, once the last one clears).
+          if (failedRenderIds.delete(fileId)) {
+            failedEditRenders--;
+            updateFooter();
+          }
+          // Bust this file's cache entry and re-point whichever cells show it.
+          thumbnailRequests.delete(fileId);
+          const fresh = await getThumbnail(record);
+          if (fresh) swapThumbnailImg(fileId, fresh);
+        } catch (err) {
+          // A render failure (permission lost, decode error) leaves the
+          // camera image showing -- degraded, never blank. Counted and
+          // surfaced in the footer: silent degradation is what made the
+          // user think edits were lost (Bug B). Remembered in
+          // failedRenderIds so the next permission grant re-queues exactly
+          // these files instead of rescanning allFiles.
+          console.warn(`[thumb] developed render failed for file ${fileId}:`, err);
+          if (!failedRenderIds.has(fileId)) {
+            failedRenderIds.add(fileId);
+            failedEditRenders++;
+            updateFooter();
+          }
+        }
+        // Yield between renders so the loupe keeps its frame budget even
+        // while a sync batch is draining.
+        await new Promise((r) => setTimeout(r));
+      }
+    } finally {
+      editRenderBusy = false;
+    }
+  }
+
+  // Re-points every on-screen <img> for this fileId (grid cell, strip cell,
+  // contact frame) at a new blob -- without rebuilding any virtualized view
+  // (a rebuild under the user's scroll position is the 'grid jumps' jank).
+  function swapThumbnailImg(fileId: number, blob: Blob): void {
+    const url = URL.createObjectURL(blob);
+    const imgs = document.querySelectorAll<HTMLImageElement>(
+      `.catalog-cell[data-file-id="${fileId}"] img, .filmstrip-cell[data-file-id="${fileId}"] img, .contact-frame[data-file-id="${fileId}"] img`,
+    );
+    if (!imgs.length) { URL.revokeObjectURL(url); return; }
+    let pending = imgs.length;
+    for (const img of imgs) {
+      const old = img.src;
+      img.src = url;
+      img.addEventListener('load', () => {
+        if (old) URL.revokeObjectURL(old);
+        if (--pending === 0) setTimeout(() => URL.revokeObjectURL(url), 0);
+      }, { once: true });
+      img.addEventListener('error', () => {
+        img.src = old; // keep showing the camera image on a bad render
+        if (--pending === 0) URL.revokeObjectURL(url);
+      }, { once: true });
+    }
+  }
+
+  // Every edit commit funnels through here instead of saveEditState directly,
+  // so the strip/grid can never drift from the loupe: each persist schedules
+  // this file's developed thumbnail render (a no-op when the ops are unchanged).
+  async function persistEdits(fileId: number, state: EditState): Promise<void> {
+    await saveEditState(db, fileId, state);
+    queueEditedThumbnail(fileId);
   }
 
   function renderOps(ops: Op[]): void {
@@ -1752,6 +1949,8 @@ async function init(): Promise<void> {
     }
     // Update zoom indicator after every render.
     updateZoomIndicator();
+    loupeRenderDigest = opDigest(ops);
+    updateNavigatorFrame?.(); // frame + bitmap follow the loupe in real time
     
     if (showFps) {
       perfMarks.renderEnd = performance.now();
@@ -2135,7 +2334,7 @@ async function init(): Promise<void> {
         applyOpsToSliders(opsAtCursor, currentCameraKey());
         renderOps(opsAtCursor);
         renderHistory();
-        saveEditState(db, currentFileId!, currentEditState).catch((err) =>
+        persistEdits(currentFileId!, currentEditState).catch((err) =>
           showError("Couldn't save your edit.", errorDetail(err)),
         );
       });
@@ -2188,6 +2387,9 @@ async function init(): Promise<void> {
       // settled, every later click skips straight to decoding.
       if (!alreadyGranted) {
         thumbnailRequests.clear();
+        // Any developed renders that failed while access was gone get a
+        // second chance now (and the footer suffix clears on success).
+        retryFailedEditRenders();
         renderVisibleRows();
       }
 
@@ -2198,6 +2400,10 @@ async function init(): Promise<void> {
       currentEditState = editState;
       const ops = currentOps(editState);
       applyOpsToSliders(ops, currentCameraKey());
+      // Camera JPEG export is a RAW-only source (a JPEG's embedded
+      // preview IS the file); with the shared toggle the rule shows up
+      // as a disabled Export button + tooltip instead of a hidden row.
+      updateExportSourceState();
 
       // The full raw decode is the slow synchronous LibRaw step (~1.6s), so
       // it runs only when the image is about to be shown -- i.e. the loupe is
@@ -2213,6 +2419,9 @@ async function init(): Promise<void> {
           // before the first render, for a fresh file.
           applyOpsToSliders(currentOps(currentEditState), currentCameraKey());
           renderOps(currentOps(currentEditState));
+          // Edited export unlocks now that the loupe holds pixels
+          // (the earlier updateExportSourceState ran pre-decode).
+          updateExportSourceState();
         }
       } else {
         lastDecoded = null;
@@ -2357,8 +2566,14 @@ async function init(): Promise<void> {
         }
         if (requestId !== openRequestId) return false; // superseded during decode
         hidePreview();
-        canvas.width = decoded.effectiveWidth ?? decoded.width;
-        canvas.height = decoded.effectiveHeight ?? decoded.height;
+        // Display size = the effective area after the sensor-orientation flip
+        // (pipeline.load's normalize pass renders flipped; the canvas buffer,
+        // the CPU brush mask and lastDecoded must all agree on it, or a
+        // portrait RAF gets a landscape loupe with a squished mask).
+        const dispW = flippedDims(decoded.flip, decoded.effectiveWidth ?? decoded.width, decoded.effectiveHeight ?? decoded.height)[0];
+        const dispH = flippedDims(decoded.flip, decoded.effectiveWidth ?? decoded.width, decoded.effectiveHeight ?? decoded.height)[1];
+        canvas.width = dispW;
+        canvas.height = dispH;
         // Re-create the WebGPU surface at the just-set size. Chrome 151 ties the
         // drawing buffer to the canvas size at configure() time -- a configure
         // left over from a different-size file would leave the blit target
@@ -2368,7 +2583,7 @@ async function init(): Promise<void> {
         // Fresh CPU brush mask at this file's capped dims (the GPU mask texture
         // was just created empty in load()). applyOpsToSliders repopulates it
         // from the loaded edit if this photo has a dodgeBurn op.
-        resizePaintMask(decoded.effectiveWidth ?? decoded.width, decoded.effectiveHeight ?? decoded.height);
+        resizePaintMask(dispW, dispH);
         // Per-photo grain seed -- deterministic per file, different between
         // photos (two takes get different grain; a re-open gets the same).
         setGrainSeed(seedFromPath(record.path));
@@ -2396,8 +2611,8 @@ async function init(): Promise<void> {
         }
         loadedFileId = record.id;
         lastDecoded = {
-          width: decoded.effectiveWidth ?? decoded.width,
-          height: decoded.effectiveHeight ?? decoded.height,
+          width: dispW,
+          height: dispH,
           cameraMeta: decoded.cameraMeta,
           make: decoded.make,
           model: decoded.model,
@@ -2510,7 +2725,7 @@ async function init(): Promise<void> {
     if (currentFileId === null || !currentEditState) return;
     currentEditState = commitEdit(currentEditState, currentOpsFromSliders());
     try {
-      await saveEditState(db, currentFileId, currentEditState);
+      await persistEdits(currentFileId, currentEditState);
     } catch (err) {
       showError("Couldn't save your edit.", errorDetail(err));
     }
@@ -2525,7 +2740,7 @@ async function init(): Promise<void> {
     renderOps(ops);
     renderHistory();
     try {
-      await saveEditState(db, currentFileId, currentEditState);
+      await persistEdits(currentFileId, currentEditState);
     } catch (err) {
       showError("Couldn't save your undo/redo.", errorDetail(err));
     }
@@ -2852,32 +3067,111 @@ async function init(): Promise<void> {
   }
   applyExportPreset();
 
+  // ---- Export source toggle (Edited render vs Camera JPEG) ----
+  // The Edited/Camera JPEG row picks WHAT Export saves: the developed
+  // render through the existing pipeline path, or the camera's embedded
+  // JPEG extracted verbatim out of the RAW (what RAW+JPEG cameras write
+  // beside the raw file). The standalone 'Save JPEG next to file' button
+  // and its folder-write-back path were removed (user decision 2026-09-19:
+  // one Export control, not two look-alike save buttons); camera mode
+  // downloads `${base}-camera.jpg` via the browser like any export.
+
+  const sidecarToggle = document.querySelector<HTMLInputElement>('#sidecar-mode-toggle')!;
+  const sidecarOptions = document.querySelectorAll<HTMLElement>('#sidecar-row .sidecar-option');
+  const exportBtnTitle = exportButton.title;
+
+  function currentSidecarMode(): SidecarMode {
+    return sidecarToggle.checked ? 'camera' : 'edited';
+  }
+
+  // Single source of truth for the toggle's active label and the Export
+  // button's enabled/blocker state, re-run on toggle, selection (openFile),
+  // Develop entry, and after each export. The old UI HID the camera row for
+  // JPEGs; with one shared toggle it can't hide, so Camera-on-JPEG disables
+  // Export with the reason as its tooltip (a hidden active toggle state is
+  // unreachable UI). sidecarSaveBlocker encodes both rules and is unit-
+  // tested; 'edited' returns the same 'open the photo in Develop first'
+  // copy the Export guard has always shown.
+  function updateExportSourceState(): void {
+    const mode = currentSidecarMode();
+    for (const opt of sidecarOptions) {
+      opt.classList.toggle('active', opt.dataset.option === mode);
+    }
+    const record = allFiles.find((f) => f.id === currentFileId) ?? null;
+    const blocker = record
+      ? sidecarSaveBlocker(mode, isRawFileName(record.name), loadedFileId === record.id)
+      : 'Select a photo first';
+    exportButton.disabled = !record || !!blocker;
+    exportButton.title = blocker ?? exportBtnTitle;
+  }
+
+  sidecarToggle.addEventListener('change', updateExportSourceState);
+  // Clicking an option LABEL sets that mode directly (preventDefault stops
+  // the wrapping label's flip-the-checkbox activation): with a toggle
+  // default, clicking the already-active side would jump the user to the
+  // other mode -- surprising right next to the Export button.
+  for (const opt of sidecarOptions) {
+    opt.addEventListener('click', (e) => {
+      e.preventDefault();
+      sidecarToggle.checked = opt.dataset.option === 'camera';
+      sidecarToggle.dispatchEvent(new Event('change'));
+    });
+  }
+  // Initial paint: with no selection Export is disabled ('Select a photo
+  // first'), and the Edited option is lit as the default mode.
+  updateExportSourceState();
+
   exportButton.addEventListener('click', async () => {
     if (currentFileId === null) return;
-    if (loadedFileId !== currentFileId) {
+    const record = allFiles.find((f) => f.id === currentFileId);
+    if (!record) return;
+    const mode = currentSidecarMode();
+    // The decoded-pixels guard applies to EDITED exports only: the camera
+    // path reads the file bytes directly, so any selected RAW can export
+    // its embedded JPEG without Develop having opened it. updateExportSource-
+    //State() already disables the button accordingly; this is the belt for
+    // the race where selection changed since the last paint.
+    if (mode === 'edited' && loadedFileId !== currentFileId) {
       showError("Nothing to export yet — open the photo in Develop first (press E), then export.");
       return;
     }
-    const format = exportFormat.value as 'jpeg' | 'png' | 'tiff';
-    const bitDepth = exportBitDepth.value === '16' ? 16 : 8;
-    const longEdge = exportSize.value === 'original' ? null : Number(exportSize.value);
     exportButton.disabled = true;
     try {
-      syncDodgeMaskToGPU();
-      const blob = await pipeline.exportImage(currentOpsFromSliders(), { format, bitDepth, longEdge });
-      const record = allFiles.find((f) => f.id === currentFileId);
-      const base = record?.name.replace(/\.[^.]+$/, '') ?? 'export';
-      const ext = format === 'jpeg' ? 'jpg' : format;
+      let blob: Blob;
+      let download: string;
+      if (mode === 'camera') {
+        try {
+          blob = await extractThumbnail(await (await record.handle.getFile()).arrayBuffer());
+        } catch (err) {
+          showError(
+            "Couldn't extract the camera JPEG — this RAW may have no embedded JPEG.",
+            errorDetail(err),
+          );
+          return;
+        }
+        download = sidecarFileName(record.name, 'camera');
+      } else {
+        const format = exportFormat.value as 'jpeg' | 'png' | 'tiff';
+        const bitDepth = exportBitDepth.value === '16' ? 16 : 8;
+        const longEdge = exportSize.value === 'original' ? null : Number(exportSize.value);
+        syncDodgeMaskToGPU();
+        blob = await pipeline.exportImage(currentOpsFromSliders(), { format, bitDepth, longEdge });
+        const base = record.name.replace(/\.[^.]+$/, '') ?? 'export';
+        const ext = format === 'jpeg' ? 'jpg' : format;
+        download = `${base}.${ext}`;
+      }
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = `${base}.${ext}`;
+      a.download = download;
       a.click();
       URL.revokeObjectURL(url);
     } catch (err) {
       showError('Export failed.', errorDetail(err));
     } finally {
-      exportButton.disabled = false;
+      // Re-derive disabled/title from the single gate (a bare
+      // exportButton.disabled = false here would override the blocker).
+      updateExportSourceState();
     }
   });
 
@@ -2995,12 +3289,15 @@ async function init(): Promise<void> {
   batchExportBtn.addEventListener('click', async () => {
     const selectedIds = getState().selectedIds;
     if (selectedIds.length < 2) return;
-    
+
+    // The Edited/Camera JPEG toggle decides what every file in the batch
+    // becomes (user decision 2026-09-19, same as single Export).
+    const cameraMode = currentSidecarMode() === 'camera';
     const format = exportFormat.value as 'jpeg' | 'png' | 'tiff';
     const bitDepth = exportBitDepth.value === '16' ? 16 : 8;
     const longEdge = exportSize.value === 'original' ? null : Number(exportSize.value);
     const ext = format === 'jpeg' ? 'jpg' : format;
-    
+
     // Ask user for output directory
     try {
       const dirHandle = await (window as any).showDirectoryPicker({ mode: 'readwrite' });
@@ -3027,30 +3324,44 @@ async function init(): Promise<void> {
         exportProgressText.textContent = `Exporting ${completed + 1}/${total}: ${record.name}`;
         
         try {
-          // Load the file into pipeline
+          // Read the file bytes either way; the toggle decides what they
+          // become.
           const file = await record.handle.getFile();
           const fileBytes = await file.arrayBuffer();
-          
-          let decoded;
-          if (isRawFileName(record.name)) {
-            decoded = await decode(fileBytes);
-            pipeline.load(decoded);
+
+          let blob: Blob;
+          let outName: string;
+          if (cameraMode) {
+            // Camera's embedded JPEG verbatim: no decode, no GPU work.
+            // Non-RAW files have no embedded JPEG and throw here -- they
+            // fall through the per-file catch like any failed file.
+            blob = await extractThumbnail(fileBytes);
+            outName = sidecarFileName(record.name, 'camera');
           } else {
-            decoded = await decodeImage(fileBytes);
-            pipeline.loadImage(decoded);
+            // Load the file into pipeline
+            let decoded;
+            if (isRawFileName(record.name)) {
+              decoded = await decode(fileBytes);
+              pipeline.load(decoded);
+            } else {
+              decoded = await decodeImage(fileBytes);
+              pipeline.loadImage(decoded);
+            }
+
+            // Load edit state
+            const editState = await loadEditState(db, fileId);
+            const ops = currentOps(editState);
+
+            // Export
+            syncDodgeMaskToGPU();
+            blob = await pipeline.exportImage(ops, { format, bitDepth, longEdge });
+
+            // Save to directory
+            const base = record.name.replace(/\.[^.]+$/, '');
+            outName = `${base}.${ext}`;
           }
-          
-          // Load edit state
-          const editState = await loadEditState(db, fileId);
-          const ops = currentOps(editState);
-          
-          // Export
-          syncDodgeMaskToGPU();
-          const blob = await pipeline.exportImage(ops, { format, bitDepth, longEdge });
-          
-          // Save to directory
-          const base = record.name.replace(/\.[^.]+$/, '');
-          const fileHandle = await dirHandle.getFileHandle(`${base}.${ext}`, { create: true });
+
+          const fileHandle = await dirHandle.getFileHandle(outName, { create: true });
           const writable = await fileHandle.createWritable();
           await writable.write(blob);
           await writable.close();
@@ -3078,7 +3389,9 @@ async function init(): Promise<void> {
       }
     } finally {
       batchExportBtn.disabled = false;
-      exportButton.disabled = false;
+      // Re-derive the Export gate from its single source of truth instead
+      // of forcing .disabled = false (the selection may still be blocked).
+      updateExportSourceState();
       setTimeout(() => {
         exportProgress.style.display = 'none';
       }, 3000);
@@ -3102,7 +3415,7 @@ async function init(): Promise<void> {
     currentEditState = createEditState();
     renderHistory();
     try {
-      await saveEditState(db, currentFileId, currentEditState);
+      await persistEdits(currentFileId, currentEditState);
     } catch (err) {
       showError("Couldn't save the reset.", errorDetail(err));
     }
@@ -3187,14 +3500,14 @@ async function init(): Promise<void> {
     const newZoom = Math.max(1, Math.min(8, viewState.zoom * zoomFactor));
     if (newZoom === viewState.zoom) return;
 
-    // Cursor position in normalized image coordinates.
+    // Cursor position in normalized image coordinates (navigator.ts owns the
+    // canvas->image mapping, shared with the navigator's frame math).
     const rect = canvas.getBoundingClientRect();
-    const cursorX = (e.clientX - rect.left) / rect.width;
-    const cursorY = (e.clientY - rect.top) / rect.height;
-    // Convert canvas coords to image coords (account for current view).
-    const [vx, vy, vw, vh] = viewStateToCropFrac(viewState);
-    const imgX = vx + cursorX * vw;
-    const imgY = vy + cursorY * vh;
+    const [imgX, imgY] = imagePointUnderCursor(
+      viewState,
+      (e.clientX - rect.left) / rect.width,
+      (e.clientY - rect.top) / rect.height,
+    );
 
     viewState = zoomToward(viewState, imgX, imgY, newZoom);
     renderOps(currentOpsFromSliders());
@@ -3208,9 +3521,11 @@ async function init(): Promise<void> {
       viewState = defaultViewState();
     } else {
       const rect = canvas.getBoundingClientRect();
-      const [vx, vy, vw, vh] = viewStateToCropFrac(viewState);
-      const imgX = vx + ((e.clientX - rect.left) / rect.width) * vw;
-      const imgY = vy + ((e.clientY - rect.top) / rect.height) * vh;
+      const [imgX, imgY] = imagePointUnderCursor(
+        viewState,
+        (e.clientX - rect.left) / rect.width,
+        (e.clientY - rect.top) / rect.height,
+      );
       viewState = zoomToward(viewState, imgX, imgY, 2);
     }
     renderOps(currentOpsFromSliders());
@@ -3286,6 +3601,112 @@ async function init(): Promise<void> {
     viewState = { zoom: 4, panX: 0.5, panY: 0.5 }; // 2:1 = 4x on a fit view
     renderOps(currentOpsFromSliders());
   });
+
+  // ---- Navigator (LrC's) ----
+  // The whole DEVELOPED image at a glance with a rectangle marking the loupe's
+  // current view, updated real-time. Both parts read the loupe's own GPU
+  // output (pipeline.readDisplayRegion -- the exact pixels render() just made,
+  // no second decode, never the camera JPEG): the FRAME is positioned from
+  // viewState (pure CSS), the BITMAP is the latest readback, one in flight
+  // with latest-wins repaint like the histogram's slider loop. Dragging
+  // inside the box pans the loupe to that point.
+  {
+    const navBox = document.querySelector<HTMLDivElement>('#navigator')!;
+    const navCanvas = document.querySelector<HTMLCanvasElement>('#navigator-canvas')!;
+    const navFrame = document.querySelector<HTMLElement>('#navigator-frame')!;
+    const navCtx = navCanvas.getContext('2d')!;
+    // The image content box inside the letterboxed canvas (contain fit),
+    // so the bitmap and the frame agree on where the image sits.
+    const navImageBox = () => {
+      const b = containBox(
+        (lastDecoded?.width ?? 1) / (lastDecoded?.height ?? 1),
+        navCanvas.width / navCanvas.height,
+      );
+      return { x: b.x * navCanvas.width, y: b.y * navCanvas.height, w: b.w * navCanvas.width, h: b.h * navCanvas.height };
+    };
+
+    let navRenderInFlight = false;
+    let navRenderPending = false;
+
+    const repaintNavigator = async (): Promise<void> => {
+      if (navRenderInFlight) { navRenderPending = true; return; }
+      navRenderInFlight = true;
+      try {
+        do {
+          navRenderPending = false;
+          // displayTexture holds the full op-chained image (the crop is only
+          // applied at blit time), so the navigator must sample the CROP
+          // region explicitly -- the same rect exportImage uses for the
+          // developed thumbnail, keeping loupe / strip / navigator pixel-consistent.
+          const ops = currentOpsFromSliders();
+          const W = lastDecoded?.width ?? 1;
+          const H = lastDecoded?.height ?? 1;
+          const [rx, ry, rw, rh] = cropRegion(ops, W, H);
+          const px = await pipeline.readDisplayRegion([rx, ry, rw, rh], 448);
+          if (!px || (lastDecoded === null && loadedFileId === null)) continue;
+          const box = navImageBox();
+          navCtx.fillStyle = '#000';
+          navCtx.fillRect(0, 0, navCanvas.width, navCanvas.height);
+          navCtx.imageSmoothingEnabled = true;
+          navCtx.imageSmoothingQuality = 'high';
+          // putImageData can't scale, so blit the readback through a scratch
+          // canvas at the image's contain-box (letterbox stays black).
+          const scratch = document.createElement('canvas');
+          scratch.width = px.width;
+          scratch.height = px.height;
+          scratch.getContext('2d')!.putImageData(px, 0, 0);
+          navCtx.clearRect(0, 0, navCanvas.width, navCanvas.height);
+          navCtx.drawImage(scratch, box.x, box.y, box.w, box.h);
+        } while (navRenderPending);
+      } catch (err) {
+        console.warn('[navigator] readback failed:', err);
+      } finally {
+        navRenderInFlight = false;
+      }
+    };
+
+    updateNavigatorFrame = () => {
+      // Hidden while the crop workbench owns the loupe (the frame would
+      // describe the workbench's full-image rect, which is not a view) and
+      // outside Develop / before the first image loads.
+      if (getState().module !== 'develop' || cropModeActive || loadedFileId === null || lastDecoded === null) {
+        navFrame.hidden = true;
+        return;
+      }
+      const css = navigatorRectCss(viewState, lastDecoded.width / lastDecoded.height, navCanvas.width / navCanvas.height);
+      navFrame.hidden = false;
+      navFrame.style.left = `${css.left * 100}%`;
+      navFrame.style.top = `${css.top * 100}%`;
+      navFrame.style.width = `${css.width * 100}%`;
+      navFrame.style.height = `${css.height * 100}%`;
+      void repaintNavigator();
+    };
+
+    // Drag to pan: the loupe centers on the grabbed image point, live (same
+    // renderOps path as the wheel zoom -- a drag at fit zoom does nothing,
+    // like LrC where the frame already covers the image).
+    let navDragging = false;
+    const navPanTo = (e: PointerEvent) => {
+      const rect = navBox.getBoundingClientRect();
+      viewState = panToNavigatorPoint(
+        viewState,
+        (e.clientX - rect.left) / rect.width,
+        (e.clientY - rect.top) / rect.height,
+        (lastDecoded?.width ?? 1) / (lastDecoded?.height ?? 1),
+        navBox.clientWidth / navBox.clientHeight,
+      );
+      renderOps(currentOpsFromSliders());
+    };
+    navBox.addEventListener('pointerdown', (e) => {
+      if (getState().module !== 'develop' || loadedFileId === null || cropModeActive) return;
+      navDragging = true;
+      navBox.setPointerCapture(e.pointerId);
+      navPanTo(e);
+    });
+    navBox.addEventListener('pointermove', (e) => { if (navDragging) navPanTo(e); });
+    navBox.addEventListener('pointerup', () => { navDragging = false; });
+    navBox.addEventListener('pointercancel', () => { navDragging = false; });
+  }
 
   // ---- Loupe Info Overlay (Phase 3.1) ----
   // Show EXIF info when hovering top-left corner of canvas
@@ -3498,7 +3919,7 @@ async function init(): Promise<void> {
     renderOps(merged);
     renderHistory();
     try {
-      await saveEditState(db, currentFileId, currentEditState);
+      await persistEdits(currentFileId, currentEditState);
     } catch (err) {
       showError("Couldn't save the applied preset.", errorDetail(err));
     }
@@ -3535,6 +3956,17 @@ async function init(): Promise<void> {
   // min rating) -- a proofing sheet that showed frames the grid had hidden
   // would be useless for culling.
   let contactSheetIdx = 0;
+  // 'edited' = the developed render when one is current (the getThumbnail
+  // freshness rule), 'embedded' = always the camera's JPEG. The <select> in
+  // the sheet header drives both the on-screen frames and the PNG export
+  // (exportContactSheet rasterizes the same DOM, so it follows for free).
+  const contactSource = document.querySelector<HTMLSelectElement>('#contact-source')!;
+
+  function contactThumbnailFor(file: FileRecord): Promise<Blob | undefined> {
+    return contactSource.value === 'embedded'
+      ? getEmbeddedThumbnail(db, file).catch(() => undefined)
+      : getThumbnail(file);
+  }
 
   function renderContactSheet(): void {
     const scope = folderFilter !== null ? allFiles.filter((f) => f.folderId === folderFilter) : [...allFiles];
@@ -3564,6 +3996,7 @@ async function init(): Promise<void> {
       frames.slice(r, r + FRAMES_PER_STRIP).forEach((file, j) => {
         const cell = document.createElement('div');
         cell.className = 'contact-frame';
+        cell.dataset.fileId = String(file.id);
         cell.title = file.path;
         cell.addEventListener('click', () => {
           openFile(file);
@@ -3574,7 +4007,7 @@ async function init(): Promise<void> {
         num.textContent = String(contactSheetIdx * CONTACT_SHEET_SIZE + r + j + 1).padStart(2, '0');
         cell.appendChild(num);
         inner.appendChild(cell);
-        getThumbnail(file).then((blob) => {
+        contactThumbnailFor(file).then((blob) => {
           if (!blob) return;
           const img = document.createElement('img');
           img.src = URL.createObjectURL(blob);
@@ -3878,6 +4311,9 @@ async function init(): Promise<void> {
           // asShotWB (As-Shot WB readout for a file first opened in Develop).
           applyOpsToSliders(currentOps(currentEditState!));
           renderOps(currentOps(currentEditState!));
+          // Entering Develop is what decodes a Library-clicked file: the
+          // edited export (and its blocker tooltip) tracks the decode.
+          updateExportSourceState();
           // A preview file renders through the overlay img, not the canvas --
           // the diagnostic would read a black canvas under it, so skip.
           if (previewImg.hidden) runDevelopDiagnostics();
@@ -3931,6 +4367,7 @@ async function init(): Promise<void> {
     renderContactSheet();
   });
   contactExport.addEventListener('click', exportContactSheet);
+  contactSource.addEventListener('change', renderContactSheet);
 
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-module]')) {
     button.addEventListener('click', () => switchModule(button.dataset.module as ModuleId));
@@ -4019,7 +4456,7 @@ async function init(): Promise<void> {
       if (!targets.length) return;
       for (const id of targets) {
         const state = await loadEditState(db, id);
-        await saveEditState(db, id, commitEdit(state, ops));
+        await persistEdits(id, commitEdit(state, ops));
       }
       // Re-render if the current file was pasted to.
       if (targets.includes(currentFileId!)) {
@@ -4300,7 +4737,7 @@ async function init(): Promise<void> {
           const state = await loadEditState(db, id);
           const now = currentOps(state);
           const applied = [...refAbsolute, ...syncDeltaOps(refBase, refPicked, now)];
-          await saveEditState(db, id, commitEdit(state, mergeKinds(now, applied)));
+          await persistEdits(id, commitEdit(state, mergeKinds(now, applied)));
           done++;
         } catch {
           failed++; // one broken row doesn't abandon the rest
@@ -4360,6 +4797,28 @@ async function init(): Promise<void> {
       showError("Couldn't import that folder.", errorDetail(err));
     } finally {
       addFolderButton.disabled = false;
+    }
+  });
+
+  // Restore banner: after a reload Chrome drops the File System Access
+  // grants, every developed render fails, and the strip/grid silently fall
+  // back to camera JPEGs. This click is the user gesture that lets
+  // requestPermission() work again; re-requesting at the FOLDER covers every
+  // file under it (Chrome's path-based grant model), so one prompt restores
+  // the whole catalog. Then mirror openFile's permission-transition trio:
+  // bust the thumbnail cache, re-queue the recorded render failures, and
+  // repaint. retryFailedEditRenders resets failedEditRenders and calls
+  // updateFooter (which hides the banner); if renders fail again the counter
+  // re-rises and the banner comes back -- no extra state here.
+  restoreBannerBtn.addEventListener('click', async () => {
+    restoreBannerBtn.disabled = true;
+    try {
+      for (const folder of folders) await ensureReadPermission(folder.handle);
+      thumbnailRequests.clear();
+      retryFailedEditRenders();
+      renderVisibleRows();
+    } finally {
+      restoreBannerBtn.disabled = false;
     }
   });
 
