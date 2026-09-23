@@ -26,7 +26,10 @@ export type FilterColumn =
   | 'focal'
   | 'keywords'
   | 'missing'
-  | 'fileType';
+  | 'fileType'
+  // "Has non-empty current ops" — not a FileRecord field: it lives in the
+  // edits store, so it filters against ctx.editedIds (see FilterContext).
+  | 'edited';
 
 export interface RangeValue {
   kind: 'range';
@@ -69,6 +72,7 @@ export interface FilterState {
 //   label:     'red' | 'yellow' | 'green' | 'blue'  (none = no label)
 //   fileType:  'raw' | 'image'
 //   missing:   'missing' | 'present'   (none = present)
+//   edited:    'edited' | 'unedited'   (matched against ctx.editedIds, not the row)
 const LABEL_CODES: Record<string, number> = { red: 1, yellow: 2, green: 3, blue: 4 };
 
 export const NONE: NoneValue = { kind: 'none' };
@@ -78,14 +82,35 @@ export function range(from?: number, to?: number): RangeValue {
 
 // ---- applyFilters ----------------------------------------------------------
 
-export function applyFilters(files: FileRecord[], state: FilterState): FileRecord[] {
+// Per-render data the row-independent columns read. The 'edited' column is
+// not derivable from FileRecord — edits live in their own store, and
+// computing the edited set is an async IDB read (editsStore.listEditedFileIds).
+export interface FilterContext {
+  /** File ids whose current edit state has non-empty ops. ABSENT (never
+   * computed) means the 'edited' column is IGNORED entirely — a sync render
+   * that races the async computation must not empty the grid. An EMPTY set
+   * is a real answer ("nothing is edited") and filters normally. */
+  editedIds?: ReadonlySet<number>;
+}
+
+export function applyFilters(
+  files: FileRecord[],
+  state: FilterState,
+  ctx: FilterContext = {},
+): FileRecord[] {
   // Compile one predicate per active column; empty columns are skipped here,
   // which is the "empty column is ignored" rule in exactly one place.
   const predicates: Array<(f: FileRecord) => boolean> = [];
   for (const column of Object.keys(state.columns) as FilterColumn[]) {
     const values = state.columns[column];
     if (!values || values.length === 0) continue;
-    predicates.push((f) => values.some((v) => valueMatches(column, v, f)));
+    // Same ignore rule, second instance by necessity: the 'edited' column
+    // has no data when the set has not arrived yet. Intra-column OR makes
+    // ['edited','unedited'] a no-op even WITH the set; skipping the column
+    // makes it a no-op WITHOUT it, so a stale filter state can never blank
+    // the grid during the async load.
+    if (column === 'edited' && ctx.editedIds === undefined) continue;
+    predicates.push((f) => values.some((v) => valueMatches(column, v, f, ctx)));
   }
   const text = state.text && state.text.query.trim() !== '' ? state.text : undefined;
   if (text) predicates.push((f) => textMatches(f, text));
@@ -99,7 +124,23 @@ export function applyFilters(files: FileRecord[], state: FilterState): FileRecor
   });
 }
 
-function valueMatches(column: FilterColumn, value: FilterValue, f: FileRecord): boolean {
+function valueMatches(
+  column: FilterColumn,
+  value: FilterValue,
+  f: FileRecord,
+  ctx: FilterContext = {},
+): boolean {
+  if (column === 'edited') {
+    // 'edited' has no row field and no none/range/number meaning: anything
+    // other than the two vocabulary strings matches nothing, exactly like an
+    // unknown value on the flag/missing columns.
+    if (typeof value !== 'string') return false;
+    const needle = value.toLowerCase();
+    const has = ctx.editedIds?.has(f.id) ?? false;
+    if (needle === 'edited') return has;
+    if (needle === 'unedited') return !has;
+    return false;
+  }
   if (typeof value === 'object' && 'kind' in value) {
     if (value.kind === 'none') return isAbsent(column, f);
     return inRange(column, value, f);
@@ -133,6 +174,10 @@ function isAbsent(column: FilterColumn, f: FileRecord): boolean {
       return !f.missing; // "none missing" == the file is on disk
     case 'date':
     case 'fileType':
+    case 'edited':
+      // 'edited' never sees the none sentinel: its "unedited" vocabulary word
+      // already IS the negative, and valueMatches handles the column before
+      // this switch is reached. Listed for exhaustiveness, not behaviour.
       return false;
   }
 }
@@ -306,6 +351,7 @@ const COLUMN_LABELS: Record<FilterColumn, string> = {
   keywords: 'keywords',
   missing: 'files',
   fileType: 'type',
+  edited: 'edited',
 };
 
 function describeColumn(column: FilterColumn, values: FilterValue[]): string {
@@ -318,6 +364,11 @@ function describeColumn(column: FilterColumn, values: FilterValue[]): string {
   }
   if (column === 'missing') {
     return values.map((v) => (v === 'missing' ? 'missing files' : 'files present')).join(' / ');
+  }
+  if (column === 'edited') {
+    // Reads as a sentence, not "edited edited": LrC's own menu says
+    // "edited"/"not edited" for its Workflow column.
+    return values.map((v) => (v === 'unedited' ? 'not edited' : 'edited')).join(' / ');
   }
   return `${COLUMN_LABELS[column]} ${values.map((v) => describeValue(column, v)).join(' / ')}`;
 }

@@ -50,6 +50,13 @@ export interface FileRecord {
   // restores the look -- the badge exists to make that state visible instead
   // of showing a stale thumbnail forever. Cleared on a successful read.
   missing?: boolean;
+  // Epoch-ms id of the import batch that ADDED this row (import.ts stamps
+  // one Date.now() per folder import; tethered frames get their own).
+  // Stays on the row for life -- a re-import that merges does NOT restamp,
+  // so 'Previous Import' means "photos the latest import added", like LrC.
+  // Optional and schemaless like every field above: old rows load unchanged,
+  // no version bump.
+  importBatch?: number;
 }
 
 // The tone curve op has two shapes -- LrC's "Adjust:" modes. `region` is the

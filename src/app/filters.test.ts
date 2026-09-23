@@ -328,6 +328,70 @@ describe('FILTER_PRESETS', () => {
   });
 });
 
+describe('applyFilters — the edited column (ctx-driven)', () => {
+  const files = [
+    F(1, { rating: 4 }),
+    F(2, { rating: 4 }),
+    F(3),
+    F(4),
+  ];
+  const edited = new Set([2, 4]);
+
+  it("'edited' keeps exactly the ctx set; 'unedited' is its complement", () => {
+    expect(ids(applyFilters(files, { columns: { edited: ['edited'] } }, { editedIds: edited }))).toEqual([2, 4]);
+    expect(ids(applyFilters(files, { columns: { edited: ['unedited'] } }, { editedIds: edited }))).toEqual([1, 3]);
+  });
+
+  it('an EMPTY ctx set is a real answer: edited matches nothing, unedited matches all', () => {
+    // Distinct from the absent case below — "nothing is edited" is known.
+    expect(ids(applyFilters(files, { columns: { edited: ['edited'] } }, { editedIds: new Set() }))).toEqual([]);
+    expect(ids(applyFilters(files, { columns: { edited: ['unedited'] } }, { editedIds: new Set() }))).toEqual([1, 2, 3, 4]);
+  });
+
+  it('both values selected is a no-op filter (intra-column OR, with ctx present)', () => {
+    expect(ids(applyFilters(files, { columns: { edited: ['edited', 'unedited'] } }, { editedIds: edited }))).toEqual([1, 2, 3, 4]);
+  });
+
+  it('WITHOUT ctx.editedIds the column is IGNORED — the async set has not landed yet', () => {
+    // main.ts computes the edited set async; a sync render before it lands
+    // must show the grid, not an empty one. Absent ctx and empty ctx object
+    // are the same (absent) case.
+    expect(ids(applyFilters(files, { columns: { edited: ['edited'] } }))).toEqual([1, 2, 3, 4]);
+    expect(ids(applyFilters(files, { columns: { edited: ['unedited'] } }, {}))).toEqual([1, 2, 3, 4]);
+    expect(ids(applyFilters(files, { columns: { edited: ['edited', 'unedited'] } }, {}))).toEqual([1, 2, 3, 4]);
+    // Siblings still filter while edited sits ignored.
+    expect(ids(applyFilters(files, { columns: { edited: ['edited'], rating: [4] } }))).toEqual([1, 2]);
+  });
+
+  it('AND-composes with another column (rating>=4 AND edited)', () => {
+    const withRatings = [F(1, { rating: 4 }), F(2, { rating: 5 }), F(3, { rating: 4 })];
+    const out = applyFilters(withRatings, { columns: { rating: [5], edited: ['edited'] } }, { editedIds: new Set([1, 2]) });
+    expect(ids(out)).toEqual([2]);
+  });
+
+  it('unknown values match nothing, like the flag/missing vocabularies', () => {
+    expect(ids(applyFilters(files, { columns: { edited: ['nope'] } }, { editedIds: edited }))).toEqual([]);
+    expect(ids(applyFilters(files, { columns: { edited: [NONE] } }, { editedIds: edited }))).toEqual([]);
+  });
+
+  it('UI helpers ride the generic column path unchanged', () => {
+    const s1 = toggleFilterValue(EMPTY, 'edited', 'edited');
+    expect(s1.columns.edited).toEqual(['edited']);
+    expect(isFilterActive(s1)).toBe(true);
+    const s2 = toggleFilterValue(s1, 'edited', 'unedited');
+    expect(describeFilters(s2)).toBe('edited / not edited');
+    const cleared = clearColumn(s2, 'edited');
+    expect('edited' in cleared.columns).toBe(false);
+    expect(isFilterActive(cleared)).toBe(false);
+  });
+
+  it('describeFilters reads edited/not edited', () => {
+    expect(describeFilters({ columns: { edited: ['edited'] } })).toBe('edited');
+    expect(describeFilters({ columns: { edited: ['unedited'] } })).toBe('not edited');
+    expect(describeFilters({ columns: { rating: [4], edited: ['unedited'] } })).toBe('rating at least 4 · not edited');
+  });
+});
+
 describe('scale — 10k rows, linear cost', () => {
   it('a full multi-column filter over 10k files is ~linear, not quadratic', () => {
     const N = 10_000;
@@ -378,5 +442,36 @@ describe('scale — 10k rows, linear cost', () => {
       expect(again).toBeLessThanOrEqual(2.6 * t10kAgain);
     }
     expect(baseline).toBeGreaterThan(0); // the state really does filter
+  }, 15_000);
+
+  it('the edited column over 10k files with a 10k-id ctx set is ~linear (Set.has, not array scan)', () => {
+    const N = 10_000;
+    const files: FileRecord[] = [];
+    const editedIds = new Set<number>();
+    for (let i = 0; i < N; i++) {
+      files.push(F(i));
+      if (i % 3 === 0) editedIds.add(i); // ~3333 edited
+    }
+    const state: FilterState = { columns: { edited: ['edited'] } };
+    const ctx = { editedIds };
+    const run = () => applyFilters(files, state, ctx).length;
+    expect(run()).toBe(Math.ceil(N / 3));
+    const t0 = performance.now();
+    for (let rep = 0; rep < 3; rep++) run();
+    const t10k = (performance.now() - t0) / 3;
+    const doubled = files.concat(files); // same ctx set; has() stays O(1)
+    const t0d = performance.now();
+    for (let rep = 0; rep < 3; rep++) applyFilters(doubled, state, ctx);
+    const t20k = (performance.now() - t0d) / 3;
+    // Same generous 2.6x bound as the multi-column case above: per-row work
+    // is one Set.has, so doubling rows must not double-per-row cost.
+    if (t20k > 2.6 * t10k) {
+      const t0b = performance.now();
+      applyFilters(doubled, state, ctx);
+      const again = performance.now() - t0b;
+      const t0s = performance.now();
+      applyFilters(files, state, ctx);
+      expect(again).toBeLessThanOrEqual(2.6 * (performance.now() - t0s));
+    }
   }, 15_000);
 });

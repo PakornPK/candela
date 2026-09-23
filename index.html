@@ -218,6 +218,26 @@
         background: #3a4a5c;
         color: #fff;
       }
+      /* 'Previous Import' is a scope row, not a folder: same visual
+         language, plus a right-aligned count badge (the folder tree has no
+         counts, so the flex layout is scoped to .folder-row-scope only).
+         min-height keeps the hit target >= 24px (small-controls rule). */
+      .folder-row.folder-row-scope {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        min-height: 24px;
+      }
+      .folder-row .folder-row-count {
+        color: var(--text-dim);
+        font-size: 11px;
+        margin-left: 8px;
+      }
+      .folder-row.active .folder-row-count { color: #fff; }
+      .folder-row:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: 1px;
+      }
 
       /* Search input */
       .search-input {

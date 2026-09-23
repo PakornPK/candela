@@ -223,12 +223,28 @@ export interface ImportResult {
   skippedDuplicates: number;
 }
 
+// The new-vs-merge rule behind FileRecord.importBatch, extracted so the
+// stamping decision is unit-testable without IndexedDB (same seam style as
+// mergeFileRow/shouldIdentify). LrC's Previous Import is "photos the most
+// recent import ADDED", not "every row the re-added folder still holds" —
+// so a merged re-import keeps the ORIGINAL stamp even when the file changed
+// on disk (a refreshed frame from the same shoot is not a new photo), and
+// only a brand-new row claims the new batch. The result is spread into the
+// row data on the add path only; the merge path never passes it.
+export function stampImportBatch(
+  record: FileRecord | undefined,
+  batchId: number,
+): { importBatch: number } | Record<string, never> {
+  return record ? {} : { importBatch: batchId };
+}
+
 async function upsertFile(
   db: IDBDatabase,
   folderId: number,
   path: string,
   handle: FileSystemFileHandle,
   gate: DuplicateGate,
+  batchId: number,
 ): Promise<'imported' | 'duplicate'> {
   const file = await handle.getFile();
   const record = await getFileRow(db, folderId, path);
@@ -270,6 +286,9 @@ async function upsertFile(
     handle,
     size: file.size,
     lastModified: file.lastModified,
+    // New rows claim this batch; a merge adds nothing, so mergeFileRow's
+    // old-record-first spread keeps the original stamp (see stampImportBatch).
+    ...stampImportBatch(record, batchId),
     ...(shouldIdentify(path, record, file.size, file.lastModified)
       ? await exifFieldsOrEmpty(file)
       : {}),
@@ -303,6 +322,10 @@ export async function importFolderFromHandle(
   dirHandle: FileSystemDirectoryHandle,
 ): Promise<ImportResult> {
   const folderId = await upsertFolder(db, dirHandle);
+  // ONE batch id for the whole walk: every row this call adds shares it, so
+  // the Previous Import smart collection means "everything from this import"
+  // even if the walk spans a minute of clock time.
+  const batchId = Date.now();
   // One pass over the files store BEFORE the walk, not one per file: the
   // gate's existing-set must cover the whole catalog (a duplicate can live
   // in any folder), and reading it per file would make import quadratic on
@@ -311,7 +334,7 @@ export async function importFolderFromHandle(
   let imported = 0;
   let skippedDuplicates = 0;
   for await (const { path, handle } of walk(dirHandle, '')) {
-    if ((await upsertFile(db, folderId, path, handle, gate)) === 'imported') imported++;
+    if ((await upsertFile(db, folderId, path, handle, gate, batchId)) === 'imported') imported++;
     else skippedDuplicates++;
   }
   return { imported, skippedDuplicates };
@@ -331,7 +354,10 @@ export async function importSingleFile(
   // per captured frame is acceptable: frames arrive seconds apart and the
   // scan is the same single pass the keyword list already makes.
   const gate = createDuplicateGate(await readExistingKeys(db));
-  const outcome = await upsertFile(db, folderId, fileHandle.name, fileHandle, gate);
+  // Each tethered frame is its own batch: LrC's tethered capture treats
+  // every shot as a new arrival, so Previous Import = the last captured
+  // frame, not everything the session ever pulled in.
+  const outcome = await upsertFile(db, folderId, fileHandle.name, fileHandle, gate, Date.now());
   return {
     imported: outcome === 'imported' ? 1 : 0,
     skippedDuplicates: outcome === 'duplicate' ? 1 : 0,

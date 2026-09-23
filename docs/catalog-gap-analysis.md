@@ -44,6 +44,42 @@ Library metadata layer + Catalog/file-integrity layer
 QA loop: `npm run qa` (เต็ม ~4 นาที, 21 checks, รวม RAF 58MB) / `npm run qa:fast` (~30 วิ) — 21/21 PASS ณ จุดที่ wave 3 ลงครบ
 Gates: tsc clean, vitest 755/755 (จาก 428 เดิม), build green
 
+### Plan A — "Working set ชัด" (อนุมัติ 2026-09-23, ✅ ลงครบ)
+
+ที่มา: คำถาม dogfood "import แล้วแต่งโดยไม่สร้าง collection จะเป็นยังไง" — คำตอบเชิงโครงสร้าง:
+ไม่พัง (edits key ด้วย fileId แยกจาก collections พิสูจน์ E2E แล้ว) แต่ปัญหาจริงคือ
+**แต่งแล้วมองไม่เห็น working set** ว่าอยู่ในชุดงานไหน Proposal เดิมคือ hard gate
+"ต้องมี collection ก่อนถึงจะเข้า Develop" — research แล้ว **LrC ไม่ได้ทำแบบนั้น**
+(Adobe doc: "Select a photo in the Library module and press D"; collections = optional
+organizer) และ CLAUDE.md วาง positioning ว่า cull+develop เร็ว/no friction — เจ้าของโปรเจกต์
+เลือกแผน A: ไม่ gate แต่ทำให้ working set มองเห็นและเก็บได้ในหนึ่งปุ่ม
+
+รายการ (engine → wiring → QA):
+1. **Previous Import source** (LrC มี เราไม่มี): `importBatch?: number` บน FileRecord —
+   stamp เฉพาะแถว NEW ต่อหนึ่ง import run (merge คง stamp เดิม = semantics "photos ADDED
+   by the most recent import"); Library folder list เพิ่มแถว "Previous Import" (batch ล่าสุด)
+   เป็น view selector ที่สามรองจาก folder/collection
+2. **Filter bar คอลัมน์ 'edited'**: truth อยู่ที่ edits store (currentOps ไม่ว่าง) —
+   `listEditedFileIds(db)` getAll ทีเดียว; applyFilters รับ ctx `{editedIds?}` (ไม่มี ctx =
+   คอลัมน์ถูกละเว้น ไม่ใช่ grid ว่าง); vocabulary 'edited'|'unedited'
+3. **Nudge สอนปุ่ม B**: `collectionNudge(pickedCount, trayMemberCount, alreadyNudged)` —
+   picked ≥ 20 + tray ว่าง + ยังไม่เคยเตือน (ต่อ session) → flash "กด B เก็บลง Quick
+   Collection" หนึ่งครั้ง ไม่บังคับ ไม่ถามซ้ำ
+4. **Smart collection จาก selection**: มีอยู่แล้ว (`smart-scope=selected` → criteria.fileIds
+   ใน smart dialog) — ไม่ต้องสร้างใหม่ เพิ่มแค่ QA check
+
+Engine (disjoint files): filters.ts + editsStore.ts + import.ts + types.ts + collections.ts
+(nudge helper) พร้อม unit tests; wiring agent ถือ main.ts/index.html; QA loop เพิ่ม checks
+previous-import / edited-chip / nudge / smart-from-selection แล้วรันยาว (full, ไม่ใช่ fast)
+
+ผลลงจริง: engine +32 tests (790/790), wiring main.ts +196/-7 + index.html CSS,
+QA checks ใหม่ C21-C24 (group planA) — พิสูจน์ในเบราว์เซอร์จริง:
+edited chip แยก E1/E2 ถูกหลัง Develop commit, Previous Import = batch ล่าสุดเท่านั้น
+(+1 ไฟล์ → PI=1), nudge fired ครั้งเดียวต่อ session + tray-non-empty suppress,
+smart-from-selection scope ถูก 20→3. บัคที่เจอระหว่าง wiring แล้วแก้: 'All folders'
+double-lit ตอน PI active, PI view ค้างหลัง import ใหม่ (retire เมื่อ imported>0 ตาม
+LrC semantics). Contact sheet จงใจไม่รองรับ PI (ไม่ใช่ film roll — comment ในโค้ด)
+
 **Top 3 moves ที่ควรทำก่อน (impact ต่อ core workflow ต่อหน่วย effort):**
 
 1. **EXIF ที่ import** (capture date, camera, lens, ISO, focal) — ฟีเจอร์เดียวที่ปลดล็อก 5 อย่าง:

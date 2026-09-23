@@ -3,6 +3,8 @@ import {
   splitToggle,
   describeTarget,
   isQuickCollection,
+  collectionNudge,
+  NUDGE_PICK_THRESHOLD,
   createCollection,
   ensureQuickCollection,
   deleteCollection,
@@ -90,6 +92,50 @@ describe('describeTarget', () => {
     // The label must tell the truth about where B lands, not show a ghost.
     expect(describeTarget(cols, 404)).toBe(`Target: ${QUICK_COLLECTION_NAME}`);
     expect(describeTarget([], 404)).toBe(`Target: ${QUICK_COLLECTION_NAME}`);
+  });
+});
+
+describe('collectionNudge (post-cull teaching moment)', () => {
+  it('nudges at and above the threshold when the tray is empty and nothing was nudged', () => {
+    expect(collectionNudge(NUDGE_PICK_THRESHOLD, 0, false)).toBeTypeOf('string');
+    expect(collectionNudge(500, 0, false)).toBeTypeOf('string');
+  });
+
+  it('stays silent BELOW the threshold — a few picks are not a cull pass', () => {
+    expect(collectionNudge(NUDGE_PICK_THRESHOLD - 1, 0, false)).toBeNull();
+    expect(collectionNudge(0, 0, false)).toBeNull();
+    expect(collectionNudge(19, 0, false)).toBeNull(); // boundary: one short
+  });
+
+  it('the boundary is inclusive: 19 silent, 20 nudges', () => {
+    expect(NUDGE_PICK_THRESHOLD).toBe(20);
+    expect(collectionNudge(19, 0, false)).toBeNull();
+    expect(collectionNudge(20, 0, false)).not.toBeNull();
+  });
+
+  it('a NON-EMPTY tray suppresses it — B is already in use there', () => {
+    expect(collectionNudge(500, 1, false)).toBeNull();
+    expect(collectionNudge(500, 30, false)).toBeNull();
+  });
+
+  it('alreadyNudged suppresses it — one teaching moment per session', () => {
+    expect(collectionNudge(500, 0, true)).toBeNull();
+  });
+
+  it('the message names the B key and the Quick Collection (the wiring flashes it verbatim)', () => {
+    const msg = collectionNudge(24, 0, false)!;
+    expect(msg).toContain('B');
+    expect(msg).toContain(QUICK_COLLECTION_NAME);
+    expect(msg).toContain('Quick Collection');
+  });
+
+  it('returns null, never an empty string, when not applicable', () => {
+    // The caller does `msg && flash(msg)`; '' would be falsy anyway, but the
+    // contract is `string | null` and a test locks it so a refactor to
+    // `return ''` cannot slip through.
+    expect(collectionNudge(5, 0, false)).toBeNull();
+    expect(collectionNudge(5, 2, false)).toBeNull();
+    expect(collectionNudge(5, 0, true)).toBeNull();
   });
 });
 

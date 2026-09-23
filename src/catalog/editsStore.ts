@@ -1,5 +1,5 @@
 import type { EditState, Op } from './types';
-import { createEditState } from './editHistory';
+import { createEditState, currentOps } from './editHistory';
 import { isFilmStockId } from '../gpu/film';
 
 interface EditRow {
@@ -155,4 +155,33 @@ export function saveEditState(db: IDBDatabase, fileId: number, state: EditState)
     request.onsuccess = () => resolve();
     request.onerror = () => reject(request.error);
   });
+}
+
+// The file ids that currently HAVE edits (currentOps non-empty), for the
+// filter bar's 'edited' column. One getAll over the whole edits store, not
+// one loadEditState per visible file: the filter bar refreshes this set on
+// every catalog render, and a per-file get would open O(n) transactions
+// against a 10k-photo grid — the same full-scan-once cost the keyword list,
+// the missing view, and the duplicate gate already accept (see
+// import.ts's readExistingKeys).
+//
+// 'Edited' means the CURRENT snapshot has ops: a file edited then fully
+// undone (cursor back at the empty base) or reverted by trimming history is
+// unedited, matching what the editor would render. Corrupt rows are skipped
+// rather than thrown — the exact tolerance loadEditState applies to a single
+// row — because one damaged row must not blank the whole edited view; the
+// row's fileId simply reads as unedited until it is opened (and repaired)
+// in the developer.
+export async function listEditedFileIds(db: IDBDatabase): Promise<Set<number>> {
+  const rows = await new Promise<unknown[]>((resolve, reject) => {
+    const request = db.transaction('edits', 'readonly').objectStore('edits').getAll();
+    request.onsuccess = () => resolve(request.result as unknown[]);
+    request.onerror = () => reject(request.error);
+  });
+  const edited = new Set<number>();
+  for (const row of rows) {
+    if (!isValidEditRow(row)) continue;
+    if (currentOps({ history: row.history, cursor: row.cursor }).length > 0) edited.add(row.fileId);
+  }
+  return edited;
 }

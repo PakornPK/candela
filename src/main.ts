@@ -14,7 +14,7 @@ import { applyCullResult, setCull } from './catalog/culling';
 import { importFolder, importFolderFromHandle, isRawFileName } from './catalog/import';
 import { ensureReadPermission, queryReadPermission } from './catalog/permissions';
 import { sidecarFileName, sidecarSaveBlocker, type SidecarMode } from './catalog/sidecar';
-import { loadEditState, saveEditState } from './catalog/editsStore';
+import { listEditedFileIds, loadEditState, saveEditState } from './catalog/editsStore';
 import { deletePreset, listPresets, savePreset, type PresetRow } from './catalog/presetsStore';
 import { parsePreset, serializePreset, PRESET_FILE_EXT } from './catalog/presetFiles';
 import { commitEdit, undo, redo, currentOps, createEditState } from './catalog/editHistory';
@@ -75,7 +75,7 @@ import { defaultViewState, viewStateToCropFrac, zoomToward, panBy, type ViewStat
 // pure+IDB modules; main.ts only binds DOM to them (house rule).
 import { applyMissingBadges, classifyHandleError, markMissing, probeFileHandle, promptRelink } from './catalog/missing';
 import { confirmMessage, deleteFilesFromDisk, deleteKeyVerb, removeFilesFromCatalog, type RemoveVerb } from './catalog/remove';
-import { listCollections, createCollection, deleteCollection, getCollection, addFilesToCollection, removeFilesFromCollection, isQuickCollection, isReservedTrayName, describeTarget, ensureQuickCollection, getTargetCollectionId, setTargetCollection, toggleInTarget, QUICK_COLLECTION_NAME, type Collection } from './catalog/collections';
+import { listCollections, createCollection, deleteCollection, getCollection, addFilesToCollection, removeFilesFromCollection, isQuickCollection, isReservedTrayName, describeTarget, ensureQuickCollection, getTargetCollectionId, setTargetCollection, toggleInTarget, collectionNudge, QUICK_COLLECTION_NAME, type Collection } from './catalog/collections';
 import { listSmartCollections, createSmartCollection, updateSmartCollection, deleteSmartCollection, querySmartCollection, buildCriteria, criteriaToForm, describeCriteria, hasCriteria, type CriteriaForm, type SmartCollection, type SmartCollectionCriteria } from './catalog/smartCollections';
 // Keywords / IPTC / backup glue. The heavy logic lives in the catalog modules
 // (pure + IDB halves, unit-tested there); main.ts only binds DOM to it.
@@ -1569,6 +1569,44 @@ async function init(): Promise<void> {
   // below (the left-panel checkboxes + footer chips) -- the two stack.
   let filterState: FilterState = { columns: {} };
 
+  // The 'edited' filter column's data: file ids whose edit store row has
+  // non-empty current ops. null = NOT LOADED YET, which mirrors the engine's
+  // absent-FilterContext rule (applyFilters ignores the column without ctx —
+  // a sync paint racing the async IDB read must not empty the grid). An
+  // EMPTY Set is a real answer ('nothing is edited') and filters normally.
+  // Refreshed by renderEditedIds() before any paint that could read it.
+  let editedIds: Set<number> | null = null;
+
+  async function renderEditedIds(): Promise<void> {
+    editedIds = await listEditedFileIds(db);
+  }
+
+  // 'Previous Import' view (LrC's source-collection equivalent): scopes the
+  // grid to the rows stamped with the newest FileRecord.importBatch — the
+  // photos ADDED by the most recent import (merged re-imports keep their
+  // original stamp, see import.ts). The batch id itself is DERIVED from
+  // allFiles in rebuildGrid (latestImportBatch), never stored, so it cannot
+  // go stale against a fresh import. Part of the same mutually-exclusive
+  // view selector as folderFilter/activeCollectionId/activeSmartCollectionId.
+  let previousImportFilter = false;
+
+  function latestImportBatch(files: FileRecord[]): number | null {
+    let latest: number | null = null;
+    for (const f of files) {
+      if (f.importBatch !== undefined && (latest === null || f.importBatch > latest)) {
+        latest = f.importBatch;
+      }
+    }
+    return latest;
+  }
+
+  // The B-key teaching nudge (collections.ts collectionNudge): shown once
+  // per session after a big pick pass with an empty tray. Session-only on
+  // purpose — it is a teaching prompt, not a preference; persisting it would
+  // punish a user who cleared site data with never seeing it again, and
+  // storing it would add a key to the settings surface for one string.
+  let nudgeShown = false;
+
   // Capture-time stacks (gap P1-2). DISPLAY-LAYER ONLY: stacks reorder/hide
   // grid cells (stacks.ts visibleFiles), they never rewrite FileRows -- cull
   // writes still target FileRecord rows by id. Session state; re-derived from
@@ -1640,6 +1678,8 @@ async function init(): Promise<void> {
     { column: 'date', label: 'Date' },
     { column: 'keywords', label: 'Keywords' },
     { column: 'missing', label: 'Files' },
+    // Workflow columns group together (flag / files / edited), then metadata.
+    { column: 'edited', label: 'Edited' },
     { column: 'fileType', label: 'Type' },
   ];
 
@@ -1699,6 +1739,8 @@ async function init(): Promise<void> {
         case 'missing':
           push.add(f.missing ? 'missing' : 'present');
           break;
+        case 'edited':
+          break; // enum column: vocabulary below, no per-row derivation (edits live in the edits store)
         case 'fileType':
           push.add(isRawFileName(f.name) ? 'raw' : 'image');
           break;
@@ -1720,6 +1762,7 @@ async function init(): Promise<void> {
     if (column === 'flag') return ['picked', 'rejected'];
     if (column === 'label') return ['red', 'yellow', 'green', 'blue'];
     if (column === 'missing') return ['missing', 'present'];
+    if (column === 'edited') return ['edited', 'unedited'];
     if (column === 'fileType') return ['raw', 'image'];
     return values;
   }
@@ -1738,6 +1781,8 @@ async function init(): Promise<void> {
       if (typeof v.from === 'number' && v.from === v.to) return String(v.from);
       return `${v.from ?? ''}–${v.to ?? ''}`;
     }
+    // LrC's own menu wording for the workflow column; 'edited' displays as-is.
+    if (column === 'edited' && v === 'unedited') return 'not edited';
     return String(v);
   }
 
@@ -1908,7 +1953,10 @@ async function init(): Promise<void> {
     // inter-column AND, so an inactive state is a no-op (guarded to skip the
     // array copy it would otherwise make on a 100k catalog every repaint).
     if (isFilterActive(filterState)) {
-      filesToShow = applyFilters(filesToShow, filterState);
+      // The 'edited' column can only be judged against the async edits read.
+      // null (not loaded yet) passes NO ctx, so the engine ignores the column
+      // for this paint instead of emptying the grid (see filters.ts).
+      filesToShow = applyFilters(filesToShow, filterState, editedIds ? { editedIds } : {});
     }
 
     // Collection filter
@@ -1931,6 +1979,25 @@ async function init(): Promise<void> {
         (f as any).cameraModel?.toLowerCase().includes(query) ||
         (f as any).lensModel?.toLowerCase().includes(query)
       );
+    } else if (previousImportFilter) {
+      // Previous Import view: same shape as the folder branch below, but the
+      // scope is the newest import batch (derived, never stored — a stored
+      // batch id would go stale the moment another import lands). One heading
+      // 'Previous Import' rather than per-folder headings: the batch IS the
+      // unit of this view (LrC's Previous Import lists the added photos as
+      // one set, even across folders), and per-folder rows would make the
+      // view look like N folder views stapled together.
+      const latest = latestImportBatch(allFiles);
+      const batchFiles = latest === null ? [] : filesToShow.filter((f) => f.importBatch === latest);
+      tallyScope(batchFiles);
+      let visible = batchFiles.filter(matchesCullFilter);
+      if (stacks.length > 0) visible = stackVisibleFiles(visible, stacks);
+      if (visible.length > 0) gridEntries.push({ kind: 'heading', folderName: 'Previous Import' });
+      for (const row of chunkIntoRows(visible)) {
+        gridEntries.push({ kind: 'row', files: row });
+      }
+      repaintGrid();
+      return;
     } else {
       // Folder filter
       for (const folder of folders) {
@@ -2007,9 +2074,18 @@ async function init(): Promise<void> {
   let selectionAnchor: number | null = null;
 
   // Folder-ordered ids for shift+click range selection (the grid's reading
-  // order; cull filters don't apply -- LrC ranges over the source).
+  // order; cull filters don't apply -- LrC ranges over the source). Previous
+  // Import is the other whole-catalog source scope: range must walk the
+  // batch, not every row, or shift-click under the batch view selects photos
+  // the grid does not show.
   function orderedVisibleIds(): number[] {
-    return allFiles.filter((f) => folderFilter === null || f.folderId === folderFilter).map((f) => f.id);
+    let ids = allFiles.filter((f) => folderFilter === null || f.folderId === folderFilter).map((f) => f.id);
+    if (previousImportFilter) {
+      const latest = latestImportBatch(allFiles);
+      const batch = latest === null ? null : new Set(allFiles.filter((f) => f.importBatch === latest).map((f) => f.id));
+      ids = batch ? ids.filter((id) => batch.has(id)) : [];
+    }
+    return ids;
   }
 
   // Cull metadata (rating / flag / colour) is what the smart collections query,
@@ -2025,6 +2101,23 @@ async function init(): Promise<void> {
     // Survey tiles carry stars + pick/reject too; rebuild the tiles (cheap --
     // thumbnails come from the shared session cache).
     if (getState().module === 'survey') renderSurvey();
+    // B-key teaching nudge: this is the one function every cull write funnels
+    // through, so the check rides the scan rebuildGrid already did rather
+    // than a new pass (the two loops below are O(n) over a list that was
+    // just rebuilt). collectionNudge owns when (never) to speak; this only
+    // feeds it and flashes the string verbatim. Teach once, gate nothing.
+    if (!nudgeShown) {
+      const pickedCount = allFiles.filter((f) => f.flag === true).length;
+      const tray = collections.find((c) => isQuickCollection(c));
+      // trayMemberCount 0 when collections have not loaded yet: the render
+      // path repopulates `collections` right after boot, and a nudge that
+      // fires a moment early is a teaching prompt, not a transaction.
+      const msg = collectionNudge(pickedCount, tray?.fileIds.length ?? 0, nudgeShown);
+      if (msg) {
+        flashSelectionInfo(msg);
+        nudgeShown = true;
+      }
+    }
   }
 
   // ---- cull writes (the ONE write path) -----------------------------------
@@ -2078,6 +2171,14 @@ async function init(): Promise<void> {
   // the strip was before the chips existed.
   function stripScope(): FileRecord[] {
     if (getState().module === 'library' && visibleFiles) return visibleFiles;
+    // Outside Library the strip navigates the current source. Folder view
+    // gets that for free (renderCatalog only LOADED that folder into
+    // allFiles); Previous Import deliberately loads the whole catalog (the
+    // badge counts across folders), so narrow to the batch here the same way.
+    if (previousImportFilter) {
+      const latest = latestImportBatch(allFiles);
+      return latest === null ? [] : allFiles.filter((f) => f.importBatch === latest);
+    }
     return allFiles;
   }
 
@@ -2390,6 +2491,14 @@ async function init(): Promise<void> {
   async function persistEdits(fileId: number, state: EditState): Promise<void> {
     await saveEditState(db, fileId, state);
     queueEditedThumbnail(fileId);
+    // Every edit commit funnels through here (see the comment above), so the
+    // 'edited' filter column's set stays current the moment an edit is
+    // saved. Deliberately NOT awaited into a grid repaint: commits happen in
+    // Develop, the Library grid repaints the set on re-entry (library
+    // onShow), and an awaited rebuildGrid on every slider release would touch
+    // the hidden grid for no viewer. One getAll per commit is cheap (the
+    // engine's cost rule, see editsStore.ts).
+    void renderEditedIds();
   }
 
   function renderOps(ops: Op[]): void {
@@ -2641,6 +2750,11 @@ async function init(): Promise<void> {
     // anything repainted while the list was being rebuilt would otherwise read
     // a half-filled array and show 0.
     allFiles = loaded;
+    // Await the edits read BEFORE rebuildGrid so the same paint already
+    // filters the 'edited' column against fresh data (and the filter bar
+    // below cannot disagree). One getAll over the edits store — the engine's
+    // own cost rule, see editsStore.ts.
+    await renderEditedIds();
     rebuildGrid(); // repaintGrid() refreshes the filmstrip count
     renderFolderList();
     // The Keyword List is a tally over the catalog (buildKeywordList scans
@@ -2668,6 +2782,9 @@ async function init(): Promise<void> {
   function renderFolderList(): void {
     folderListEl.textContent = '';
     appendFolderRow(null, 'All folders');
+    // LrC's Sources panel puts Previous Import right under All folders — it
+    // is a catalog-wide view, not a folder, so it sits above the folder tree.
+    appendPreviousImportRow();
     for (const folder of folders) {
       appendFolderRow(folder.id, folder.name);
     }
@@ -2752,6 +2869,7 @@ async function init(): Promise<void> {
         activeCollectionId = collection.id!;
         activeSmartCollectionId = null;
         folderFilter = null;
+        previousImportFilter = false; // one view selector — see appendFolderRow
         // renderCatalog(), never rebuildGrid(): rebuildGrid() re-paints the file
         // list it already holds, which is still scoped to the folder that was
         // open a moment ago, so the collection would show only that folder's
@@ -2796,6 +2914,7 @@ async function init(): Promise<void> {
         activeSmartCollectionId = smart.id!;
         activeCollectionId = null;
         folderFilter = null;
+        previousImportFilter = false; // one view selector — see appendFolderRow
         void reloadCatalog();
       });
       smartCollectionListEl.appendChild(row);
@@ -2805,7 +2924,14 @@ async function init(): Promise<void> {
 
   function appendFolderRow(id: number | null, name: string): void {
     const row = document.createElement('button');
-    row.className = 'folder-row' + (folderFilter === id ? ' active' : '');
+    // 'All folders' (id null) keys off folderFilter === null, but Previous
+    // Import ALSO leaves folderFilter null — without the extra guard both
+    // rows light up together, and the one-value selector lies about which
+    // view is open. Real folder ids can never collide with the null scope.
+    const active = id === null
+      ? folderFilter === null && !previousImportFilter
+      : folderFilter === id;
+    row.className = 'folder-row' + (active ? ' active' : '');
     row.textContent = name;
     row.addEventListener('click', () => {
       // Folder, collection and smart collection are one view selector between
@@ -2815,7 +2941,40 @@ async function init(): Promise<void> {
       folderFilter = id;
       activeCollectionId = null;
       activeSmartCollectionId = null;
+      previousImportFilter = false; // same reset rule: the selector has ONE value
       void reloadCatalog(); // also re-renders the folder list active state
+    });
+    folderListEl.appendChild(row);
+  }
+
+  // Sibling of appendFolderRow rather than a call through it: a folder row
+  // keys its active state off a folder id, this one off a boolean — faking
+  // an id (or null, which already means 'All folders') would lie to the
+  // selector. Same visual language, same reset semantics.
+  function appendPreviousImportRow(): void {
+    const row = document.createElement('button');
+    row.className = 'folder-row folder-row-scope' + (previousImportFilter ? ' active' : '');
+    // Reuses appendFolderRow's DOM-building rule: textContent only, the
+    // count is our own derived number, never user data, but it still must
+    // not open an innerHTML hole next to user-named folder rows.
+    const label = document.createElement('span');
+    label.textContent = 'Previous Import';
+    const latest = latestImportBatch(allFiles);
+    const count = latest === null ? 0 : allFiles.filter((f) => f.importBatch === latest).length;
+    const badge = document.createElement('span');
+    badge.className = 'folder-row-count';
+    badge.textContent = String(count);
+    row.append(label, badge);
+    row.title = count
+      ? `Show the ${count} photo${count === 1 ? '' : 's'} added by the most recent import`
+      : 'No import has added photos yet';
+    row.setAttribute('aria-pressed', previousImportFilter ? 'true' : 'false');
+    row.addEventListener('click', () => {
+      previousImportFilter = true;
+      folderFilter = null;
+      activeCollectionId = null;
+      activeSmartCollectionId = null;
+      void reloadCatalog();
     });
     folderListEl.appendChild(row);
   }
@@ -4576,6 +4735,10 @@ async function init(): Promise<void> {
   }
 
   function renderContactSheet(): void {
+    // Conscious scope skip: the sheet follows folderFilter only. Previous
+    // Import is not a film roll (LrC's sheet is per-folder), and entering
+    // Contact clears nothing — a PI-scoped grid staying 'All folders' on the
+    // sheet is the honest reading of "this batch spans folders".
     const scope = folderFilter !== null ? allFiles.filter((f) => f.folderId === folderFilter) : [...allFiles];
     const sheets = buildContactSheets(scope, cullFilter);
     contactSheetIdx = Math.min(Math.max(contactSheetIdx, 0), Math.max(sheets.length - 1, 0));
@@ -5042,7 +5205,17 @@ async function init(): Promise<void> {
   registerModule({
     id: 'library',
     root: document.querySelector('#module-library')!,
-    onShow: () => refreshGrid(),
+    onShow: () => {
+      refreshGrid();
+      // Re-entering Library is the authoritative refresh point for the
+      // 'edited' set: the commit path (persistEdits) also refreshes it, but
+      // onShow catches anything that wrote the edits store behind our back
+      // (a restore, another tab). repaint-after-await only re-runs the grid
+      // if the filter actually reads differently with the new set.
+      void renderEditedIds().then(() => {
+        if (isFilterActive(filterState)) rebuildGrid();
+      });
+    },
     onHide: () => {},
   });
   registerModule({
@@ -5270,6 +5443,7 @@ async function init(): Promise<void> {
     activeCollectionId = targetId;
     activeSmartCollectionId = null;
     folderFilter = null;
+    previousImportFilter = false; // one view selector — see appendFolderRow
     searchQuery = '';
     searchInput.value = '';
     await reloadCatalog();
@@ -5871,6 +6045,12 @@ async function init(): Promise<void> {
     addFolderButton.disabled = true;
     try {
       const result = await importFolder(db);
+      // A fresh import makes any open Previous Import view stale: it was
+      // selected to look at the PREVIOUS batch, and re-showing it silently
+      // re-scoped to the new one (1 cell, grid unchanged-looking) reads as a
+      // frozen grid. Retire the selector; the row's badge updates to the new
+      // batch either way, one click brings the view back.
+      if (result.imported > 0) previousImportFilter = false;
       await reloadCatalog();
       flashImportResult(result);
     } catch (err) {
@@ -6454,6 +6634,8 @@ async function init(): Promise<void> {
             const handle = await (item as any).getAsFileSystemHandle();
             if (handle?.kind === 'directory') {
               const result = await importFolderFromHandle(db, handle);
+              // Same stale-view retirement as the #add-folder path above.
+              if (result.imported > 0) previousImportFilter = false;
               await reloadCatalog();
               await renderCollections();
               await renderSmartCollections();

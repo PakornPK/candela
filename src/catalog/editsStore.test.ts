@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { isValidEditRow } from './editsStore';
+import { isValidEditRow, listEditedFileIds } from './editsStore';
 
 describe('isValidEditRow', () => {
   it('accepts a valid row', () => {
@@ -97,5 +97,148 @@ describe('isValidEditRow', () => {
     expect(
       isValidEditRow({ fileId: 1, history: [[{ kind: 'whiteBalance', kelvin: 5200, gains: 'nope' }]], cursor: 0 })
     ).toBe(false);
+  });
+});
+
+// ---- listEditedFileIds (IDB) ------------------------------------------------
+// The in-memory fake seam the other catalog suites use (collections.test.ts's
+// fakeCollectionsDb, keywords.test.ts's fakeFilesDb): async-settling requests,
+// structured-clone copies out of the store, no fake-indexeddb dependency.
+// This one additionally COUNTS transactions: the whole point of
+// listEditedFileIds is ONE getAll per refresh (the filter bar calls it on
+// every catalog render), so a regression to per-row gets fails here.
+
+interface EditRowLike {
+  fileId: number;
+  history: unknown[][];
+  cursor: number;
+}
+
+function fakeEditsDb(initial: EditRowLike[]) {
+  const rows = new Map<number, EditRowLike>();
+  for (const r of initial) rows.set(r.fileId, structuredClone(r));
+  let transactionCount = 0;
+
+  const makeRequest = (run: () => unknown) => {
+    const req: {
+      result?: unknown;
+      error: unknown;
+      onsuccess: (() => void) | null;
+      onerror: (() => void) | null;
+    } = { error: null, onsuccess: null, onerror: null };
+    queueMicrotask(() => {
+      try {
+        req.result = run();
+        req.onsuccess?.();
+      } catch (e) {
+        req.error = e;
+        req.onerror?.();
+      }
+    });
+    return req;
+  };
+
+  const store = {
+    getAll: () => makeRequest(() => [...rows.values()].map((r) => structuredClone(r))),
+    // A get would signal per-row access (the O(n)-transactions regression).
+    // The fake keeps one alive per fileId so countGet proves it is NOT used.
+    get: (fileId: number) => makeRequest(() => {
+      const r = rows.get(fileId);
+      return r ? structuredClone(r) : undefined;
+    }),
+  };
+  let getCalls = 0;
+  const countingStore = {
+    getAll: () => store.getAll(),
+    get: (fileId: number) => {
+      getCalls += 1;
+      return store.get(fileId);
+    },
+  };
+
+  const db = {
+    transaction: (_name: string, _mode?: IDBTransactionMode) => {
+      transactionCount += 1;
+      return { objectStore: () => countingStore };
+    },
+  } as unknown as IDBDatabase;
+
+  return {
+    db,
+    rows,
+    transactions: () => transactionCount,
+    getCalls: () => getCalls,
+  };
+}
+
+const exposure = { kind: 'exposure', ev: 0.7 };
+const row = (fileId: number, history: unknown[][], cursor: number): EditRowLike => ({ fileId, history, cursor });
+
+describe('listEditedFileIds', () => {
+  it('includes a file whose CURRENT snapshot has ops', async () => {
+    const { db } = fakeEditsDb([row(1, [[], [exposure]], 1)]);
+    const edited = await listEditedFileIds(db);
+    expect([...edited]).toEqual([1]);
+  });
+
+  it('excludes a never-edited row (empty base snapshot) and an undone edit (cursor back at base)', async () => {
+    // 'Edited' = what the editor would RENDER, not "ever touched": cursor at
+    // the empty snapshot (full undo) reads unedited, exactly like
+    // currentOps().length for the open file.
+    const { db } = fakeEditsDb([
+      row(1, [[]], 0), // fresh createEditState() row
+      row(2, [[], [exposure]], 0), // edited, then fully undone
+      row(3, [[], [exposure]], 1), // edited, not undone
+    ]);
+    const edited = await listEditedFileIds(db);
+    expect([...edited].sort((a, b) => a - b)).toEqual([3]);
+  });
+
+  it('excludes a row whose LATEST snapshot is empty but older snapshots had ops', async () => {
+    // Revert-to-base commits an empty snapshot at the tip: current state is
+    // unedited even though history is non-empty.
+    const { db } = fakeEditsDb([row(7, [[], [exposure], []], 2)]);
+    expect(await listEditedFileIds(db)).toEqual(new Set());
+  });
+
+  it('skips corrupt rows without throwing (loadEditState tolerance: one bad row must not blank the view)', async () => {
+    const { db } = fakeEditsDb([
+      { fileId: 1, history: 'not-an-array', cursor: 0 } as unknown as EditRowLike,
+      row(2, [[], [exposure]], 1),
+      row(3, [[]], 5), // cursor past the end
+      { fileId: 4, cursor: 0 } as unknown as EditRowLike, // no history at all
+      row(5, [[{ kind: 'bogus' }]], 0), // snapshot with an invalid op
+      row(6, [[exposure]], 0),
+    ]);
+    const edited = await listEditedFileIds(db);
+    expect([...edited].sort((a, b) => a - b)).toEqual([2, 6]);
+  });
+
+  it('an empty edits store resolves to an empty set', async () => {
+    const { db } = fakeEditsDb([]);
+    expect(await listEditedFileIds(db)).toEqual(new Set());
+  });
+
+  it('uses EXACTLY ONE transaction regardless of row count (getAll, never per-file get)', async () => {
+    const rows: EditRowLike[] = [];
+    for (let i = 0; i < 500; i++) rows.push(row(i, [[], [exposure]], i % 2));
+    const fake = fakeEditsDb(rows);
+    const edited = await listEditedFileIds(fake.db);
+    // cursor = i % 2: odd ids sit on the [exposure] snapshot, even ones on
+    // the empty base — exactly half read as edited.
+    expect(edited.size).toBe(250);
+    expect(fake.transactions()).toBe(1);
+    expect(fake.getCalls()).toBe(0);
+  });
+
+  it('rejects when the store read itself fails (the error is the caller to show, not to swallow)', async () => {
+    // Tolerance is for CORRUPT ROWS, not a broken transaction: loadEditState
+    // likewise rejects request.error.
+    const db = {
+      transaction: () => {
+        throw new Error('database closed');
+      },
+    } as unknown as IDBDatabase;
+    await expect(listEditedFileIds(db)).rejects.toThrow('database closed');
   });
 });

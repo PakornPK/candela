@@ -1385,6 +1385,230 @@ async function runChecks(cdp, { fast }) {
     if (n2 !== n0) throw new Error(`same-folder re-add changed rows: ${n0} -> ${n2}`);
     return `rows ${n0} -> second-copy import ${n1} (skipped all) -> same-folder re-add ${n2} (path merge)`;
   });
+
+  // C21: 'edited' filter column (Plan A). The engine semantics (ctx set,
+  // 'edited'/'unedited') are unit-tested 9x; the wiring proof: chips render,
+  // 'not edited' matches everything before any edit, and after committing a
+  // Develop edit exactly one photo moves between the two chips.
+  await check('edited filter: Develop commit moves a photo edited/unedited', 'planA', async () => {
+    if (fast) return 'SKIPPED (--fast: needs the Develop edit round-trip)';
+    await resetCatalog([
+      { name: 'E1.jpg', gen: { bg: '#c0392b', fg: '#2980b9' } },
+      { name: 'E2.jpg', gen: { bg: '#27ae60', fg: '#8e44ad' } },
+    ]);
+    const chip = (v) => `#filter-columns [data-column="edited"] [data-val="${v}"]`;
+    const hasChips = await cdp.evaluate(`JSON.stringify({
+      group: !!document.querySelector('#filter-columns [data-column="edited"]'),
+      edited: !!document.querySelector('${chip('edited')}'),
+      unedited: !!document.querySelector('${chip('unedited')}') })`);
+    const hc = JSON.parse(hasChips);
+    if (!hc.group || !hc.edited || !hc.unedited) throw new Error(`Edited chips missing: ${hasChips}`);
+    const chipText = await cdp.evaluate(`document.querySelector('${chip('unedited')}').textContent`);
+    if (!/not edited/i.test(chipText)) throw new Error(`unedited chip label = "${chipText}", expected "not edited"`);
+    // 'not edited' before any edit: both photos.
+    await cdp.evaluate(`document.querySelector('${chip('unedited')}').click()`);
+    await sleep(700);
+    const unedited0 = await cdp.evaluate('document.querySelectorAll(".catalog-cell").length');
+    if (unedited0 !== 2) throw new Error(`unedited chip before any edit = ${unedited0} cells, expected 2`);
+    const summary0 = await cdp.evaluate(`document.querySelector('#filter-summary').textContent`);
+    if (!/not edited/i.test(summary0)) throw new Error(`summary missing 'not edited': "${summary0}"`);
+    // Edit E1 in Develop: open it (click cell + synthetic dblclick), move
+    // exposure, commit with the change event the app listens for.
+    await cdp.evaluate(`document.querySelector('#filter-clear').click()`);
+    await sleep(400);
+    const e1id = await cdp.evaluate(`(() => {
+      const c = [...document.querySelectorAll('.catalog-cell')].find(c => /E1/i.test(c.title || c.getAttribute('aria-label') || c.textContent));
+      return c ? c.dataset.fileId : document.querySelector('.catalog-cell').dataset.fileId; })()`);
+    await cdp.evaluate(`document.querySelector('.catalog-cell[data-file-id="${e1id}"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
+    await sleep(400);
+    await cdp.evaluate(`document.querySelector('.catalog-cell[data-file-id="${e1id}"]').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}))`);
+    await waitFor(cdp, `document.querySelector('#canvas').width > 300 ? true : false`, { timeout: 30000 });
+    await cdp.evaluate(`(() => { const s = document.querySelector('#exposure');
+      s.value = '0.8'; s.dispatchEvent(new Event('input',{bubbles:true}));
+      s.dispatchEvent(new Event('change',{bubbles:true})); return 1; })()`);
+    await sleep(1500);
+    // The edits store must hold a non-empty currentOps row now.
+    const editRows = await cdp.evaluate(`new Promise(res => { const q = indexedDB.open('candela-catalog');
+      q.onsuccess = () => { const db = q.result;
+        const r = db.transaction('edits').objectStore('edits').getAll();
+        r.onsuccess = () => { db.close();
+          res(JSON.stringify(r.result.map(e => ({ id: e.fileId, ops: (e.history[e.cursor]||[]).length })))); }; }; })`);
+    const er = JSON.parse(editRows).filter((e) => e.ops > 0);
+    if (er.length !== 1 || er[0].id !== Number(e1id)) throw new Error(`edits store wrong after commit: ${editRows} (expected one row for ${e1id})`);
+    // Back to Library: 'edited' -> exactly E1; 'not edited' -> exactly E2.
+    await gotoModule('library');
+    await sleep(600);
+    await cdp.evaluate(`document.querySelector('${chip('edited')}').click()`);
+    await sleep(800);
+    const editedCells = JSON.parse(await cdp.evaluate(`JSON.stringify([...document.querySelectorAll('.catalog-cell')].map(c=>c.dataset.fileId))`));
+    if (editedCells.length !== 1 || editedCells[0] !== String(e1id)) {
+      throw new Error(`edited chip = [${editedCells}], expected exactly [${e1id}]`);
+    }
+    await cdp.evaluate(`document.querySelector('#filter-clear').click()`);
+    await sleep(400);
+    await cdp.evaluate(`document.querySelector('${chip('unedited')}').click()`);
+    await sleep(800);
+    const uneditedCells = await cdp.evaluate('document.querySelectorAll(".catalog-cell").length');
+    if (uneditedCells !== 1) throw new Error(`unedited after edit = ${uneditedCells} cells, expected 1`);
+    await cdp.evaluate(`document.querySelector('#filter-clear').click()`);
+    await sleep(300);
+    return `chips ok ("${chipText}") unedited0=2 -> Develop commit (edits row ${JSON.stringify(er)}) -> edited=[${e1id}] unedited=1`;
+  });
+
+  // C22: Previous Import source row (Plan A). LrC semantics: the photos ADDED
+  // by the most recent import — a re-import of the same folder MERGES (no new
+  // rows), so Previous Import must then be empty/stale-free; adding ONE new
+  // file makes it the whole batch.
+  await check('previous import: batch row scopes to newest additions only', 'planA', async () => {
+    if (fast) return 'SKIPPED (--fast: needs two import rounds)';
+    await resetCatalog([
+      { name: 'P1.jpg', gen: { bg: '#c0392b', fg: '#2980b9' } },
+      { name: 'P2.jpg', gen: { bg: '#27ae60', fg: '#8e44ad' } },
+    ]);
+    const piRow = `[...document.querySelectorAll('#folder-list .folder-row')].find(r => /previous import/i.test(r.textContent))`;
+    const hasRow = await cdp.evaluate(`!!(${piRow})`);
+    if (!hasRow) throw new Error('no Previous Import row in #folder-list after an import');
+    const clickPI = () => cdp.evaluate(`(${piRow}).click()`);
+    await clickPI();
+    await sleep(800);
+    const first = await cdp.evaluate(`JSON.stringify({ cells: document.querySelectorAll('.catalog-cell').length,
+      active: !!(${piRow})?.classList.contains('active') })`);
+    const f = JSON.parse(first);
+    if (f.cells !== 2 || !f.active) throw new Error(`Previous Import scope wrong on first import: ${first}`);
+    // Add ONE new file and re-import: Previous Import = just the new one.
+    await cdp.evaluate(`(async () => {
+      const root = await navigator.storage.getDirectory();
+      const dir = await root.getDirectoryHandle('fx');
+      const c = new OffscreenCanvas(600,400), g = c.getContext('2d');
+      g.fillStyle='#886611'; g.fillRect(0,0,600,400); g.fillStyle='#2244aa'; g.fillRect(300,200,300,200);
+      const b = await (await c.convertToBlob({type:'image/jpeg',quality:0.9})).arrayBuffer();
+      const fh = await dir.getFileHandle('P3.jpg',{create:true});
+      const w = await fh.createWritable(); await w.write(b); await w.close();
+      window.showDirectoryPicker = async () => dir;
+      return 1;
+    })()`);
+    await clickEl(cdp, '#add-folder');
+    await waitFor(cdp, `document.querySelectorAll('.catalog-cell').length >= 3 ? true : false`, { timeout: 30000 });
+    await clickPI();
+    await sleep(800);
+    const second = JSON.parse(await cdp.evaluate(`JSON.stringify({ cells: document.querySelectorAll('.catalog-cell').length,
+      names: [...document.querySelectorAll('.catalog-cell')].map(c => c.title || c.querySelector('img')?.alt || '') })`));
+    if (second.cells !== 1) throw new Error(`Previous Import after adding 1 file = ${second.cells} cells, expected 1 (${JSON.stringify(second.names)})`);
+    // Mutual exclusion: clicking a folder row clears the PI scope and vice versa.
+    const folderRow = `[...document.querySelectorAll('#folder-list .folder-row')].find(r => !/all folders|previous import/i.test(r.textContent))`;
+    await cdp.evaluate(`(${folderRow}).click()`);
+    await sleep(800);
+    const excl = JSON.parse(await cdp.evaluate(`JSON.stringify({
+      folderActive: !!(${folderRow})?.classList.contains('active'),
+      piActive: !!(${piRow})?.classList.contains('active'),
+      cells: document.querySelectorAll('.catalog-cell').length })`));
+    if (excl.piActive || !excl.folderActive) throw new Error(`folder click did not clear Previous Import scope: ${JSON.stringify(excl)}`);
+    await clickPI();
+    await sleep(700);
+    const excl2 = JSON.parse(await cdp.evaluate(`JSON.stringify({
+      folderActive: !!(${folderRow})?.classList.contains('active'),
+      piActive: !!(${piRow})?.classList.contains('active'),
+      cells: document.querySelectorAll('.catalog-cell').length })`));
+    if (excl2.folderActive || !excl2.piActive || excl2.cells !== 1) throw new Error(`PI click did not clear folder scope: ${JSON.stringify(excl2)}`);
+    return `first import PI=2 cells; +P3 re-import PI=1 (newest batch only); folder/PI mutual exclusion both ways`;
+  });
+
+  // C23: B-key nudge (Plan A). Teaching, never gating: 20 picks with an empty
+  // tray flashes the B hint EXACTLY once per session, and never when the tray
+  // already holds photos.
+  await check('nudge: 20 picks + empty tray flashes press-B once, never twice', 'planA', async () => {
+    if (fast) return 'SKIPPED (--fast: needs 20 seeded photos)';
+    const files = [];
+    for (let i = 1; i <= 20; i++) {
+      files.push({ name: `N${String(i).padStart(2, '0')}.jpg`, gen: { bg: `hsl(${i * 17},60%,45%)`, fg: `hsl(${i * 17 + 120},70%,60%)` } });
+    }
+    await resetCatalog(files);
+    // Select all 20: plain click on the first, meta-click the rest.
+    await cdp.evaluate(`(() => { const cs = [...document.querySelectorAll('.catalog-cell')];
+      cs[0].dispatchEvent(new MouseEvent('click',{bubbles:true}));
+      for (let i = 1; i < cs.length; i++) cs[i].dispatchEvent(new MouseEvent('click',{bubbles:true,metaKey:true}));
+      return cs.length; })()`);
+    await sleep(600);
+    const sel = await cdp.evaluate('document.querySelectorAll(".catalog-cell.selected").length');
+    if (sel !== 20) throw new Error(`selected ${sel} cells, expected 20 (grid virtualization may hide some — seed count matters)`);
+    // P picks the whole selection; the nudge should flash immediately after.
+    await cdp.evaluate(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'p',bubbles:true}))`);
+    await waitFor(cdp, `/press B/i.test(document.querySelector('#selection-info')?.textContent || '') ? document.querySelector('#selection-info').textContent : false`, { timeout: 8000 });
+    const msg = await cdp.evaluate(`document.querySelector('#selection-info').textContent`);
+    if (!/Quick Collection/i.test(msg)) throw new Error(`nudge text missing 'Quick Collection': "${msg}"`);
+    // Second pick burst must NOT re-nudge (session latch). Wait out the flash
+    // first so the assertion reads a genuinely empty box, not a stale one.
+    await sleep(2500);
+    await cdp.evaluate(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'p',bubbles:true}))`); // unpick all
+    await sleep(400);
+    await cdp.evaluate(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'p',bubbles:true}))`); // pick all again
+    await sleep(900);
+    const after = await cdp.evaluate(`document.querySelector('#selection-info').textContent || ''`);
+    if (/press B/i.test(after)) throw new Error(`nudge fired TWICE in one session: "${after}"`);
+    // Tray non-empty suppresses: B one photo into the tray, reload for a fresh
+    // session (latch resets), pick all -> no nudge.
+    await cdp.evaluate(`(() => { const cs=[...document.querySelectorAll('.catalog-cell')];
+      cs[0].dispatchEvent(new MouseEvent('click',{bubbles:true})); return 1; })()`);
+    await sleep(300);
+    await cdp.evaluate(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'b',bubbles:true}))`);
+    await sleep(800);
+    await cdp.send('Page.reload', { ignoreCache: false });
+    await sleep(2500);
+    await waitFor(cdp, `document.querySelectorAll('.catalog-cell').length >= 20 ? true : false`, { timeout: 20000 });
+    await cdp.evaluate(`(() => { const cs = [...document.querySelectorAll('.catalog-cell')];
+      cs[0].dispatchEvent(new MouseEvent('click',{bubbles:true}));
+      for (let i = 1; i < cs.length; i++) cs[i].dispatchEvent(new MouseEvent('click',{bubbles:true,metaKey:true}));
+      return 1; })()`);
+    await sleep(500);
+    await cdp.evaluate(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'p',bubbles:true}))`);
+    await sleep(1200);
+    const suppressed = await cdp.evaluate(`document.querySelector('#selection-info').textContent || ''`);
+    if (/press B/i.test(suppressed)) throw new Error(`nudge fired with a non-empty tray: "${suppressed}"`);
+    return `nudge once ("${msg.slice(0, 60)}…"), second burst silent, tray-non-empty suppressed`;
+  });
+
+  // C24: smart collection from the grid selection (Plan A — the engine's
+  // fileIds scope already existed; this proves the dialog defaults to the
+  // selection and the saved rule bounds to exactly those photos).
+  await check('smart-from-selection: scope defaults to selection; rule stays bounded', 'planA', async () => {
+    if (fast) return 'SKIPPED (--fast: needs the 20-photo catalog)';
+    await gotoModule('library');
+    // Select exactly 3 cells.
+    await cdp.evaluate(`(() => { const cs = [...document.querySelectorAll('.catalog-cell')];
+      cs[0].dispatchEvent(new MouseEvent('click',{bubbles:true}));
+      cs[1].dispatchEvent(new MouseEvent('click',{bubbles:true,metaKey:true}));
+      cs[2].dispatchEvent(new MouseEvent('click',{bubbles:true,metaKey:true})); return 1; })()`);
+    await sleep(400);
+    const sel = await cdp.evaluate('document.querySelectorAll(".catalog-cell.selected").length');
+    if (sel !== 3) throw new Error(`selected ${sel}, expected 3`);
+    // Open the smart dialog: scope must default to 'selected' and its label
+    // must name the count; preview must match 3 (no conditions set).
+    await clickEl(cdp, '#add-smart-collection');
+    await waitFor(cdp, `document.querySelector('#smart-dialog').open ? true : false`, { timeout: 5000 });
+    const pre = JSON.parse(await cdp.evaluate(`JSON.stringify({
+      scope: document.querySelector('#smart-scope').value,
+      scopeLabel: document.querySelector('#smart-scope option[value="selected"]').textContent,
+      preview: document.querySelector('#smart-preview').textContent })`));
+    if (pre.scope !== 'selected') throw new Error(`scope defaulted to '${pre.scope}', expected 'selected' with a 3-photo selection`);
+    if (!/3/.test(pre.scopeLabel)) throw new Error(`scope label does not name the selection count: "${pre.scopeLabel}"`);
+    if (!/Matches 3/i.test(pre.preview)) throw new Error(`preview count wrong: "${pre.preview}"`);
+    // Name + save; the new collection must show count 3 and scope to exactly
+    // those photos.
+    await cdp.evaluate(`(() => { const n = document.querySelector('#smart-name');
+      n.value = 'QA picks'; n.dispatchEvent(new Event('input',{bubbles:true})); return 1; })()`);
+    await cdp.evaluate(`document.querySelector('#smart-save').click()`);
+    await waitFor(cdp, `document.querySelector('#smart-dialog').open === false ? true : false`, { timeout: 8000 });
+    await sleep(600);
+    const row = await cdp.evaluate(`(() => { const r = [...document.querySelectorAll('.smart-row, .collection-row')].find(e => /QA picks/.test(e.textContent));
+      return r ? r.textContent.replace(/\\s+/g,' ').trim() : null; })()`);
+    if (!row || !/3/.test(row)) throw new Error(`saved smart collection row missing or wrong count: ${JSON.stringify(row)}`);
+    // Click it: grid scopes to the 3 rule photos (the other 17 disappear).
+    await cdp.evaluate(`[...document.querySelectorAll('.smart-row, .collection-row')].find(e => /QA picks/.test(e.textContent)).click()`);
+    await sleep(900);
+    const scoped = await cdp.evaluate('document.querySelectorAll(".catalog-cell").length');
+    if (scoped !== 3) throw new Error(`smart-from-selection scoped to ${scoped} cells, expected exactly 3 (rule must stay bounded to its fileIds)`);
+    return `dialog scope='${pre.scope}' label="${pre.scopeLabel.trim()}" preview="${pre.preview.slice(0,40)}" saved row="${row.slice(0,40)}" grid scoped 20->${scoped}`;
+  });
 }
 
 // ---- main ------------------------------------------------------------------

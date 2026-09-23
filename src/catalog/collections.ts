@@ -86,6 +86,32 @@ export function describeTarget(collections: Collection[], targetId: number | nul
   return `Target: ${found ? found.name : QUICK_COLLECTION_NAME}`;
 }
 
+// ---- post-cull nudge (Plan A) ----------------------------------------------
+
+// A pass this big is a cull, not a browse: below it, flagging a few keepers
+// rarely means "gather a working set", and a toast would be noise.
+export const NUDGE_PICK_THRESHOLD = 20;
+
+// One-line teaching moment the wiring flashes verbatim (and remembers it
+// flashed — `alreadyNudged` comes from the caller's session state). Returns
+// the message only when ALL hold: enough picks to be a working set, the
+// Quick Collection tray is EMPTY (a non-empty tray means B is already in
+// use — the picks may even be in it — so the nudge would be wrong), and the
+// user has not been nudged yet. WHY: after a big culling pass the picks
+// exist only as flag chips; LrC users expect the working set to be
+// gatherable with one key. This teaches B without gating anything — null
+// (never an empty string) is the "say nothing" signal.
+export function collectionNudge(
+  pickedCount: number,
+  trayMemberCount: number,
+  alreadyNudged: boolean,
+): string | null {
+  if (alreadyNudged) return null;
+  if (trayMemberCount !== 0) return null;
+  if (pickedCount < NUDGE_PICK_THRESHOLD) return null;
+  return `${pickedCount} photos flagged — press B to gather them into the ${QUICK_COLLECTION_NAME}.`;
+}
+
 // --------------------------------------------------------------------------
 // Existing CRUD (main.ts depends on these signatures — do not change them)
 // --------------------------------------------------------------------------
