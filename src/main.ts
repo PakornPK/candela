@@ -75,7 +75,7 @@ import { defaultViewState, viewStateToCropFrac, zoomToward, panBy, type ViewStat
 // pure+IDB modules; main.ts only binds DOM to them (house rule).
 import { applyMissingBadges, classifyHandleError, markMissing, probeFileHandle, promptRelink } from './catalog/missing';
 import { confirmMessage, deleteFilesFromDisk, deleteKeyVerb, removeFilesFromCatalog, type RemoveVerb } from './catalog/remove';
-import { listCollections, createCollection, deleteCollection, getCollection, addFilesToCollection, removeFilesFromCollection, isQuickCollection, describeTarget, ensureQuickCollection, getTargetCollectionId, setTargetCollection, toggleInTarget, type Collection } from './catalog/collections';
+import { listCollections, createCollection, deleteCollection, getCollection, addFilesToCollection, removeFilesFromCollection, isQuickCollection, isReservedTrayName, describeTarget, ensureQuickCollection, getTargetCollectionId, setTargetCollection, toggleInTarget, QUICK_COLLECTION_NAME, type Collection } from './catalog/collections';
 import { listSmartCollections, createSmartCollection, updateSmartCollection, deleteSmartCollection, querySmartCollection, buildCriteria, criteriaToForm, describeCriteria, hasCriteria, type CriteriaForm, type SmartCollection, type SmartCollectionCriteria } from './catalog/smartCollections';
 // Keywords / IPTC / backup glue. The heavy logic lives in the catalog modules
 // (pure + IDB halves, unit-tested there); main.ts only binds DOM to it.
@@ -5281,6 +5281,11 @@ async function init(): Promise<void> {
   async function convertTargetToCollection(): Promise<void> {
     const name = window.prompt('Save the target collection as:', 'Culled selection');
     if (!name || !name.trim()) return;
+    // Same reserved-name guard as the + button (data layer refuses too).
+    if (isReservedTrayName(name)) {
+      flashSelectionInfo(`"${QUICK_COLLECTION_NAME}" is reserved — the tray already IS the target; pick another name to save a kept set`);
+      return;
+    }
     const quick = await ensureQuickCollection(db);
     const target =
       (targetCollectionId !== null ? await getCollection(db, targetCollectionId) : null) ?? quick;
@@ -6001,6 +6006,13 @@ async function init(): Promise<void> {
   addCollectionBtn.addEventListener('click', async () => {
     const name = prompt('Collection name:');
     if (!name) return;
+    // Reserved-name guard at the prompt (the data layer also refuses — this
+    // just makes the refusal a friendly inline message instead of an error
+    // toast, and stops the user losing their typed selection context).
+    if (isReservedTrayName(name)) {
+      flashSelectionInfo(`"${QUICK_COLLECTION_NAME}" is the built-in B-key tray — press B to add photos to it, or pick another name`);
+      return;
+    }
     const ids = selectionTargets();
     try {
       const created = await createCollection(db, name, ids);

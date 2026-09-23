@@ -32,6 +32,16 @@ interface TargetMarker {
 
 export const QUICK_COLLECTION_NAME = 'Quick Collection';
 
+// The tray's name is RESERVED: adoption-by-name (ensureQuickCollection) and
+// the user's own mental model both treat 'Quick Collection' as the one
+// built-in tray. Letting a second row claim the name is how a catalog ends
+// up showing a pile of Quick Collections (measured in a real dogfood
+// catalog) — block it at the data layer so EVERY caller is protected,
+// not just the two prompts in main.ts.
+export function isReservedTrayName(name: string): boolean {
+  return name.trim().toLowerCase() === QUICK_COLLECTION_NAME.toLowerCase();
+}
+
 // --------------------------------------------------------------------------
 // Pure layer (unit-tested in collections.test.ts)
 // --------------------------------------------------------------------------
@@ -93,6 +103,13 @@ export async function listCollections(db: IDBDatabase): Promise<Collection[]> {
 }
 
 export async function createCollection(db: IDBDatabase, name: string, fileIds: number[] = [], quick = false): Promise<Collection> {
+  // Reserved-name guard (see isReservedTrayName). `quick = true` is the
+  // engine's own tray-creation path and is the only caller allowed past it.
+  if (!quick && isReservedTrayName(name)) {
+    throw new Error(
+      `"${QUICK_COLLECTION_NAME}" is reserved — it is the built-in B-key tray and always exists. Choose another name (photos go into it with the B key).`,
+    );
+  }
   const now = Date.now();
   const collection: Collection = { name, fileIds, createdAt: now, updatedAt: now, ...(quick ? { quick: true } : {}) };
   return new Promise((resolve, reject) => {
@@ -205,20 +222,46 @@ export async function setTargetCollection(db: IDBDatabase, id: number | null): P
 // double-call could race two creates; culling is single-pointer work and the
 // second row is harmless (one is simply ignored) — not worth a lock.
 //
-// The tray is IDENTIFIED by its `quick` flag, so this function is the flag's
-// only writer: create stamps it, and an unflagged row named 'Quick Collection'
-// (created by builds before the stamp existed) is adopted in place rather than
-// duplicated. Without that adoption every ensure call minted another tray —
-// measured 1 -> 3 -> 5 rows across two reloads in the browser. A user
-// collection literally named 'Quick Collection' becomes the tray; the name is
-// reserved, the same contract LrC uses.
+// The tray is IDENTIFIED by its `quick` flag, and its name is RESERVED
+// (isReservedTrayName). This function is the single owner of the invariant
+// "exactly one Quick Collection tray exists":
+//   - no candidate         -> create one (flagged);
+//   - one candidate        -> adopt/return it (stamping the flag if a legacy
+//                             unflagged row bore the reserved name);
+//   - SEVERAL candidates   -> consolidate: fold every duplicate's members
+//     into the survivor and delete the rest.
+// The consolidation is why a catalog polluted by the old mint-a-row-per-
+// ensure bug (measured 1 -> 3 -> 5 trays, and real dogfood catalogs that
+// ran that build) heals itself on the next boot instead of showing a pile
+// of Quick Collections forever. After the first clean boot it is a no-op.
 export async function ensureQuickCollection(db: IDBDatabase): Promise<Collection> {
   const all = await listCollections(db);
-  const flagged = all.find(isQuickCollection);
-  if (flagged) return flagged;
-  const legacy = all.find((c) => c.name === QUICK_COLLECTION_NAME);
-  if (legacy) return updateCollection(db, legacy.id!, { quick: true });
-  return createCollection(db, QUICK_COLLECTION_NAME, [], true);
+  // A tray candidate is a flagged row OR any row bearing the reserved name
+  // (legacy rows predate the flag).
+  const candidates = all.filter((c) => isQuickCollection(c) || isReservedTrayName(c.name));
+  if (candidates.length === 0) {
+    return createCollection(db, QUICK_COLLECTION_NAME, [], true);
+  }
+  // Survivor: prefer an already-flagged row, else the first candidate
+  // (listCollections returns store order, so the oldest-created row wins).
+  const survivor = candidates.find(isQuickCollection) ?? candidates[0];
+  const dupes = candidates.filter((c) => c.id !== survivor.id);
+  // Nothing to do when there is exactly one candidate and it is already the
+  // flagged tray — the steady state every boot after the first hits.
+  if (dupes.length === 0 && survivor.quick === true) return survivor;
+  const members = new Set<number>(survivor.fileIds);
+  for (const d of dupes) for (const id of d.fileIds) members.add(id);
+  const merged = await updateCollection(db, survivor.id!, { quick: true, fileIds: Array.from(members) });
+  // Delete the absorbed duplicates. deleteCollection refuses a FLAGGED row
+  // (it cannot know the survivor already took over the identity), so unflag
+  // each dupe first — a duplicate only carries the flag in pathological
+  // states (a restored backup containing several trays), but the
+  // consolidation must not throw there either.
+  for (const d of dupes) {
+    if (d.quick) await updateCollection(db, d.id!, { quick: false });
+    await deleteCollection(db, d.id!);
+  }
+  return merged;
 }
 
 // The B key's whole behaviour against the current target: toggle each id —

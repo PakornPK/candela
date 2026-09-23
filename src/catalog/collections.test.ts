@@ -3,6 +3,7 @@ import {
   splitToggle,
   describeTarget,
   isQuickCollection,
+  createCollection,
   ensureQuickCollection,
   deleteCollection,
   toggleInTarget,
@@ -162,6 +163,16 @@ function fakeCollectionsDb(initial: StoreRow[] = []) {
   return { db, rows };
 }
 
+// How many rows still count as the Quick Collection tray (flagged OR bearing
+// the reserved name). The invariant ensureQuickCollection must hold is
+// "exactly one" — this counts it from the raw store so a consolidation that
+// deleted nothing (or left an unflagged name-twin) is caught.
+function traysIn(rows: Map<number | string, StoreRow>): number {
+  return [...rows.values()].filter(
+    (r) => r.quick === true || String(r.name).trim().toLowerCase() === QUICK_COLLECTION_NAME.toLowerCase(),
+  ).length;
+}
+
 describe('ensureQuickCollection (IDB)', () => {
   it('creates the tray ONCE and stamps the quick flag', async () => {
     const { db, rows } = fakeCollectionsDb();
@@ -186,6 +197,59 @@ describe('ensureQuickCollection (IDB)', () => {
     expect(rows.size).toBe(1);
     const again = await ensureQuickCollection(db);
     expect(again.id).toBe(7);
+  });
+
+  it('CONSOLIDATES several trays into one, merging members (heals old polluted catalogs)', async () => {
+    // The old mint-a-row-per-ensure build left real catalogs with a pile of
+    // Quick Collections; the next boot must fold them into the survivor
+    // (oldest row wins) without losing any member.
+    const { db, rows } = fakeCollectionsDb([
+      { id: 2, name: QUICK_COLLECTION_NAME, fileIds: [10, 11], createdAt: 1, updatedAt: 1 },
+      { id: 5, name: QUICK_COLLECTION_NAME, fileIds: [11, 12], createdAt: 2, updatedAt: 2 },
+      { id: 9, name: QUICK_COLLECTION_NAME, fileIds: [], createdAt: 3, updatedAt: 3, quick: true },
+      { id: 4, name: 'Wedding', fileIds: [20], createdAt: 4, updatedAt: 4 },
+    ]);
+    const tray = await ensureQuickCollection(db);
+    // Survivor preference: the flagged row (id 9), even though id 2 is older —
+    // the flag is the identity, and a legacy adoption only applies when
+    // nothing is flagged.
+    expect(tray.id).toBe(9);
+    expect(tray.quick).toBe(true);
+    expect(tray.fileIds.sort((a, b) => a - b)).toEqual([10, 11, 12]); // union, deduped
+    // Duplicates gone; the user's real collection untouched.
+    expect(rows.has(2)).toBe(false);
+    expect(rows.has(5)).toBe(false);
+    expect(rows.get(4)).toMatchObject({ name: 'Wedding', fileIds: [20] });
+    expect(traysIn(rows)).toBe(1);
+    // Idempotent: a second call is a no-op.
+    const again = await ensureQuickCollection(db);
+    expect(again.id).toBe(9);
+    expect(traysIn(rows)).toBe(1);
+  });
+
+  it('a flagged duplicate (restored-backup pathology) also consolidates without throwing', async () => {
+    const { db, rows } = fakeCollectionsDb([
+      { id: 1, name: QUICK_COLLECTION_NAME, fileIds: [1], createdAt: 1, updatedAt: 1, quick: true },
+      { id: 2, name: QUICK_COLLECTION_NAME, fileIds: [2], createdAt: 2, updatedAt: 2, quick: true },
+    ]);
+    const tray = await ensureQuickCollection(db);
+    expect(tray.quick).toBe(true);
+    expect(tray.fileIds.sort((a, b) => a - b)).toEqual([1, 2]);
+    expect(traysIn(rows)).toBe(1);
+  });
+
+  it('createCollection REFUSES the reserved tray name (monkey-proof at the data layer)', async () => {
+    // A user (or a future UI path) naming their own collection 'Quick
+    // Collection' must be blocked, or the next ensure adopts it as the tray
+    // and the catalog grows another undeletable pile.
+    const { db, rows } = fakeCollectionsDb();
+    await expect(createCollection(db, 'Quick Collection', [1])).rejects.toThrow(/reserved/i);
+    await expect(createCollection(db, ' quick collection ', [1])).rejects.toThrow(/reserved/i); // case/space folded
+    expect(rows.size).toBe(0); // nothing was written
+    // A normal name still works.
+    const ok = await createCollection(db, 'Wedding selects', [1]);
+    expect(ok.name).toBe('Wedding selects');
+    expect(rows.size).toBe(1);
   });
 
   it('the adopted/created tray is then undeletable', async () => {
