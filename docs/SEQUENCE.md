@@ -3,8 +3,8 @@
 **ไฟล์นี้คือ state ของ loop** — อ่านมันก่อนทุก tick และอัปเดต `[x]` + บรรทัด "ตำแหน่งปัจจุบัน" ทันทีที่งานหนึ่งขั้นจบ
 เอกสารอ้างอิง: `docs/adr/0001-layered-architecture.md` (Accepted) · `docs/superpowers/plans/2026-09-27-main-ts-hardening-plan.md` (rev.2) · `docs/reviews/2026-09-27-main-ts-review.md` (42 findings)
 
-**ตำแหน่งปัจจุบัน:** X3 (R1-18 contactPrev) — ยังไม่เริ่ม
-**commit ล่าสุดที่ push แล้ว:** `87902be` (X1 = R1-3 XSS ปิดที่ `cd0405d` · QA 28/28) — X2 = R1-14 ปิดแล้วต่อจาก commit นี้ (QA 29/29) *· ใส่ hash ของ X2 ตอนเริ่ม tick X3 ตาม convention ข้างล่าง*
+**ตำแหน่งปัจจุบัน:** X3 (R1-18 contactPrev) — กำลังทำ
+**commit ล่าสุดที่ push แล้ว:** `f396568` (X2 = R1-14 error banner · QA 29/29) · ก่อนหน้า: `cd0405d` (X1 = R1-3 XSS · QA 28/28), `87902be`, `9538ef9` (docs)
 *(convention: อัปเดตสองบรรทัดนี้ตอน**เริ่ม** tick ถัดไป ไม่ใช่ท้าย tick เดียวกัน — commit เขียน hash ของตัวเองไม่ได้)*
 
 ---
@@ -20,6 +20,18 @@
 7. **ห้าม background งานยาวแล้วจบ turn** — รัน foreground, timeout 600000ms (บทเรียนจาก `bg_b90b190e` และ `bg_0f8e4c4e`)
 8. **thinker วางแผน/ตรวจ diff, worker ลงมือ** — worker ติดอะไรให้หยุดแล้วรายงาน ห้ามเดา
 9. commit แยกตามขั้น · push เมื่อจบหนึ่งหน่วย · `git status` ต้องสะอาดก่อนขึ้นขั้นถัดไป
+10. **หา anchor ด้วยเนื้อหา ไม่ใช่เลขบรรทัด** — `src/main.ts` เหลือ 6,637 บรรทัด (จาก 6,625 ตอน review) และจะขยับทุก step ดังนั้นเลขบรรทัดใน `docs/reviews/…` และในไฟล์นี้**คลาดได้ ±10** เสมอ บังคับกับ worker ทุกตัว
+
+---
+
+## บันทึกค้าง — residual ที่จงใจเลื่อน (ห้ามหาย ห้ามทำเงียบ ๆ)
+
+| จากขั้น | residual | เลื่อนไป | เหตุผล |
+|---|---|---|---|
+| X2 (R1-14) | `setTimeout(clearError, 3000)` **ยังไม่กัน timer stale** — ถ้ามี error ใหม่โผล่ภายใน 3 วิหลังข้อความ recovery ตัวจับเวลาจะ clear error ใหม่นั้นแทน (review เสนอ guard `if (errorMessageEl.textContent === 'Recovered from GPU device loss.') clearError()`) | **U2** | X2 เป็น Class C ขอบเขตขั้นต่ำ และการ compare string เปราะ — U2 จะทำ `app/errorBanner.ts` ที่มี auto-dismiss semantics ถูกต้อง (generation counter) ซึ่งแก้เรื่องนี้เป็นธรรมชาติ |
+| X1 (R1-3) | `secondMonitor.ts:88` มี `document.write` (template ไม่มี interpolation จึงไม่อันตรายวันนี้) แต่ static pin ของ X1 ครอบเฉพาะ `src/main.ts` | **M10** | ตอนย้าย `secondMonitor.ts` เข้า `adapters/dom/` ให้ขยาย static pin ครอบทั้ง `src/` ไม่ใช่แค่ entry |
+| X1 (R1-3) | `backup.ts` restore row ตรง ๆ โดยไม่ validate shape ต่อ field (เป็นอีกครึ่งของ R1-3 และโยงกับ R1-27) | **U3 / M5** | ตามแผนเดิม |
+| X2 (R1-14) | static pin (a) ของ QA check เป็นของชั่วคราว — มันสแกนข้อความในไฟล์ ไม่ใช่พฤติกรรม | **U2** | ต้องแทนด้วย unit test จริงบน `app/errorBanner.ts` ที่ extract แล้ว |
 
 ---
 
