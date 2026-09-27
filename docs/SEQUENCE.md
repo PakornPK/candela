@@ -3,8 +3,9 @@
 **ไฟล์นี้คือ state ของ loop** — อ่านมันก่อนทุก tick และอัปเดต `[x]` + บรรทัด "ตำแหน่งปัจจุบัน" ทันทีที่งานหนึ่งขั้นจบ
 เอกสารอ้างอิง: `docs/adr/0001-layered-architecture.md` (Accepted) · `docs/superpowers/plans/2026-09-27-main-ts-hardening-plan.md` (rev.2) · `docs/reviews/2026-09-27-main-ts-review.md` (42 findings)
 
-**ตำแหน่งปัจจุบัน:** X2 (R1-14 error banner) — กำลังทำ
-**commit ล่าสุด:** X1 = R1-3 (fix) — `git log -1` (commit หนึ่งเขียน hash ของตัวเองลงไปไม่ได้)
+**ตำแหน่งปัจจุบัน:** X2 (R1-14 error banner) — ยังไม่เริ่ม
+**commit ล่าสุดที่ push แล้ว:** `cd0405d` (X1 = R1-3 XSS · QA 28/28)
+*(convention: อัปเดตสองบรรทัดนี้ตอน**เริ่ม** tick ถัดไป ไม่ใช่ท้าย tick เดียวกัน — commit เขียน hash ของตัวเองไม่ได้)*
 
 ---
 
