@@ -36,6 +36,7 @@ import { BW_FILTERS, BW_TONES, type BwFilterId } from './gpu/bw';
 import { getState, setSelection, subscribe, type ModuleId } from './app/state';
 import { registerModule, switchModule } from './app/modules';
 import { createFilmstrip } from './app/filmstrip';
+import { createPrintModule } from './app/printModule';
 import { keyToAction, type ShortcutContext } from './app/shortcuts';
 // The three cull-workflow engines (gap P0-5 / P1-5 / P1-2). All logic lives in
 // these pure modules — main.ts only binds DOM to them (house rule: the engine
@@ -238,13 +239,6 @@ const contactSheetLabel = document.querySelector<HTMLSpanElement>('#contact-shee
 const contactRollLabel = document.querySelector<HTMLDivElement>('#contact-roll-label')!;
 const contactGrid = document.querySelector<HTMLDivElement>('#contact-grid')!;
 const contactExport = document.querySelector<HTMLButtonElement>('#contact-export')!;
-const printPaper = document.querySelector<HTMLSelectElement>('#print-paper')!;
-const printOrientation = document.querySelector<HTMLSelectElement>('#print-orientation')!;
-const printMargin = document.querySelector<HTMLSelectElement>('#print-margin')!;
-const printButton = document.querySelector<HTMLButtonElement>('#print-btn')!;
-const printPageEl = document.querySelector<HTMLDivElement>('#print-page')!;
-const printImageEl = document.querySelector<HTMLImageElement>('#print-image')!;
-const printEmptyEl = document.querySelector<HTMLDivElement>('#print-empty')!;
 const errorEl = document.querySelector<HTMLDivElement>('#error')!;
 const errorMessageEl = document.querySelector<HTMLParagraphElement>('#error-message')!;
 const errorDetailEl = document.querySelector<HTMLPreElement>('#error-detail')!;
@@ -4946,103 +4940,15 @@ async function init(): Promise<void> {
       console.error('Failed to load compare image:', err);
     }
   }
-  // ---- print ----
-  // The sheet carries the same developed bitmap the Export path produces
-  // (exportImage), so a print can never drift from what the sliders show --
-  // the only print-specific concern here is laying it out on paper.
-  // Paper sizes are the physical sheet sizes in portrait; a 5x7 is photo
-  // paper, not a document size.
-  const PRINT_PAPERS: Record<string, { w: number; h: number }> = {
-    a4: { w: 210, h: 297 },
-    letter: { w: 215.9, h: 279.4 },
-    '5x7': { w: 127, h: 177.8 },
-  };
-  let printObjectUrl: string | null = null;
-
-  // @page can't read custom properties, so the sheet size handed to the print
-  // dialog lives in a style element rewritten on every layout change.
-  const printPageStyle = document.createElement('style');
-  document.head.appendChild(printPageStyle);
-
-  function applyPrintLayout(): void {
-    const paper = PRINT_PAPERS[printPaper.value] ?? PRINT_PAPERS.a4;
-    const landscape = printOrientation.value === 'landscape';
-    const w = landscape ? paper.h : paper.w;
-    const h = landscape ? paper.w : paper.h;
-    printPageEl.style.setProperty('--print-page-w', `${w}mm`);
-    printPageEl.style.setProperty('--print-page-h', `${h}mm`);
-    printPageEl.style.setProperty('--print-margin', `${printMargin.value}mm`);
-    printPageStyle.textContent = `@page { size: ${w}mm ${h}mm; margin: 0; }`;
-    fitPrintPreview();
-  }
-
-  // The preview page is real size (an A4 sheet is 1123px tall); in a shorter
-  // window most of it sat below the fold with no hint to scroll (visual pass
-  // 2026-09-18). Scale-to-fit down (never up) so the whole sheet reads at a
-  // glance; @media print resets the transform, the dialog prints at real size.
-  function fitPrintPreview(): void {
-    const box = printPageEl.parentElement;
-    if (!box || box.clientWidth === 0) return; // hidden module: no geometry
-    const availW = box.clientWidth - 48; // .print-content padding
-    const availH = box.clientHeight - 48;
-    const pageW = printPageEl.offsetWidth || 1;
-    const pageH = printPageEl.offsetHeight || 1;
-    const scale = Math.max(0.1, Math.min(1, availW / pageW, availH / pageH));
-    printPageEl.style.setProperty('--print-scale', String(scale));
-  }
-  window.addEventListener('resize', fitPrintPreview);
-
-  function setPrintImage(blob: Blob | null): void {
-    if (printObjectUrl) {
-      URL.revokeObjectURL(printObjectUrl);
-      printObjectUrl = null;
-    }
-    if (!blob) {
-      printImageEl.removeAttribute('src');
-      printImageEl.hidden = true;
-      printEmptyEl.hidden = false;
-      return;
-    }
-    printObjectUrl = URL.createObjectURL(blob);
-    printImageEl.src = printObjectUrl;
-    printImageEl.hidden = false;
-    printEmptyEl.hidden = true;
-  }
-
-  async function renderPrintView(): Promise<void> {
-    applyPrintLayout();
-    // The developed pixels only exist once the file is loaded in the pipeline
-    // (openFile decodes lazily), so printing a grid-only selection would print
-    // a thumbnail-grade nothing. Say so instead.
-    if (currentFileId === null || loadedFileId !== currentFileId) {
-      printEmptyEl.textContent = currentFileId === null
-        ? 'Select a photo in Library to print it.'
-        : "Open this photo in Develop first — its edits aren't on the GPU yet.";
-      setPrintImage(null);
-      return;
-    }
-    const url = currentFileId;
-    try {
-      syncDodgeMaskToGPU();
-      const blob = await pipeline.exportImage(currentOpsFromSliders(), {
-        format: 'jpeg',
-        bitDepth: 8,
-        longEdge: null,
-      });
-      if (currentFileId !== url) return; // selection moved on mid-encode
-      setPrintImage(blob);
-    } catch (err) {
-      showError("Couldn't lay out the print page.", errorDetail(err));
-    }
-  }
-
-  for (const control of [printPaper, printOrientation, printMargin]) {
-    control.addEventListener('change', applyPrintLayout);
-  }
-  printButton.addEventListener('click', () => {
-    window.print();
+  const printModule = createPrintModule({
+    getPipeline: () => pipeline,
+    getCurrentFileId: () => currentFileId,
+    getLoadedFileId: () => loadedFileId,
+    currentOps: currentOpsFromSliders,
+    syncDodgeMask: syncDodgeMaskToGPU,
+    showError,
+    errorDetail,
   });
-  applyPrintLayout();
 
   // ---- Survey (gap P1-5) ----
   // LrC's N view: the review set IS the multi-selection (getState().selectedIds),
@@ -5294,7 +5200,7 @@ async function init(): Promise<void> {
     // Re-encode on entry: edits made in Develop while this module was hidden
     // are not in the sheet that is already on screen.
     onShow: () => {
-      void renderPrintView();
+      void printModule.render();
     },
     onHide: () => {},
   });
