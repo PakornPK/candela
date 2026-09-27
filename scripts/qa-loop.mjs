@@ -306,7 +306,17 @@ function inspectPdf(buf) {
   const darkByArea = darkFills
     .map((f) => ({ ...f, area: Math.abs(f.rect[2] * f.rect[3]) }))
     .sort((a, b) => b.area - a.area);
-  return { pages, images, fills, darkFills: darkByArea, placements, bytes: buf.length, streamBytes: stream.length };
+  // The real page box, so a caller never has to assume the paper size it asked
+  // for: preferCSSPageSize means @page decides it. Skia writes /MediaBox as an
+  // UNCOMPRESSED dictionary entry (measured here: "/MediaBox [0 0 594.95996
+  // 841.91998]" for 210mm), so it comes off the raw latin1 string the same way
+  // the /Type and /Subtype counts above do. Note the space: MediaBox is
+  // PostScript points (72/inch), NOT the placement space — the page content
+  // opens with a `0.24 0 0 -0.24 0 H cm` (0.24 = 72/300), so placements are
+  // 1/300-inch and must be compared against MediaBox only after that scale.
+  const mb = raw.match(/\/MediaBox\s*\[([^\]]*)\]/);
+  const mediaBox = mb ? (mb[1].match(/[-\d.]+/g) || []).map(Number) : null;
+  return { pages, images, fills, darkFills: darkByArea, placements, bytes: buf.length, streamBytes: stream.length, mediaBox };
 }
 
 // ---- dev server management -------------------------------------------------
@@ -611,6 +621,265 @@ async function runChecks(cdp, { fast }) {
     // in Print silently starved the whole export/exif/keyword chain once.
     await gotoModule('library');
     return out.join(' | ');
+  });
+
+  // C6.5: the print calibration matrix. INSTRUMENTATION, not a behaviour
+  // change: it measures the PDF a printer would receive for every
+  // paper x orientation x margin and converts each number into millimetres, so
+  // "off-centre / wrong physical scale / distorted / preview != paper" becomes a
+  // reading instead of an opinion. Nothing here asserts how the app should
+  // behave beyond the geometry the owner reported.
+  //
+  // UNITS, measured off this harness's own PDF output (see inspectPdf's note):
+  //   - /MediaBox is PostScript points (210mm -> 594.96, i.e. ~72 pt/inch);
+  //   - placements are 1/300 inch (the page opens with 0.24 = 72/300), which is
+  //     the same space C5's `794 * 3.125` sheet lives in;
+  //   - the `re` rects behind darkFills.area are CSS px (a further 3.125 inside).
+  // Every gap below is therefore computed in the 1/300-inch placement space, with
+  // the MediaBox scaled into it, and the dark-fill test uses the CSS-px sheet
+  // area -- the space darkFills.area is actually measured in. A device-unit
+  // threshold applied to a CSS-px area would be ~9.8x too loose and would let a
+  // full-page black sheet pass, which is exactly the regression C5 exists to
+  // catch.
+  const PRINT_PAPERS_MM = { a4: [210, 297], letter: [215.9, 279.4], '5x7': [127, 177.8] };
+  await check('print: calibration matrix — every paper/orient/margin is centered, true-scale, undistorted', 'print', async () => {
+    const DEV_IN = 300;                              // placement units per inch
+    const PT_IN = 72;                                // PDF default user space
+    const CSS_PX_IN = 96;                            // 3.125 = DEV_IN / CSS_PX_IN
+    const mm2dev = (mm) => mm / 25.4 * DEV_IN;       // the task's conversion
+    const dev2mm = (u) => u / DEV_IN * 25.4;
+    // Chrome's print raster: 300 device units per inch over 96 CSS px per
+    // inch. C5 hardcodes the same value as R.
+    const DEV_PER_CSS_PX = 3.125;
+    const f = (v) => (Number.isFinite(v) ? v.toFixed(2) : String(v));
+    const f3 = (v) => (Number.isFinite(v) ? v.toFixed(3) : String(v));
+
+    await cdp.evaluate(`(() => { const t=[...document.querySelectorAll('#topbar button')].find(b=>/print/i.test(b.textContent)); t?.click(); return 1; })()`);
+    // Enter the print module and let its OWN developed render land before
+    // swapping in the synthetic photo. renderPrintView() is async (GPU export),
+    // so injecting immediately races it: the app's blob would resolve later and
+    // replace ours mid-matrix, and the aspect assertion would then be measuring
+    // some catalogue RAW instead of the 3:2 we know.
+    await waitFor(cdp, `document.querySelector('#print-image').hidden === true || (document.querySelector('#print-image').naturalWidth > 0 && document.querySelector('#print-image').naturalWidth !== 3000) ? true : false`, { timeout: 30000 });
+    // 3:2 landscape source, exactly C5's injection, so the expected aspect is a
+    // known constant rather than whatever the catalog happens to hold.
+    await cdp.evaluate(`(() => {
+      const c = new OffscreenCanvas(3000, 2000); const g = c.getContext('2d');
+      g.fillStyle = '#8899aa'; g.fillRect(0,0,3000,2000);
+      g.fillStyle = '#cc3344'; g.fillRect(0,0,600,600);
+      c.convertToBlob({ type: 'image/jpeg', quality: 0.9 }).then(b => {
+        const img = document.querySelector('#print-image');
+        img.src = URL.createObjectURL(b); img.hidden = false;
+        document.querySelector('#print-empty').hidden = true;
+      });
+      return 1;
+    })()`);
+    await waitFor(cdp, `document.querySelector('#print-image').naturalWidth === 3000 ? true : false`);
+
+    const readState = () => cdp.evaluate(`JSON.stringify((() => {
+      const p = document.querySelector('#print-page'), i = document.querySelector('#print-image');
+      const rule = [...document.querySelectorAll('style')].map(s=>s.textContent).find(t=>/@page/.test(t)) || '';
+      const z = parseFloat(getComputedStyle(p).zoom) || 1;
+      const r = i.getBoundingClientRect();
+      return { page: [p.offsetWidth, p.offsetHeight],
+               img: [Math.round(r.width / z), Math.round(r.height / z)],
+               imgPrec: [r.width / z, r.height / z],
+               nat: [i.naturalWidth, i.naturalHeight],
+               zoom: getComputedStyle(p).zoom,
+               atPage: (rule.match(/size: ([^;]+);/) || [])[1] || 'none' };
+    })())`);
+    const setOpt = (sel, val) => cdp.evaluate(`(() => { const s=document.querySelector('${sel}'); s.value='${val}';
+      s.dispatchEvent(new Event('input',{bubbles:true})); s.dispatchEvent(new Event('change',{bubbles:true})); return s.value; })()`);
+
+    const rows = [];
+    const failures = [];
+    const densities = [];
+    let ptPerIn = null;      // measured MediaBox units per inch, from combination 1
+    let devPerPt = null;     // placement units per MediaBox unit
+    let boxFallback = false; // MediaBox absent -> C5's sheet-px * 3.125 expectation
+    let worstCenterMm = 0;
+
+    for (const paper of ['a4', 'letter', '5x7']) {
+      for (const orient of ['portrait', 'landscape']) {
+        for (const margin of ['0', '10', '20']) {
+          const combo = `${paper}/${orient}/m${margin}`;
+          await setOpt('#print-paper', paper);
+          await setOpt('#print-orientation', orient);
+          await setOpt('#print-margin', margin);
+          await sleep(350); // applyPrintLayout() runs on change; 350ms is C6's settled geometry
+          const buf = await printPdf(cdp); // no args: @page alone must decide the box
+          let info;
+          try { info = inspectPdf(buf); }
+          catch (err) {
+            failures.push(`print calibration ${combo}: inspectPdf failed: ${err.message}`);
+            continue;
+          }
+          const st = JSON.parse(await readState());
+          const [expW, expH] = PRINT_PAPERS_MM[paper];
+          const pageMm = orient === 'landscape' ? [expH, expW] : [expW, expH];
+          // Every failure names its combination and carries the raw numbers for
+          // it, so the arithmetic can be re-done by hand. Seeded with what is
+          // known before the placement is read, so a missing placement still
+          // reports the page box and the DOM state.
+          let raw = { combo, mediaBox: info.mediaBox, pages: info.pages, images: info.images,
+                      sheetPx: st.page, imgPx: st.img, nat: st.nat, zoom: st.zoom, atPage: st.atPage };
+          // Violations are collected, not thrown in place: the matrix table is
+          // the deliverable, and a throw at combination 13 would silently cost
+          // the remaining five. The check still fails, and each entry carries
+          // its own combination name and raw numbers.
+          const fail = (msg) => { failures.push(`print calibration ${combo}: ${msg}\n  raw=${JSON.stringify(raw)}`); };
+
+          if (info.mediaBox && info.mediaBox.length >= 4) {
+            const d = (info.mediaBox[2] - info.mediaBox[0]) / (pageMm[0] / 25.4);
+            densities.push({ combo, d });
+            if (ptPerIn === null) { ptPerIn = d; devPerPt = DEV_IN / ptPerIn; }
+          }
+          let pageBoxW, pageBoxH;
+          if (info.mediaBox && devPerPt) {
+            pageBoxW = (info.mediaBox[2] - info.mediaBox[0]) * devPerPt;
+            pageBoxH = (info.mediaBox[3] - info.mediaBox[1]) * devPerPt;
+          } else {
+            // No MediaBox to read: fall back to C5's `794 * 3.125` style
+            // expectation, i.e. the preview sheet in CSS px times the same
+            // raster ratio, and flag it in the row.
+            boxFallback = true;
+            pageBoxW = st.page[0] * (DEV_IN / CSS_PX_IN);
+            pageBoxH = st.page[1] * (DEV_IN / CSS_PX_IN);
+          }
+
+          const p = info.placements[0];
+          if (!p) { fail('no image placement found in the PDF content stream'); continue; }
+          const yTop = Math.max(p.y, p.y + p.h);    // PDF y grows up; h may be negative
+          const yBottom = Math.min(p.y, p.y + p.h);
+          const L = p.x, R = pageBoxW - (p.x + p.w);
+          const B = yBottom, T = pageBoxH - yTop;
+          const aspect = p.w / Math.abs(p.h);
+          const prevAspect = st.imgPrec[0] / st.imgPrec[1];
+          const pdfW = p.w / DEV_PER_CSS_PX, pdfH = Math.abs(p.h) / DEV_PER_CSS_PX;
+          const snapW = Math.abs(pdfW - st.imgPrec[0]), snapH = Math.abs(pdfH - st.imgPrec[1]);
+          const mDev = mm2dev(Number(margin));
+          // Which axis did object-fit: contain bind? The fitted axis spans the
+          // whole padding box, so its margin gap IS the selected margin; the
+          // other axis only gets >= margin.
+          const spanErrW = Math.abs(p.w - (pageBoxW - 2 * mDev));
+          const spanErrH = Math.abs(Math.abs(p.h) - (pageBoxH - 2 * mDev));
+          const axis = spanErrW <= spanErrH ? 'width' : 'height';
+          const cGap = axis === 'width' ? [L, R] : [T, B];
+          const oGap = axis === 'width' ? [T, B] : [L, R];
+          const centerErrMm = Math.max(dev2mm(Math.abs(L - R)), dev2mm(Math.abs(T - B)));
+          worstCenterMm = Math.max(worstCenterMm, centerErrMm);
+
+          raw = {
+            combo, mediaBox: info.mediaBox, pages: info.pages, images: info.images,
+            place: [p.x, p.y, p.w, p.h], pageBox: [+f(pageBoxW), +f(pageBoxH)],
+            gapsDev: [L, T, R, B].map((v) => +f(v)), gapsMm: [L, T, R, B].map((v) => +dev2mm(v).toFixed(3)),
+            aspect: +aspect.toFixed(5), prevAspect: +prevAspect.toFixed(5), axis,
+            pdfPx: [+f3(pdfW), +f3(pdfH)], snapPx: [+f3(snapW), +f3(snapH)],
+            sheetPx: st.page, imgPx: st.img, nat: st.nat, zoom: st.zoom, atPage: st.atPage,
+          };
+          // Logged per row as measured: if a later combination throws, the
+          // numbers for the ones that did not are still on stdout.
+          console.log(`  row ${combo} ${JSON.stringify(raw)}`);
+          rows.push(raw);
+
+          if (st.nat[0] !== 3000 || st.nat[1] !== 2000) {
+            fail(`the injected 3:2 photo is no longer the live image (natural=${JSON.stringify(st.nat)}), so the aspect/scale readings below are not ours`);
+          }
+          if (info.pages !== 1) fail(`PDF pages=${info.pages}, expected 1 (the sheet overflows the page box)`);
+          if (info.images < 1) fail('PDF contains no image — the photo never reached paper');
+          const bigDark = info.darkFills.filter((x) => x.area > 0.25 * st.page[0] * st.page[1]);
+          if (bigDark.length) {
+            fail(`${bigDark.length} dark fill(s) over 25% of the ${st.page[0]}x${st.page[1]}px sheet: ${JSON.stringify(bigDark.map((x) => ({ rgb: x.rgb, area: Math.round(x.area) })))} — the dark UI is printing`);
+          }
+          // Distortion: the placed rect must keep the source's 3:2. The
+          // tolerance is size-aware because Chrome snaps the painted rect to
+          // whole CSS px and 1px costs the most percentage on the narrowest
+          // sheet -- 5x7 portrait at a 20mm margin lays out 328.82x219.21 and
+          // paints 328x220, which is 0.61% off 1.5 while being 0.21mm from
+          // ideal on paper.
+          const aspectTol = 0.005 + 2 / Math.min(st.imgPrec[0], st.imgPrec[1]);
+          if (Math.abs(aspect / 1.5 - 1) > aspectTol) {
+            fail(`placed aspect ${f3(aspect)} is more than ${(aspectTol * 100).toFixed(2)}% off the injected 1.5 (w=${f(p.w)} h=${f(Math.abs(p.h))}, rect ${f3(st.imgPrec[0])}x${f3(st.imgPrec[1])} CSS px)`);
+          }
+          // The painted rect must match the laid-out rect within Chrome's 1px
+          // snap. This is the direct shrink-to-fit detector: when #topbar's
+          // 552px nowrap row overflowed the 480px 5x7 page, Chrome scaled the
+          // whole document by 0.870 and painted 351.5px where the DOM had laid
+          // out 404.4px -- 53px off, against a 1px allowance.
+          if (snapW > 1 || snapH > 1) {
+            fail(`PDF image rect ${f3(pdfW)}x${f3(pdfH)} CSS px disagrees with the laid-out ${f3(st.imgPrec[0])}x${f3(st.imgPrec[1])} by ${f3(snapW)}/${f3(snapH)}px (>1 CSS px) -- the document was scaled, or the print layout is not what the preview lays out`);
+          }
+          // Centering on both axes.
+          if (Math.abs(L - R) > mm2dev(0.5)) {
+            fail(`not horizontally centered: L=${f(L)} R=${f(R)} dev (${f3(dev2mm(L))}mm / ${f3(dev2mm(R))}mm), |L-R|=${f3(dev2mm(Math.abs(L - R)))}mm > 0.5mm`);
+          }
+          if (Math.abs(T - B) > mm2dev(0.5)) {
+            fail(`not vertically centered: T=${f(T)} B=${f(B)} dev (${f3(dev2mm(T))}mm / ${f3(dev2mm(B))}mm), |T-B|=${f3(dev2mm(Math.abs(T - B)))}mm > 0.5mm`);
+          }
+          // True scale against the selected margin on the axis the image was fitted to.
+          const cErr = Math.max(Math.abs(cGap[0] - mDev), Math.abs(cGap[1] - mDev));
+          if (cErr > mm2dev(0.5)) {
+            fail(`constrained axis=${axis}: gaps ${f(cGap[0])}/${f(cGap[1])} dev (${f3(dev2mm(cGap[0]))}/${f3(dev2mm(cGap[1]))}mm) vs margin ${margin}mm = ${f(mDev)} dev, error ${f3(dev2mm(cErr))}mm > 0.5mm`);
+          }
+          if (Math.min(oGap[0], oGap[1]) < mDev - mm2dev(0.5)) {
+            fail(`free axis gaps ${f(oGap[0])}/${f(oGap[1])} dev (${f3(dev2mm(oGap[0]))}/${f3(dev2mm(oGap[1]))}mm) fall below margin ${margin}mm - 0.5mm`);
+          }
+          // Physical page size: the MediaBox itself, in mm (points are 72/inch
+          // by definition of the PDF user space, so this is a real check on what
+          // @page produced, not a restatement of the input).
+          if (info.mediaBox) {
+            const mbW = (info.mediaBox[2] - info.mediaBox[0]) * 25.4 / PT_IN;
+            const mbH = (info.mediaBox[3] - info.mediaBox[1]) * 25.4 / PT_IN;
+            if (Math.abs(mbW - pageMm[0]) > 0.6 || Math.abs(mbH - pageMm[1]) > 0.6) {
+              fail(`page box is ${f3(mbW)}x${f3(mbH)}mm, expected ${pageMm[0]}x${pageMm[1]}mm +/-0.6mm (@page="${st.atPage}")`);
+            }
+          } else {
+            fail(`no /MediaBox in the raw PDF, page size could not be verified (boxSource=sheet-px fallback, devPerPt=${devPerPt ? f3(devPerPt) : 'null'})`);
+          }
+        }
+      }
+    }
+
+    const dSpread = densities.length
+      ? Math.max(...densities.map((x) => x.d)) - Math.min(...densities.map((x) => x.d))
+      : 0;
+    const cols = [
+      ['combo', (r) => r.combo],
+      ['mediaBox', (r) => (r.mediaBox ? r.mediaBox.join(' ') : 'NULL')],
+      ['pageBoxDev', (r) => `${r.pageBox[0]}x${r.pageBox[1]}`],
+      ['place x', (r) => f(r.place[0])], ['place y', (r) => f(r.place[1])],
+      ['place w', (r) => f(r.place[2])], ['place h', (r) => f(r.place[3])],
+      ['Ldev', (r) => f(r.gapsDev[0])], ['Tdev', (r) => f(r.gapsDev[1])],
+      ['Rdev', (r) => f(r.gapsDev[2])], ['Bdev', (r) => f(r.gapsDev[3])],
+      ['Lmm', (r) => f3(r.gapsMm[0])], ['Tmm', (r) => f3(r.gapsMm[1])],
+      ['Rmm', (r) => f3(r.gapsMm[2])], ['Bmm', (r) => f3(r.gapsMm[3])],
+      ['aspect', (r) => f3(r.aspect)], ['prevAspect', (r) => f3(r.prevAspect)],
+      ['pdfW', (r) => f3(r.pdfPx[0])], ['pdfH', (r) => f3(r.pdfPx[1])],
+      ['snapW', (r) => f3(r.snapPx[0])], ['snapH', (r) => f3(r.snapPx[1])],
+      ['axis', (r) => r.axis], ['sheetPx', (r) => r.sheetPx.join('x')],
+      ['imgPx', (r) => r.imgPx.join('x')], ['nat', (r) => r.nat.join('x')],
+      ['zoom', (r) => String(r.zoom)], ['@page', (r) => String(r.atPage)],
+      ['pages', (r) => String(r.pages)], ['imgs', (r) => String(r.images)],
+    ];
+    console.log('\nprint calibration matrix (device units = 1/300 inch, MediaBox = PostScript points):');
+    const cells = rows.map((r) => cols.map((c) => String(c[1](r))));
+    const widths = cols.map((c, i) => Math.max(c[0].length, ...cells.map((row) => row[i].length)));
+    const line = (arr) => arr.map((v, i) => v.padStart(widths[i])).join(' ');
+    console.log(line(cols.map((c) => c[0])));
+    for (const row of cells) console.log(line(row));
+    console.log(`derived MediaBox units per inch = ${ptPerIn ? f3(ptPerIn) : 'null'} (used as ${ptPerIn ? f3(ptPerIn) : '-'} pt/in -> ${devPerPt ? f3(devPerPt) : 'null'} placement units per MediaBox unit; placement space density ${DEV_IN}/inch); spread across ${densities.length} boxes = ${f3(dSpread)} (${f3(dSpread / (ptPerIn || 1) * 100)}%)${boxFallback ? ' — MediaBox WAS NULL for some combination, sheet-px fallback used' : ''}`);
+
+    // Same teardown as C6: the app must not be left in Print or the checks
+    // after this one click Library-aside controls that are 0x0 and starve.
+    await setOpt('#print-paper', 'a4');
+    await setOpt('#print-orientation', 'portrait');
+    await setOpt('#print-margin', '10');
+    await sleep(300);
+    await gotoModule('library');
+    // Thrown AFTER the table is logged and the app is restored home, so a red
+    // matrix neither costs the remaining combinations nor starves later checks.
+    if (failures.length) throw new Error(failures.join('\n'));
+    return `${rows.length}/18 combos passed | MediaBox ${f3(ptPerIn)} units/in -> ${f3(devPerPt)} dev/unit (placement space ${DEV_IN}/in) | worst centering error ${f3(worstCenterMm)}mm`;
   });
 
   // C7: crop overlay — the rule-of-thirds grid must survive a re-render.

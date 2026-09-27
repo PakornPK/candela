@@ -1607,6 +1607,30 @@
           box-shadow: none;
           zoom: 1;
         }
+        /* `visibility: hidden` hides paint but keeps layout, and #topbar's
+           nowrap flex row needs 552 CSS px -- wider than a 5x7 sheet (480px).
+           Chrome then shrink-to-fit the whole document by 0.870 and the sheet
+           printed 110.5x154.7mm on 127x177.8mm paper, pinned to the top-left.
+           display:none on an ANCESTOR of #print-page would drop the fixed
+           sheet with it, so only the off-chain subtrees are removed and the
+           chain itself is made layout-neutral. */
+        body > *:not(#app),
+        #app > *:not(#module-print),
+        #module-print > *:not(.print-content),
+        .print-content > *:not(#print-page) {
+          display: none;
+        }
+        #app,
+        #module-print,
+        .print-content {
+          display: block;
+          width: auto;
+          min-height: 0;
+          margin: 0;
+          padding: 0;
+          overflow: visible;
+          position: static;
+        }
       }
       #contact-roll-label {
         color: var(--text);
