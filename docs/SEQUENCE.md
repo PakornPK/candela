@@ -1,7 +1,7 @@
 # SEQUENCE — ลำดับงาน canonical ของโปรแกรม hardening
 
 **ไฟล์นี้คือ state ของ loop** — อ่านมันก่อนทุก tick และอัปเดต `[x]` + บรรทัด "ตำแหน่งปัจจุบัน" ทันทีที่งานหนึ่งขั้นจบ
-เอกสารอ้างอิง: `docs/adr/0001-layered-architecture.md` (Accepted) · `docs/superpowers/plans/2026-09-27-main-ts-hardening-plan.md` (rev.2) · `docs/reviews/2026-09-27-main-ts-review.md` (42 findings)
+เอกสารอ้างอิง: **`docs/BUGLOG.md`** (ทะเบียนบั๊กที่มีชีวิต — ปิด/เปิดอะไร ด้วย commit ไหน) · `docs/adr/0001-layered-architecture.md` (Accepted) · `docs/superpowers/plans/2026-09-27-main-ts-hardening-plan.md` (rev.2) · `docs/reviews/2026-09-27-main-ts-review.md` (42 findings, snapshot ณ `bbb9b8d`)
 
 **ตำแหน่งปัจจุบัน:** M1 (architecture.test.ts + negative control + `git mv catalog/paths.ts → domain/paths.ts`) — ยังไม่เริ่ม · **A0′ ถูกยุบเข้ากับ M1 แล้ว** (ดูเหตุผลในขั้นที่ 1)
 **commit ล่าสุดที่ push แล้ว:** `58636c2` (A1 = QA trusted input · QA 31/31 · src/ ไม่ถูกแตะ) · ก่อนหน้า `16e9807` (X3 = R1-18), `97ec626`, `f396568` (X2 = R1-14), `cd0405d` (X1 = R1-3), `87902be`, `9538ef9` — **exception trio จบ · findings ปิด 3/42 (Critical 3/20) · QA 27 → 31 checks**
@@ -22,6 +22,8 @@
 8. **thinker วางแผน/ตรวจ diff, worker ลงมือ** — worker ติดอะไรให้หยุดแล้วรายงาน ห้ามเดา
 9. commit แยกตามขั้น · push เมื่อจบหนึ่งหน่วย · `git status` ต้องสะอาดก่อนขึ้นขั้นถัดไป
 10. **หา anchor ด้วยเนื้อหา ไม่ใช่เลขบรรทัด** — `src/main.ts` เหลือ 6,637 บรรทัด (จาก 6,625 ตอน review) และจะขยับทุก step ดังนั้นเลขบรรทัดใน `docs/reviews/…` และในไฟล์นี้**คลาดได้ ±10** เสมอ บังคับกับ worker ทุกตัว
+11. **ห้ามแทรกขั้นที่อยู่นอกไฟล์นี้โดยไม่ถาม owner ก่อน** — *(เพิ่ม 2026-09-27 หลัง owner สับสน)* บทเรียน: thinker เสนอ "exception trio" (X1-X3) แล้วเขียนใน ADR §8.1 ว่า "veto ได้ก่อนเริ่ม step แรก" แต่**เริ่ม step แรกในรอบเดียวกัน** = เปิดหน้าต่าง veto แล้วปิดเองทันที และ A1 ก็ถูกยกมาไว้ก่อน M1 โดยไม่ได้ถามเลย ทั้งที่ ADR Option A เขียนว่า `M1-M12 → U1-U18` · **กฎใหม่: ถ้าจะเพิ่ม/สลับ/เลื่อนขั้นใด ๆ ต้องถาม owner ก่อนลงมือทุกครั้ง แม้จะดูเล็กหรือดูปลอดภัย** ถ้า owner ไม่ตอบให้รอ ไม่ใช่ตีความว่าเห็นชอบ
+12. **ทุกขั้นที่ปิดหรือเปิด finding ต้องอัปเดต `docs/BUGLOG.md` ใน commit เดียวกัน** — ไฟล์นั้นคือทะเบียนบั๊กที่มีชีวิต (ตอบว่า "บั๊กไหนปิดแล้ว ด้วย commit ไหน") ต่างจาก `docs/reviews/…` ที่เป็น snapshot ณ HEAD `bbb9b8d` ห้ามปล่อยให้ค้าง
 
 ---
 
