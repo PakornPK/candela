@@ -2210,6 +2210,92 @@ async function runChecks(cdp, { fast }) {
     if (fails.length) throw new Error(fails.join('; '));
     return `src/main.ts: 0 errorEl.remove() + 0 local #error re-query; showError "${MSG.slice(0, 24)}…" rendered (hidden=false), Escape hid it with #error + #error-message both still in the document, second showError rendered again`;
   });
+
+  // C27: R1-18 — the Contact sheet's Prev button must show the sheet it selects.
+  // contactPrev's if-body decremented contactSheetIdx and called nothing (the
+  // blank line sat exactly where renderContactSheet() belongs, three lines above
+  // the call contactNext does make). renderContactSheet is the ONLY writer of
+  // the "Sheet N / M" label, of both buttons' disabled state, and the only thing
+  // that repaints and renumbers the frames, so after Prev the sheet kept painting
+  // sheet 2 under a sheet-2 label while the index sat at 0 — sheet 1 was
+  // unreachable by paging, and exportContactSheet named the downloaded PNG after
+  // that index while rasterizing the stale DOM. Unlike C26 this is fully
+  // drivable: the module is a real topbar button and the frames are plain DOM.
+  await check("contact sheet: Prev returns to the previous sheet's frames and label", 'catalog', async () => {
+    // One sheet = 36 frames (src/app/contactSheet.ts: CONTACT_SHEET_SIZE = 36),
+    // so 80 seeded photos is a 3-sheet roll (36 + 36 + 8): sheet 2 exists, and on
+    // sheet 2 #contact-next is still enabled, so Prev is the only way back.
+    // Same generated-JPEG seeding as the nudge check — cheap, unique per frame.
+    const files = [];
+    for (let i = 1; i <= 80; i++) {
+      files.push({ name: `CS${String(i).padStart(2, '0')}.jpg`, gen: { bg: `hsl(${i * 7},60%,45%)`, fg: `hsl(${i * 7 + 120},70%,60%)` } });
+    }
+    await resetCatalog(files);
+    // resetCatalog returns as soon as ONE cell is painted; the import writes rows
+    // progressively, so wait for the whole roll before the sheet reads it.
+    await waitFor(cdp, `new Promise(res => { const q = indexedDB.open('candela-catalog');
+      q.onsuccess = () => { const db = q.result;
+        const tx = db.transaction('files','readonly'); const g = tx.objectStore('files').getAll();
+        g.onsuccess = () => { const n = g.result.length; db.close(); res(n >= 80 ? 'files=' + n : false); };
+        g.onerror = () => { db.close(); res(false); }; };
+      q.onerror = () => res('ERR-OPEN'); })`, { timeout: 90000 });
+    // The topbar button reads "Contact Sheet"; gotoModule matches the name against
+    // the button text and verifies #module-contact is showing. The module's onShow
+    // resets contactSheetIdx = 0, so the start state is deterministic.
+    await gotoModule('contact');
+    const read = async () => JSON.parse(await cdp.evaluate(`JSON.stringify({
+      label: document.querySelector('#contact-sheet-label').textContent,
+      ids: [...document.querySelectorAll('.contact-frame')].map((f) => f.dataset.fileId),
+      nums: [...document.querySelectorAll('.contact-frame-num')].map((n) => n.textContent),
+      prev: document.querySelector('#contact-prev').disabled,
+      next: document.querySelector('#contact-next').disabled,
+    })`));
+    const dump = (s) => `label=${JSON.stringify(s.label)} frames=${s.ids.length} ids=[${s.ids.join(',')}] nums=[${s.nums.join(',')}] prev.disabled=${s.prev} next.disabled=${s.next}`;
+
+    // 3. sheet 1's state, captured to compare against.
+    const one = await read();
+    const sheets = Number((one.label.match(/\/\s*(\d+)\s*$/) || [])[1] ?? 0);
+    if (!(sheets >= 2)) throw new Error(`80 seeded photos did not make 2 sheets — sheet 1 state: ${dump(one)}`);
+    if (one.ids.length === 0 || one.ids.length !== one.nums.length) {
+      throw new Error(`sheet 1 painted ${one.ids.length} frames / ${one.nums.length} numbers: ${dump(one)}`);
+    }
+    if (one.nums[0] !== '01') throw new Error(`sheet 1 does not start at frame 01: ${dump(one)}`);
+    if (one.prev !== true || one.next !== false) throw new Error(`sheet 1 buttons wrong (expected prev disabled, next enabled): ${dump(one)}`);
+
+    // 4. paging forward must work, or the Prev below would prove nothing.
+    await clickEl(cdp, '#contact-next');
+    await sleep(300);
+    const two = await read();
+    const fwd = [];
+    if (two.label !== `Sheet 2 / ${sheets}`) fwd.push(`label=${JSON.stringify(two.label)}, expected "Sheet 2 / ${sheets}"`);
+    if (JSON.stringify(two.ids) === JSON.stringify(one.ids)) fwd.push('the frame ids did not change — sheet 2 painted sheet 1 again');
+    if (two.nums[0] === '01') fwd.push(`the first frame number is still 01 (${JSON.stringify(two.nums.slice(0, 3))})`);
+    if (fwd.length) throw new Error(`paging forward is broken, so Prev cannot be tested: ${fwd.join('; ')} | sheet2: ${dump(two)}`);
+
+    // 5. paging back must restore ALL of sheet 1's observable state.
+    await clickEl(cdp, '#contact-prev');
+    await sleep(300);
+    const back = await read();
+    const fails = [];
+    if (back.label !== one.label) fails.push(`label=${JSON.stringify(back.label)}, expected ${JSON.stringify(one.label)}`);
+    if (JSON.stringify(back.ids) !== JSON.stringify(one.ids)) fails.push(`frame ids differ from sheet 1's`);
+    if (JSON.stringify(back.nums) !== JSON.stringify(one.nums)) fails.push(`frame numbers differ from sheet 1's`);
+    if (back.prev !== true || back.next !== false) fails.push(`buttons not restored: prev.disabled=${back.prev} (expected true), next.disabled=${back.next} (expected false)`);
+    if (fails.length) throw new Error(`Prev did not return to sheet 1 (${fails.join('; ')}) | expected [${dump(one)}] | observed [${dump(back)}]`);
+
+    // 6. a second Prev on sheet 1 is a no-op — the >0 guard must not under-run.
+    await clickEl(cdp, '#contact-prev');
+    await sleep(300);
+    const under = await read();
+    const over = [];
+    if (under.label !== one.label) over.push(`label=${JSON.stringify(under.label)}, expected ${JSON.stringify(one.label)}`);
+    if (JSON.stringify(under.ids) !== JSON.stringify(one.ids)) over.push('frame ids changed on a Prev at sheet 1');
+    if (JSON.stringify(under.nums) !== JSON.stringify(one.nums)) over.push('frame numbers changed on a Prev at sheet 1');
+    if (under.prev !== true || under.next !== false) over.push(`prev.disabled=${under.prev}, next.disabled=${under.next}`);
+    if (over.length) throw new Error(`second Prev moved off sheet 1 (${over.join('; ')}) | expected [${dump(one)}] | observed [${dump(under)}]`);
+
+    return `sheets=${sheets} next->${two.label} (${two.ids.length} frames, first num ${two.nums[0]}) frames changed, prev->${back.label} frames+nums restored (first num ${back.nums[0]}, ${back.ids.length} frames), prev-disabled=true, second prev no-op`;
+  });
 }
 
 // ---- main ------------------------------------------------------------------

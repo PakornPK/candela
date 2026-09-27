@@ -3,8 +3,8 @@
 **ไฟล์นี้คือ state ของ loop** — อ่านมันก่อนทุก tick และอัปเดต `[x]` + บรรทัด "ตำแหน่งปัจจุบัน" ทันทีที่งานหนึ่งขั้นจบ
 เอกสารอ้างอิง: `docs/adr/0001-layered-architecture.md` (Accepted) · `docs/superpowers/plans/2026-09-27-main-ts-hardening-plan.md` (rev.2) · `docs/reviews/2026-09-27-main-ts-review.md` (42 findings)
 
-**ตำแหน่งปัจจุบัน:** X3 (R1-18 contactPrev) — กำลังทำ
-**commit ล่าสุดที่ push แล้ว:** `f396568` (X2 = R1-14 error banner · QA 29/29) · ก่อนหน้า: `cd0405d` (X1 = R1-3 XSS · QA 28/28), `87902be`, `9538ef9` (docs)
+**ตำแหน่งปัจจุบัน:** A1 (QA trusted input: pressKey/dragEl/typeText) — ยังไม่เริ่ม
+**commit ล่าสุดที่ push แล้ว:** `97ec626` (docs) · `f396568` (X2 = R1-14 error banner · QA 29/29) · `cd0405d` (X1 = R1-3 XSS · QA 28/28) · `87902be`, `9538ef9` (docs) — X3 = R1-18 ปิดแล้วต่อจาก commit นี้ (QA 30/30) *· ใส่ hash ของ X3 ตอนเริ่ม tick A1 ตาม convention ข้างล่าง*
 *(convention: อัปเดตสองบรรทัดนี้ตอน**เริ่ม** tick ถัดไป ไม่ใช่ท้าย tick เดียวกัน — commit เขียน hash ของตัวเองไม่ได้)*
 
 ---
@@ -42,7 +42,8 @@ Class C ทั้งหมด ทำก่อน M-series เพราะไม�
 - [x] **X1 = R1-3** XSS: `main.ts:2885` (`row.innerHTML` ใน `renderSmartCollections` interpolate `smart.name`) + `main.ts:4524` (`infoOverlay.innerHTML = info` interpolate `file.name` + `lastDecoded.make/model`) → `createElement` + `textContent` ตามแบบ `renderCollections` (:2807 ใช้ `name.textContent`) · QA check: `security: untrusted strings render as text, never as HTML` · acceptance: `docs/acceptance/untrusted-strings.feature`
 - [x] **X2 = R1-14** `main.ts:1495` `errorEl.remove()` → `clearError()` (`hidden = true`) เพราะ `#error-message`/`#error-detail` เป็นลูกของ `#error` และคือ binding ที่ `showError` ทั้ง 51 จุดเขียน · QA check: `stability: the error banner survives dismissal and keeps reporting` · acceptance: `docs/acceptance/error-banner.feature`
       *(หมายเหตุ: ครึ่ง **(a)** ของ QA check นั้นเป็น **static pin ชั่วคราว** — สแกน `src/main.ts` จากดิสก์หา `errorEl.remove()` / `document.querySelector('#error')` เพราะ device-loss จริงไม่สามารถขับเคลื่อนจาก harness ได้ · **U2 ต้องแทนมันด้วย unit test จริง** บน `app/errorBanner.ts` ที่แยกออกมาแล้ว ส่วน (b) เป็นแค่ guard ว่าการ dismissal/ใช้ซ้ำไม่พัง — มันเขียวแม้ตอนมีบั๊ก)*
-- [ ] **X3 = R1-18** `main.ts:5207` `contactPrev` decrement แล้วไม่เรียก `renderContactSheet()` (ดู `contactNext` 3 บรรทัดถัดไปเป็นแบบ)
+- [x] **X3 = R1-18** `main.ts:5207` `contactPrev` decrement แล้วไม่เรียก `renderContactSheet()` (ดู `contactNext` 3 บรรทัดถัดไปเป็นแบบ) · QA check: `contact sheet: Prev returns to the previous sheet's frames and label` · acceptance: `docs/acceptance/contact-sheet.feature`
+      *(แดงก่อนแก้: check ใหม่ FAIL เดียว — label="Sheet 2 / 3" + frame ids + frame numbers + `contactPrev.disabled=false` ครบทั้งสี่ · ลบเส้นที่เพิ่ม → แดงอีก (mutation check) · restore → เขียว 30/30 · X3's own hash is recorded by the next commit — a commit cannot carry its own hash)*
 
 ## ขั้นที่ 1 — มูลฐาน
 

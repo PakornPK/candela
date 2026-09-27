@@ -5218,7 +5218,7 @@ async function init(): Promise<void> {
   contactPrev.addEventListener('click', () => {
     if (contactSheetIdx > 0) {
       contactSheetIdx--;
-
+      renderContactSheet();
     }
   });
   contactNext.addEventListener('click', () => {
