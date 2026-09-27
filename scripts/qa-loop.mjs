@@ -1455,6 +1455,114 @@ async function runChecks(cdp, { fast }) {
     return `chips ok ("${chipText}") unedited0=2 -> Develop commit (edits row ${JSON.stringify(er)}) -> edited=[${e1id}] unedited=1`;
   });
 
+  // C21b: Sync Settings carries USER INTENT only (the colour-skew regression).
+  // syncableOps is unit-tested; what only the running app proves: a source that
+  // moved exposure alone writes Tone and NOTHING else -- the first absolute-sync
+  // build also copied its As-Shot whiteBalance and default profile onto every
+  // target and skewed colour on all of them -- and a first-open dialog ticks
+  // only the modules the source actually edited instead of all twelve.
+  await check('sync: exposure-only source ticks Tone and writes no WB/profile', 'sync', async () => {
+    if (fast) return 'SKIPPED (--fast: needs the Develop edit + sync round-trip)';
+    await resetCatalog([
+      { name: 'S1.jpg', gen: { bg: '#c0392b', fg: '#2980b9' } },
+      { name: 'S2.jpg', gen: { bg: '#27ae60', fg: '#8e44ad' } },
+      { name: 'S3.jpg', gen: { bg: '#f39c12', fg: '#16a085' } },
+    ]);
+    const cellId = (stem) => cdp.evaluate(`(() => {
+      const re = new RegExp(${JSON.stringify(stem)}, 'i');
+      const c = [...document.querySelectorAll('.catalog-cell')]
+        .find((x) => re.test(x.title || x.textContent || ''));
+      return c ? c.dataset.fileId : null; })()`);
+    const readEdits = () => cdp.evaluate(`new Promise(res => { const q = indexedDB.open('candela-catalog');
+      q.onsuccess = () => { const db = q.result;
+        const r = db.transaction('edits').objectStore('edits').getAll();
+        r.onsuccess = () => { db.close();
+          res(JSON.stringify(r.result.map(e => ({ id: e.fileId, ops: e.history[e.cursor] || [] })))); };
+        r.onerror = () => { db.close(); res('[]'); }; };
+      q.onerror = () => res('[]'); })`);
+    // Keyed by string: dataset.fileId is a string, the store's fileId is a number.
+    const rowsOf = async () => new Map(JSON.parse(await readEdits()).map((e) => [String(e.id), e.ops]));
+
+    // Edit S1 in Develop: open it (click cell + synthetic dblclick), move
+    // exposure ONLY -- White Balance and Profile are never touched.
+    const s1 = await cellId('S1');
+    const s2 = await cellId('S2');
+    const s3 = await cellId('S3');
+    if (!s1 || !s2 || !s3) throw new Error(`grid cells missing for S1/S2/S3: ${s1}/${s2}/${s3}`);
+    await cdp.evaluate(`document.querySelector('.catalog-cell[data-file-id="${s1}"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
+    await sleep(400);
+    await cdp.evaluate(`document.querySelector('.catalog-cell[data-file-id="${s1}"]').dispatchEvent(new MouseEvent('dblclick',{bubbles:true}))`);
+    await waitFor(cdp, `document.querySelector('#canvas').width > 300 ? true : false`, { timeout: 30000 });
+    await cdp.evaluate(`(() => { const s = document.querySelector('#exposure');
+      s.value = '0.8'; s.dispatchEvent(new Event('input',{bubbles:true}));
+      s.dispatchEvent(new Event('change',{bubbles:true})); return 1; })()`);
+    // Poll the commit into the DB rather than sleeping a fixed amount: the sync
+    // below reads the SOURCE row out of IndexedDB, so a commit still in flight
+    // would sync an empty op set and read as a sync bug, not a timing one.
+    let s1ops = [];
+    const tCommit = Date.now();
+    while (Date.now() - tCommit < 15000) {
+      s1ops = (await rowsOf()).get(s1) || [];
+      if (s1ops.some((o) => o.kind === 'exposure' && o.ev === 0.8)) break;
+      await sleep(500);
+    }
+    if (!s1ops.some((o) => o.kind === 'exposure' && o.ev === 0.8)) {
+      throw new Error(`exposure 0.8 never committed to S1: ${JSON.stringify(s1ops)}`);
+    }
+    const s1Before = JSON.stringify(s1ops);
+
+    // Back to Library. S1 is still the selection and still currentFileId, so it
+    // is the sync source; extend the selection with the grid's ctrl+click.
+    await gotoModule('library');
+    await sleep(600);
+    // The remembered-module set survives the reload and would send the dialog
+    // down its remembered branch -- this step proves the FIRST-open branch.
+    await cdp.evaluate(`localStorage.removeItem('candela.syncModules')`);
+    for (const id of [s2, s3]) {
+      await cdp.evaluate(`document.querySelector('.catalog-cell[data-file-id="${id}"]').dispatchEvent(new MouseEvent('click',{bubbles:true,ctrlKey:true}))`);
+      await sleep(300);
+    }
+    const sel = JSON.parse(await cdp.evaluate(`JSON.stringify({
+      n: document.querySelectorAll('.catalog-cell.selected').length,
+      ref: document.querySelector('.catalog-cell.sync-ref')?.dataset.fileId ?? null,
+      disabled: document.querySelector('#sync-btn').disabled })`));
+    if (sel.n !== 3) throw new Error(`ctrl+click did not build a 3-photo selection: ${JSON.stringify(sel)}`);
+    if (sel.ref !== s1) throw new Error(`sync source is not S1 (sync-ref on ${sel.ref}, expected ${s1}): ${JSON.stringify(sel)}`);
+    if (sel.disabled) throw new Error(`#sync-btn still disabled with 3 selected: ${JSON.stringify(sel)}`);
+
+    // First-open dialog: Tone only. Profile and White Balance must be unticked
+    // because S1 carries no intent for them (this is the tick-default fix).
+    await clickEl(cdp, '#sync-btn');
+    await waitFor(cdp, `document.querySelector('#sync-dialog').open ? true : false`, { timeout: 15000 });
+    const ticked = JSON.parse(await cdp.evaluate(`JSON.stringify(
+      [...document.querySelectorAll('#sync-modules input:checked')].map(cb => cb.value))`));
+    if (ticked.join(',') !== 'Tone') {
+      throw new Error(`first-open dialog ticked [${ticked}], expected exactly [Tone] -- progress="${
+        (await cdp.evaluate(`document.querySelector('#sync-progress')?.textContent`)) || ''}"`);
+    }
+    await clickEl(cdp, '#sync-go');
+    // Poll for the close (the loop awaits an IndexedDB save per target); a
+    // fixed sleep here reads a slow sync as a failed sync.
+    await waitFor(cdp, `document.querySelector('#sync-dialog').open === false ? true : false`, { timeout: 30000 });
+    const rows = await rowsOf();
+    const diag = async () => `rows=${await readEdits()} progress="${
+      (await cdp.evaluate(`document.querySelector('#sync-progress')?.textContent`)) || ''}" errs=${
+      await cdp.evaluate(`JSON.stringify(window.__qa.errs.slice(-4))`)}"`;
+    for (const [id, name] of [[s2, 'S2'], [s3, 'S3']]) {
+      const ops = rows.get(id) || [];
+      const ev = ops.find((o) => o.kind === 'exposure')?.ev;
+      if (ev !== 0.8) throw new Error(`${name} got no exposure 0.8 (ev=${JSON.stringify(ev)}); ${await diag()}`);
+      // The regression that skewed colour: these two must stay absent.
+      if (ops.some((o) => o.kind === 'whiteBalance')) throw new Error(`${name} gained a whiteBalance op; ${await diag()}`);
+      if (ops.some((o) => o.kind === 'profile')) throw new Error(`${name} gained a profile op; ${await diag()}`);
+    }
+    if (JSON.stringify(rows.get(s1) || []) !== s1Before) {
+      throw new Error(`sync rewrote its own source S1; ${await diag()}`);
+    }
+    return `S1 exposure 0.8 only -> dialog ticked [${ticked}] -> S2/S3 ev=0.8, no WB/profile ops; S1 ops unchanged (${
+      JSON.parse(s1Before).length} ops)`;
+  });
+
   // C22: Previous Import source row (Plan A). LrC semantics: the photos ADDED
   // by the most recent import — a re-import of the same folder MERGES (no new
   // rows), so Previous Import must then be empty/stale-free; adding ONE new

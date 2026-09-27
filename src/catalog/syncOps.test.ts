@@ -1,57 +1,55 @@
 import { describe, expect, it } from 'vitest';
-import type { Op } from './types';
-import { DELTA_OP_KINDS, syncDeltaOps } from './syncOps';
+import { WB_NEUTRAL_KELVIN } from '../gpu/uniforms';
+import type { Op, ProfileKind } from './types';
+import { syncableOps } from './syncOps';
 
 const wb = (kelvin: number, tint = 0): Op => ({ kind: 'whiteBalance', kelvin, tint });
-const tone = (contrast: number, blacks = 0): Op => ({
-  kind: 'tone', contrast, highlights: 0, shadows: 0, whites: 0, blacks,
+// An As-Shot op: `gains` is set exactly when the WB sliders were never touched.
+const shotWb = (kelvin: number, tint = 0): Op => ({
+  kind: 'whiteBalance', kelvin, tint, gains: { r: 2.1, g: 1, b: 1.4 },
 });
+const exposure = (ev: number): Op => ({ kind: 'exposure', ev });
+const profile = (p: ProfileKind): Op => ({ kind: 'profile', profile: p });
+const tone: Op = { kind: 'tone', contrast: 25, highlights: -30, shadows: 15, whites: 5, blacks: -10 };
+const presence: Op = { kind: 'presence', texture: 20, clarity: -10, dehaze: 5, vibrance: 15, saturation: -5 };
+const crop: Op = { kind: 'crop', aspect: '1:1', rotate90: 1, angle: 2.5 };
 
-describe('syncDeltaOps (LrC delta semantics)', () => {
-  it('applies the source CHANGE onto the target value, not the source value', () => {
-    // Source: 5500 -> 6500 (+1000). Target has its own 7000. Sync => 8000.
-    const ops = syncDeltaOps([wb(5500)], [wb(6500)], [wb(7000)]);
-    expect(ops).toEqual([wb(8000, 0)]);
+describe('syncableOps (absolute sync, user intent only)', () => {
+  it('drops a whiteBalance op that still carries the camera gains', () => {
+    expect(syncableOps([shotWb(6500, 12)], 'camera')).toStrictEqual([]);
   });
 
-  it('an untouched source field contributes nothing', () => {
-    // Source only changed tint; the target keeps its own kelvin.
-    const ops = syncDeltaOps([wb(5500, 0)], [wb(5500, 20)], [wb(7000, -5)]);
-    expect(ops).toEqual([wb(7000, 15)]);
+  it('drops a whiteBalance op sitting on the slider neutral', () => {
+    expect(syncableOps([wb(WB_NEUTRAL_KELVIN, 0)], 'camera')).toStrictEqual([]);
   });
 
-  it('falls back to slider neutrals when history[0] predates the kind', () => {
-    // Source baseline has no WB op at all: 5500 neutral -> 6500 = +1000 delta
-    // onto a target with no WB op = target starts from neutral too. Untouched
-    // fields stay absent (the renderer reads their neutral for a missing op).
-    const ops = syncDeltaOps([], [wb(6500)], []);
-    expect(ops).toEqual([{ kind: 'whiteBalance', kelvin: 6500 }]);
+  it('keeps a moved whiteBalance op, kelvin and tint intact', () => {
+    expect(syncableOps([wb(6500, 5)], 'camera')).toStrictEqual([{ kind: 'whiteBalance', kelvin: 6500, tint: 5 }]);
   });
 
-  it('per-field deltas on a multi-field op (contrast moved, blacks not)', () => {
-    const ops = syncDeltaOps(
-      [tone(0, -20)],
-      [tone(30, -20)],
-      [tone(-10, 40)],
+  it('drops EV 0 exposure and keeps a moved one', () => {
+    expect(syncableOps([exposure(0)], 'camera')).toStrictEqual([]);
+    expect(syncableOps([exposure(0.8)], 'camera')).toStrictEqual([exposure(0.8)]);
+  });
+
+  it('drops the profile equal to the defaultProfile argument and keeps any other', () => {
+    expect(syncableOps([profile('camera')], 'camera')).toStrictEqual([]);
+    expect(syncableOps([profile('portra400')], 'camera')).toStrictEqual([profile('portra400')]);
+    // The argument decides which profile means "never chose one" -- not a
+    // hardcoded 'camera' inside syncableOps.
+    expect(syncableOps([profile('neutral')], 'neutral')).toStrictEqual([]);
+  });
+
+  it('keeps tone, presence and crop unchanged -- those are already emitted only when non-neutral', () => {
+    expect(syncableOps([tone, presence, crop], 'camera')).toStrictEqual([tone, presence, crop]);
+  });
+
+  it('from an untouched-source mix, returns only the real edits, in input order', () => {
+    const moved: Op = { kind: 'exposure', ev: 0.8 };
+    const out = syncableOps(
+      [shotWb(WB_NEUTRAL_KELVIN), wb(WB_NEUTRAL_KELVIN, 0), exposure(0), profile('camera'), tone, moved],
+      'camera',
     );
-    expect(ops).toEqual([tone(20, 40)]); // contrast -10 + 30; blacks untouched by source
-  });
-
-  it('clamps into the slider range', () => {
-    const ops = syncDeltaOps([tone(0)], [tone(90)], [tone(50)]);
-    expect(ops).toEqual([tone(100)]); // 140 clamped to the 100 range
-  });
-
-  it('non-delta kinds produce nothing (caller copies them absolutely)', () => {
-    const curve: Op = { kind: 'toneCurve', mode: 'point', points: [0, 0, 0.5, 0.6, 1, 1] };
-    expect(syncDeltaOps([], [curve], [])).toEqual([]);
-  });
-
-  it('delta kinds cover the slider-backed ops', () => {
-    expect(DELTA_OP_KINDS).toEqual(
-      expect.arrayContaining(['exposure', 'whiteBalance', 'tone', 'presence', 'vignette']),
-    );
-    expect(DELTA_OP_KINDS).not.toContain('crop');
-    expect(DELTA_OP_KINDS).not.toContain('toneCurve');
+    expect(out).toStrictEqual([tone, moved]);
   });
 });

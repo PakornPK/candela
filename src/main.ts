@@ -2,7 +2,7 @@ import { Virtualizer, elementScroll, observeElementRect, observeElementOffset } 
 import { Pipeline } from './gpu/pipeline';
 import { decode, DecodeError, type CameraMeta, type DecodedRaw } from './raw/decode';
 import { isWasmLoadError } from './raw/librawModule';
-import { DELTA_OP_KINDS, syncDeltaOps } from './catalog/syncOps';
+import { syncableOps } from './catalog/syncOps';
 import { decodeImage, ImageDecodeError, type DecodedImage } from './raw/imageDecode';
 import { extractThumbnail } from './raw/thumbnail';
 import { cameraCalibrationKey, gainsToKelvin, gainsToTint, WB_NEUTRAL_KELVIN } from './gpu/uniforms';
@@ -5347,14 +5347,19 @@ async function init(): Promise<void> {
     for (const cell of libraryGrid.querySelectorAll<HTMLElement>('.catalog-cell')) {
       const id = Number(cell.dataset.fileId);
       cell.classList.toggle('selected', selected.has(id));
-      // The Sync reference = the last-clicked selected photo. Without a
-      // distinct frame the footer's 'sync from the last clicked' pointed at a
-      // photo nobody could find (LrC draws the source frame brighter).
+      // The Sync reference = the loupe photo when it is part of the selection,
+      // else the last clicked one (see syncReference). Without a distinct frame
+      // the footer's source name pointed at a photo nobody could find (LrC
+      // draws the source frame brighter).
       cell.classList.toggle('sync-ref', selectedIds.length >= 2 && id === syncReference());
     }
+    const refName = selectedIds.length > 1
+      ? allFiles.find((f) => f.id === syncReference())?.name ?? null
+      : null;
     selectionInfo.textContent =
-      selectedIds.length > 1 ? `${selectedIds.length} selected · sync from the last clicked` :
-      selectedIds.length === 1 ? '1 selected' : '';
+      selectedIds.length > 1
+        ? `${selectedIds.length} selected · sync from ${refName ?? 'the loupe photo'}`
+        : selectedIds.length === 1 ? '1 selected' : '';
     syncBtn.disabled = !(selectedId !== null && selectedIds.length >= 2);
     if (developSyncBtn) developSyncBtn.disabled = syncBtn.disabled;
     syncCollectionActions();
@@ -5696,7 +5701,7 @@ async function init(): Promise<void> {
     // S -- LrC's loupe Sync: the dialog itself enforces 'needs 2+ selected'.
     if (action.type === 'sync') {
       e.preventDefault();
-      if (getState().module === 'develop') openSyncDialog();
+      if (getState().module === 'develop') void openSyncDialog();
       return;
     }
 
@@ -5882,9 +5887,12 @@ async function init(): Promise<void> {
     return selectedId;
   }
 
-  function openSyncDialog(): void {
+  async function openSyncDialog(): Promise<void> {
     const { selectedId, selectedIds } = getState();
     if (selectedId === null || selectedIds.length < 2) return;
+    // The first open awaits the source's edit state; a second click landing in
+    // that window would call showModal() on an already-open dialog and throw.
+    if (syncDialog.open) return;
     syncRefId = syncReference(); // frozen: arrows/keys must not move the source mid-sync
     syncTargets = selectedIds.filter((id) => id !== syncRefId);
     syncAborted = false;
@@ -5893,17 +5901,26 @@ async function init(): Promise<void> {
     // silently unchecked every box on a first-ever dialog).
     const remembered = localStorage.getItem('candela.syncModules') ?? '';
     const remember = remembered ? remembered.split(',') : null;
+    // First open: tick only the modules the source really edited. The old
+    // all-checked default synced values the user never touched onto every
+    // target. A remembered choice still wins -- that is the user's own pick.
+    let intentModules: string[] | null = null;
+    if (remember === null && syncRefId !== null) {
+      const refOps = syncableOps(currentOps(await loadEditState(db, syncRefId)), 'camera');
+      intentModules = [...new Set(refOps.map((op) => OP_MODULE[op.kind]))];
+    }
     syncModulesEl.textContent = '';
     for (const m of [...new Set(Object.values(OP_MODULE))]) {
       const label = document.createElement('label');
       const cb = document.createElement('input');
       cb.type = 'checkbox';
       cb.value = m;
-      cb.checked = remember === null || remember.includes(m);
+      cb.checked = remember !== null ? remember.includes(m) : (intentModules?.includes(m) ?? false);
       label.append(cb, ' ' + m);
       syncModulesEl.appendChild(label);
     }
-    syncProgressEl.textContent = `${syncTargets.length} photos will receive the source's checked modules`;
+    const syncRefName = allFiles.find((f) => f.id === syncRefId)?.name ?? 'the source photo';
+    syncProgressEl.textContent = `${syncTargets.length} photos will receive ${syncRefName}'s checked modules`;
     syncGoBtn.disabled = false;
     syncCancelBtn.hidden = true;
     syncDialog.showModal();
@@ -5960,16 +5977,20 @@ async function init(): Promise<void> {
     try {
       const refState = await loadEditState(db, refId);
       const refFull = currentOps(refState);
-      // Delta semantics (LrC's 'what changed', user spec 2026-09-18): the
-      // source contributes the CHANGE it made since import (history[0] =
-      // its as-imported snapshot) -- temp 5500 -> 6500 syncs +1000 onto each
-      // target's own temperature, not the absolute 6500. Kinds without
-      // meaningful deltas (curve points, crop rect, profile, frame, mask)
-      // copy absolutely.
-      const refBase = refState.history[0] ?? [];
-      const refPicked = refFull.filter((op) => checked.has(OP_MODULE[op.kind]));
-      const deltaKinds = new Set(DELTA_OP_KINDS);
-      const refAbsolute = refPicked.filter((op) => !deltaKinds.has(op.kind));
+      // Absolute semantics (real LrC Sync), but only for the values the source
+      // actually carries intent for: syncableOps drops the three ops
+      // currentOpsFromSliders emits unconditionally (profile, exposure,
+      // whiteBalance) whenever the source sits on their default, because
+      // copying an untouched source's As-Shot WB / EV 0 / default profile onto
+      // every target is what skewed colour on all of them. A whiteBalance op
+      // with `gains` never survives, so a RAW target renders the synced
+      // kelvin/tint instead of keeping its own As-Shot gains
+      // (applyOpsToSliders prefers gains and would ignore the synced
+      // kelvin/tint entirely).
+      const refPicked = syncableOps(
+        refFull.filter((op) => checked.has(OP_MODULE[op.kind])),
+        'camera', // profileSelect's default (line ~119) -- a source still on it never chose a profile
+      );
       if (!refPicked.length) {
         showError('Nothing to sync -- the source photo has no edits in the selected modules.');
         return;
@@ -5983,8 +6004,7 @@ async function init(): Promise<void> {
         try {
           const state = await loadEditState(db, id);
           const now = currentOps(state);
-          const applied = [...refAbsolute, ...syncDeltaOps(refBase, refPicked, now)];
-          await persistEdits(id, commitEdit(state, mergeKinds(now, applied)));
+          await persistEdits(id, commitEdit(state, mergeKinds(now, refPicked)));
           done++;
         } catch {
           failed++; // one broken row doesn't abandon the rest

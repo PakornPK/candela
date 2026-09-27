@@ -510,7 +510,7 @@
       .catalog-cell.selected {
         outline: 2px solid var(--accent);
       }
-      /* Sync source photo (last clicked of a multi-selection): brighter frame. */
+      /* Sync source photo (the loupe one, else the last clicked): brighter frame. */
       .catalog-cell.sync-ref {
         outline-color: #fff;
       }
@@ -2735,7 +2735,7 @@
         <ol>
           <li><b>Open a folder</b> — in <b>Library</b>, click <b>＋</b> next to "Folders" and pick a folder of photos (raw files like CR3, ARW, NEF, DNG, RAF or standard images like JPEG, PNG, TIFF, WebP, HEIC). Desktop Chrome / Edge / Opera. It is read only in your browser — nothing is uploaded.</li>
           <li><b>Cull</b> — step with <kbd>←</kbd> <kbd>→</kbd>. Rate <kbd>1</kbd>–<kbd>5</kbd>, reject <kbd>X</kbd>, pick <kbd>P</kbd>, clear <kbd>U</kbd>, color <kbd>6</kbd>–<kbd>9</kbd>. Filter with the checkboxes on the left.</li>
-          <li><b>Select several</b> — <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+click a photo (grid or filmstrip) adds it to the selection, <kbd>Shift</kbd>+click takes a range; the last clicked (white frame) is the source. With 2+ selected, <b>Sync Settings</b> (footer, or <kbd>S</kbd> in Develop) copies the source's edits — per module — to the rest.</li>
+          <li><b>Select several</b> — <kbd>Ctrl</kbd>/<kbd>Cmd</kbd>+click a photo (grid or filmstrip) adds it to the selection, <kbd>Shift</kbd>+click takes a range; the source (white frame) is the photo open in the loupe, or the last clicked when that photo is not selected. With 2+ selected, <b>Sync Settings</b> (footer, or <kbd>S</kbd> in Develop) gives every other photo the edits the source actually carries — per module — so they match it; a control left at its default on the source is not written to the targets.</li>
           <li><b>Quick Collection</b> — <kbd>B</kbd> toggles the selection into the target collection (<kbd>Shift</kbd>+<kbd>B</kbd> adds and advances, <kbd>Cmd</kbd>/<kbd>Ctrl</kbd>+<kbd>B</kbd> opens it, <kbd>Cmd</kbd>/<kbd>Ctrl</kbd>+<kbd>Alt</kbd>+<kbd>B</kbd> saves the tray as a real collection). The <b>B</b> button on a collection row makes it the target; the label under "Collections" always says where B lands.</li>
           <li><b>Remove vs Delete</b> — <kbd>Delete</kbd> on a selection removes the photos from the catalog (the files stay on disk); inside a collection it only removes membership. The dialog offers "Delete from disk" as the explicit alternative — that moves files to the system trash. A photo whose file moved shows a <b>!</b> badge; "Find missing photos…" under Folders relinks every file in the folder you point at. Re-importing a folder of duplicates skips files the catalog already holds.</li>
           <li><b>Collect</b> — in <b>Library</b>, select photos in the grid and click <b>＋</b> in the panel header to start a collection from the selected photos, or <b>＋</b> on a collection row to add them to an existing one; the count on the row updates. Click a collection to see only its photos, <b>−</b> in the panel header removes the selected photos from it, <b>×</b> deletes the collection (photos stay). <b>Smart Collections</b> fill themselves from the cull marks: <b>＋</b> opens a rule (rating, flag, modified dates), <b>&#9998;</b> edits it, and the count grows as you rate. With photos selected, a new rule is bounded to them by default &mdash; switch <b>Photos</b> to &quot;Every photo in the catalog&quot; to let it reach everything &mdash; and the preview under the form says how many photos it matches before you save.</li>
@@ -2746,7 +2746,7 @@
 
       <dialog id="sync-dialog">
         <h2>Sync Settings</h2>
-        <p class="sync-note">The source photo's edits in the checked modules replace the same modules in every other selected photo. Each sync is one undo step per photo.</p>
+        <p class="sync-note">The edits the source photo actually carries in the checked modules replace the same modules in every other selected photo; a control left at its default on the source is not copied. Each sync is one undo step per photo.</p>
         <div id="sync-modules" class="sync-modules"></div>
         <span id="sync-progress" class="sync-progress"></span>
         <form method="dialog" id="sync-form" class="sync-actions">

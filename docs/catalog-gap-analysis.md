@@ -111,7 +111,7 @@ LrC semantics). Contact sheet จงใจไม่รองรับ PI (ไม
 | Auto-advance after rating | `#auto-advance` checkbox | = Auto Advance / Caps Lock ของ LrC |
 | Collections (manual) + Smart Collections (rating/flag/camera/lens/date/folder) | `collections.ts`, `smartCollections.ts` | มีโครง แต่ criteria engine พังบางข้อ (ดูบัค) |
 | Compare (2-4 รูป), Contact sheet, Print | `src/app/`, modules | Compare ตรง LrC; **Survey ยังไม่มี** |
-| Sync Settings (module dialog + delta semantics), copy/paste settings | `syncOps.ts`, `main.ts` | ตรง LrC Sync |
+| Sync Settings (module dialog + absolute copy เฉพาะค่าที่ source ตั้งใจแก้ — control ที่ยังอยู่ที่ default ไม่ถูกเขียน), copy/paste settings | `syncOps.ts`, `main.ts` | ตรง LrC Sync |
 | Second monitor, tethered capture | `secondMonitor.ts`, `tetheredCapture.ts` | มีแล้ว (LrC: Important/Nice) |
 | Virtualized grid + filmstrip, strip = กระจกของ grid | `main.ts`, `filmstrip.ts` | ตรง pattern LrC |
 | Developed-thumbnail cache + digest freshness + restore-access banner | `thumbnails.ts`, `offscreenRenderer.ts` | ไม่มีใน LrC ตรงๆ — นี่คือ "Standard preview" ของเราที่ 320px |
