@@ -1,0 +1,170 @@
+{
+  "totals": {
+    "calls": 413,
+    "inputTokens": 28370048,
+    "cachedTokens": 26653472,
+    "outputTokens": 548205,
+    "thoughtsTokens": 310949,
+    "firstAt": "2026-09-27T09:41:54.279Z",
+    "lastAt": "2026-09-27T11:20:09.747Z",
+    "wallSeconds": 5895
+  },
+  "main": {
+    "id": "main",
+    "label": "main loop",
+    "calls": 31,
+    "inputTokens": 7498185,
+    "cachedTokens": 6755171,
+    "outputTokens": 111815,
+    "thoughtsTokens": 26235,
+    "firstAt": "2026-09-27T09:41:54.279Z",
+    "lastAt": "2026-09-27T11:20:09.747Z"
+  },
+  "agents": [
+    {
+      "id": "review-agent-call_d8b6e9f793544a54a17da372",
+      "label": "review-agent-call_d8b6e9f793544a54a17da372",
+      "calls": 80,
+      "inputTokens": 4798422,
+      "cachedTokens": 4692400,
+      "outputTokens": 47279,
+      "thoughtsTokens": 21182,
+      "firstAt": "2026-09-27T10:34:16.773Z",
+      "lastAt": "2026-09-27T10:54:37.438Z"
+    },
+    {
+      "id": "review-agent-call_dec0cd3f4cad4681ae042c19",
+      "label": "review-agent-call_dec0cd3f4cad4681ae042c19",
+      "calls": 58,
+      "inputTokens": 3926048,
+      "cachedTokens": 3808631,
+      "outputTokens": 52231,
+      "thoughtsTokens": 30380,
+      "firstAt": "2026-09-27T10:34:17.934Z",
+      "lastAt": "2026-09-27T10:58:11.480Z"
+    },
+    {
+      "id": "review-agent-call_fab1cb7b9b3c4912b7623d38",
+      "label": "review-agent-call_fab1cb7b9b3c4912b7623d38",
+      "calls": 46,
+      "inputTokens": 3026954,
+      "cachedTokens": 2929590,
+      "outputTokens": 29374,
+      "thoughtsTokens": 16185,
+      "firstAt": "2026-09-27T10:10:18.270Z",
+      "lastAt": "2026-09-27T10:23:35.195Z"
+    },
+    {
+      "id": "review-agent-call_ae71913a3c1f444481f0b5f5",
+      "label": "review-agent-call_ae71913a3c1f444481f0b5f5",
+      "calls": 25,
+      "inputTokens": 1451128,
+      "cachedTokens": 1360972,
+      "outputTokens": 38400,
+      "thoughtsTokens": 30552,
+      "firstAt": "2026-09-27T09:49:08.356Z",
+      "lastAt": "2026-09-27T10:05:36.537Z"
+    },
+    {
+      "id": "review-agent-call_08ed4f62b2934588af1bf0d5",
+      "label": "review-agent-call_08ed4f62b2934588af1bf0d5",
+      "calls": 26,
+      "inputTokens": 1447031,
+      "cachedTokens": 1350021,
+      "outputTokens": 43895,
+      "thoughtsTokens": 26847,
+      "firstAt": "2026-09-27T10:34:21.528Z",
+      "lastAt": "2026-09-27T10:51:40.022Z"
+    },
+    {
+      "id": "review-agent-call_73780a15a81d4970bd2ca1b6",
+      "label": "review-agent-call_73780a15a81d4970bd2ca1b6",
+      "calls": 23,
+      "inputTokens": 1096044,
+      "cachedTokens": 1032901,
+      "outputTokens": 38327,
+      "thoughtsTokens": 27088,
+      "firstAt": "2026-09-27T10:10:21.641Z",
+      "lastAt": "2026-09-27T10:26:04.839Z"
+    },
+    {
+      "id": "review-agent-call_27648ee481e540b491d226bb",
+      "label": "review-agent-call_27648ee481e540b491d226bb",
+      "calls": 20,
+      "inputTokens": 1005676,
+      "cachedTokens": 931007,
+      "outputTokens": 26252,
+      "thoughtsTokens": 16757,
+      "firstAt": "2026-09-27T10:10:15.583Z",
+      "lastAt": "2026-09-27T10:21:01.533Z"
+    },
+    {
+      "id": "review-agent-call_6342e415957c491f9136ab07",
+      "label": "review-agent-call_6342e415957c491f9136ab07",
+      "calls": 24,
+      "inputTokens": 1005093,
+      "cachedTokens": 938538,
+      "outputTokens": 32287,
+      "thoughtsTokens": 24139,
+      "firstAt": "2026-09-27T09:49:06.224Z",
+      "lastAt": "2026-09-27T10:03:19.042Z"
+    },
+    {
+      "id": "review-agent-call_8527e4f79b104c8386fcdf33",
+      "label": "review-agent-call_8527e4f79b104c8386fcdf33",
+      "calls": 22,
+      "inputTokens": 966989,
+      "cachedTokens": 897082,
+      "outputTokens": 32213,
+      "thoughtsTokens": 25742,
+      "firstAt": "2026-09-27T09:49:06.692Z",
+      "lastAt": "2026-09-27T10:02:54.028Z"
+    },
+    {
+      "id": "review-agent-call_9216c5f29aa848ac8f9f1e1b",
+      "label": "review-agent-call_9216c5f29aa848ac8f9f1e1b",
+      "calls": 19,
+      "inputTokens": 807993,
+      "cachedTokens": 737006,
+      "outputTokens": 35736,
+      "thoughtsTokens": 26697,
+      "firstAt": "2026-09-27T09:49:07.300Z",
+      "lastAt": "2026-09-27T10:04:42.922Z"
+    },
+    {
+      "id": "review-agent-call_798d609044e24ee48952e0c2",
+      "label": "review-agent-call_798d609044e24ee48952e0c2",
+      "calls": 16,
+      "inputTokens": 652536,
+      "cachedTokens": 591892,
+      "outputTokens": 30799,
+      "thoughtsTokens": 22294,
+      "firstAt": "2026-09-27T10:10:15.188Z",
+      "lastAt": "2026-09-27T10:23:29.887Z"
+    },
+    {
+      "id": "review-agent-call_04d71782d3a64b0aa617befb",
+      "label": "review-agent-call_04d71782d3a64b0aa617befb",
+      "calls": 16,
+      "inputTokens": 601850,
+      "cachedTokens": 557422,
+      "outputTokens": 25036,
+      "thoughtsTokens": 14756,
+      "firstAt": "2026-09-27T10:10:15.470Z",
+      "lastAt": "2026-09-27T10:21:50.637Z"
+    },
+    {
+      "id": "review-agent-call_7676c48ee9b340d684b55f7b",
+      "label": "review-agent-call_7676c48ee9b340d684b55f7b",
+      "calls": 7,
+      "inputTokens": 86099,
+      "cachedTokens": 70839,
+      "outputTokens": 4561,
+      "thoughtsTokens": 2095,
+      "firstAt": "2026-09-27T09:49:05.484Z",
+      "lastAt": "2026-09-27T09:50:49.300Z"
+    }
+  ],
+  "priorSessions": 0,
+  "missingStreams": 0
+}
