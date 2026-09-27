@@ -3,8 +3,9 @@
 **ไฟล์นี้คือ state ของ loop** — อ่านมันก่อนทุก tick และอัปเดต `[x]` + บรรทัด "ตำแหน่งปัจจุบัน" ทันทีที่งานหนึ่งขั้นจบ
 เอกสารอ้างอิง: `docs/adr/0001-layered-architecture.md` (Accepted) · `docs/superpowers/plans/2026-09-27-main-ts-hardening-plan.md` (rev.2) · `docs/reviews/2026-09-27-main-ts-review.md` (42 findings)
 
-**ตำแหน่งปัจจุบัน:** A0′ (scaffold domain/adapters + architecture.test.ts) — ยังไม่เริ่ม
-**commit ล่าสุดที่ push แล้ว:** `16e9807` (X3 = R1-18 contact sheet Prev · QA 30/30) · ก่อนหน้า `97ec626`, `f396568` (X2 = R1-14), `cd0405d` (X1 = R1-3), `87902be`, `9538ef9` — **exception trio จบ · findings ปิด 3/42 (Critical 3/20)** · *A1 commit แล้วในเครื่อง (QA 31/31) — hash ของ A1 จดโดย tick ถัดไปตาม convention ข้างล่าง*
+**ตำแหน่งปัจจุบัน:** M1 (architecture.test.ts + negative control + `git mv catalog/paths.ts → domain/paths.ts`) — ยังไม่เริ่ม · **A0′ ถูกยุบเข้ากับ M1 แล้ว** (ดูเหตุผลในขั้นที่ 1)
+**commit ล่าสุดที่ push แล้ว:** `58636c2` (A1 = QA trusted input · QA 31/31 · src/ ไม่ถูกแตะ) · ก่อนหน้า `16e9807` (X3 = R1-18), `97ec626`, `f396568` (X2 = R1-14), `cd0405d` (X1 = R1-3), `87902be`, `9538ef9` — **exception trio จบ · findings ปิด 3/42 (Critical 3/20) · QA 27 → 31 checks**
+**⚠️ loop chain ของ session ก่อนชนเพดาน 24 ชม. แล้ว** — จะเดินต่อให้สั่ง `/loop ทำให้หมดเลยตามแผน` ใน session ใหม่ ไฟล์นี้คือ state ที่ใช้อ่านต่อได้ทันที
 *(convention: อัปเดตสองบรรทัดนี้ตอน**เริ่ม** tick ถัดไป ไม่ใช่ท้าย tick เดียวกัน — commit เขียน hash ของตัวเองไม่ได้)*
 
 ---
@@ -51,15 +52,18 @@ Class C ทั้งหมด ทำก่อน M-series เพราะไม�
 
 - [x] **A1** QA trusted input ใน `scripts/qa-loop.mjs`: `pressKey` (`Input.dispatchKeyEvent` rawKeyDown/char/keyUp), `dragEl` (`mousePressed` → N×`mouseMoved` → `mouseReleased`, hit-test ก่อนกดแบบ `clickEl`), `typeText` + check พิสูจน์ 1 ตัวที่ลาก crop overlay จริง · zero dependency ใหม่ · **ไม่แตะ `src/`**
       *(helpers ทั้งสามอยู่ถัดจาก `clickEl`: `pressKey(cdp, key, {ctrl,meta,alt,shift,text})` · `typeText(cdp, text)` ทีละตัวอักษร (จงใจไม่ใช้ `Input.insertText`) · `dragEl(cdp, fromSelector, toX, toY, {steps=8,button='left',holdMs=0})` — `clickEl` ถูก extract ใช้ helper รวม `targetCentre()` (พฤติกรรม/ข้อความ error เดิมทุกตัวอักษร, check เดิมผ่านครบ 30/30) · check: `harness: trusted key, drag and type reach the app as real input` (group `stability`, วางต่อจาก check ของ X3) ลาก `#crop-overlay` ผ่าน pointer-capture จริง และวัด `isTrusted` ด้วย capture-phase listener ที่ติดตั้งจาก harness · QA 31/31 · unit 790 เท่าเดิม · ไม่มี "แดงก่อน" เพราะ A1 เป็น capability proof ไม่ใช่ bug fix — ใช้ **negative control** แทน: สลับ `pressKey` กลับไป `dispatchEvent` → check แดงที่ `pressKey: 1 UNTRUSTED event(s) recorded` · check ยัง **coarse โดยเจตนา** ดูบันทึกค้าง-row ของ A1 ด้านล่าง)*
-- [ ] **A0′** สร้าง `src/domain/`, `src/domain/ports/`, `src/adapters/` + `src/architecture.test.ts` (fitness function 5 ข้อตาม ADR §5) — เขียนให้**แดง**ก่อน แล้วค่อยเขียวเมื่อชั้นแรกย้ายเข้า
-      *(หมายเหตุ: A0 เดิมในแผน rev.2 บอกให้เขียน ADR + ทำ U1 เป็น reference — ADR เขียนเสร็จแล้ว และ Option A เลื่อน U1 ไปหลัง M-series จึงเหลือแค่ scaffold + fitness test)*
+- [~] **A0′ — ยุบเข้ากับ M1 แล้ว (thinker ตัดสิน 2026-09-27 หลัง A1 จบ)** เหตุผล: A0′ เดิมจะสร้าง `src/domain/`, `src/domain/ports/`, `src/adapters/` เปล่า ๆ ซึ่ง (ก) git ไม่ track directory ว่าง จึง commit ไม่ได้ (ข) `architecture.test.ts` จะเขียวแบบ **vacuous** เพราะไม่มีไฟล์ใน `domain/` ให้ตรวจ — จึงไม่มีสถานะ "แดงก่อน" ที่มีความหมาย และขัดกฎ TDD ของแผน → **ให้เริ่มจากการย้ายของจริงชิ้นเล็กสุดแทน** (ดู M1 ด้านล่าง) · A0 ดั้งเดิมของแผน rev.2 (เขียน ADR + ทำ U1 เป็น reference implementation) ก็หมดความหมายไปแล้ว เพราะ ADR เขียนเสร็จ และ Option A เลื่อน U1 ไปหลัง M-series
 
 ## ขั้นที่ 2 — M1-M12 (ย้ายชั้น, ไม่แก้บั๊กสักตัว)
 
 **ใช้ตาราง ADR §3.6/§3.7 ที่ verify แล้ว ไม่ใช่ §3.2/§3.3 เดิม** · หลักฐานรายไฟล์: `docs/adr/0001-layer-survey-evidence.md`
 
-- [ ] **M1** `domain/types.ts` ← `catalog/types.ts` (ทุกชั้นอ้าง ต้องไปก่อน)
-- [ ] **M2** `domain/` ← `paths`, `editHistory`, `syncOps`, `duplicates`, `sidecar`, `presetFiles`
+- [ ] **M1** *(ปรับใหม่ — รับ A0′ ที่ยุบแล้วเข้ามา) สามขั้น:*
+      **(1)** สร้าง `src/architecture.test.ts` = fitness function ตาม ADR §5 ทั้ง 5 ข้อ (domain ห้าม import `app/`/`adapters/`/`bootstrap`/`main` · domain ห้ามมี identifier `document`/`window`/`indexedDB`/`navigator`/`GPUDevice`/`requestAdapter`/`fetch` · app ห้าม import `adapters/` · adapters ที่ implement port ต้อง import port จาก `domain/ports/` · pin จำนวน `as any` ทั้ง repo เป็น baseline แล้วห้ามเพิ่ม) — walk ต้นไม้ด้วย `node:fs`, รันใน `npm test`, ไม่ต้องมี browser
+      **(2)** พิสูจน์ว่ามันไม่ใช่ tautology ด้วย **negative control** (นี่คือ "แดงก่อน" ของ guard ไม่ใช่ของ fix): สร้าง `src/domain/__probe.ts` ชั่วคราวที่ import จาก `../app/state` หรืออ้าง `document` → `npm test` ต้อง**แดง** → บันทึก verbatim → ลบ probe → เขียว
+      **(3)** `git mv src/catalog/paths.ts src/domain/paths.ts` (22 บรรทัด, 1 test file — เล็กสุดในตาราง จึงใช้พิสูจน์กลไกทั้งเส้น: `git mv` + ตามแก้ทุก importer + gate ครบสาม) แล้วค่อยสร้าง `src/domain/ports/` เมื่อมี port ตัวแรกจริง · **ต้องเป็น `git mv`** เพื่อรักษา history ตาม ADR §4.2
+- [ ] **M1b** `git mv src/catalog/types.ts src/domain/types.ts` (211 บรรทัด — **ทุกชั้นอ้างมัน** จึงกระทบ importer มากที่สุด · จงใจแยก commit จาก M1 เพราะถ้าพังจะแยกสาเหตุไม่ออก)
+- [ ] **M2** `domain/` ← `editHistory`, `syncOps`, `duplicates`, `sidecar`, `presetFiles` *(ตัด `paths` ออกเพราะ M1 ย้ายไปแล้ว)*
 - [ ] **M3** `domain/` ← `filters`, `stacks`, `survey`, `navigator`, `viewState`, `contactSheet`, `smartCollections`, `shortcuts`(rules) · ใช้ชื่อ `domain/viewport/` (ADR §8.6)
 - [ ] **M4** `domain/color` (uniforms math), `domain/curve` (tone math), `domain/mask` (dodge math), `domain/film` ← `film.ts` **move ทั้งไฟล์**, `domain/orientation` ← `orient.ts` **move ทั้งไฟล์**, `domain/transform` ← `geometry.ts` · **รวมยก `*_DEFAULTS` ของ geometry/vignette/presence/dodgeBurn จาก literal ที่ `ops.ts:225/:274/:211/:291` ขึ้น domain (ADR §8.7)** · reconcile `mix01`/`smoothstep01`/`clamp01` ที่ซ้ำใน grain/lightleak/vignette
 - [ ] **M5** split ฝั่ง catalog → domain: `editsStore`(validate), `collections`(rules), `backup`, `import`, `iptc`(+ แยก metadata-preset store ออกจาก IPTC), `keywords`(clean ที่ :267/269), `missing`, `remove`, `culling`(interleaved)
