@@ -2100,6 +2100,116 @@ async function runChecks(cdp, { fast }) {
     if (fails.length) throw new Error(fails.join('; '));
     return `smart name "${PAYLOAD.slice(0, 24)}…" rendered as text both live and after reload (imgs=0, __pwned undefined); overlay "${String(ov.text).slice(0, 28)}…" painted on hover (opacity=${ov.opacity}, __pwned undefined); 0 HTML-sink assignments in src/main.ts`;
   });
+
+  // C26: R1-14 — dismissing the error banner must never destroy it. The
+  // device-loss recovery auto-dismissed its "Recovered" message with
+  // errorEl.remove(), and #error-message / #error-detail are CHILDREN of #error
+  // (index.html:2748-2754) that are also the module-level bindings showError
+  // writes (main.ts:242-244). The references kept pointing at the detached
+  // subtree and nothing recreates the node, so after a single GPU recovery all
+  // 51 showError call sites rendered nothing for the rest of the session — the
+  // app's only error channel died silently, and it is the channel that would
+  // have reported every other failure. clearError() (hidden = true) is the
+  // codebase's dismissal idiom, same as the Escape handler at main.ts:400.
+  await check('stability: the error banner survives dismissal and keeps reporting', 'stability', async () => {
+    const fails = [];
+
+    // -- (a) static pin. THE regression assertion: it is the only part that goes
+    // red when remove() comes back. Driving a real GPUDevice loss is not
+    // possible here (see the comment on part (b)), so the defect is pinned where
+    // it lives — in src/main.ts — the same way C25 pins the HTML sinks.
+    const mainPath = join(process.cwd(), 'src', 'main.ts');
+    const mainSrc = readFileSync(mainPath, 'utf8');
+    const srcLines = mainSrc.split('\n');
+    const located = (matches) => matches.map((m) => {
+      const line = mainSrc.slice(0, m.index).split('\n').length;
+      return `:${line} ${srcLines[line - 1].trim()}`;
+    });
+    // A bare document.querySelector('#error') is what shadowed the module-level
+    // errorEl binding and made the removal invisible to showError. The typed
+    // binding at :242 (document.querySelector<HTMLDivElement>('#error')) does
+    // not match: the <HTMLDivElement> sits between the paren and the string.
+    const removed = located([...mainSrc.matchAll(/errorEl\.remove\(\)/g)]);
+    const requered = located([...mainSrc.matchAll(/document\.querySelector\(\s*['"]#error['"]\s*\)/g)]);
+    if (removed.length) {
+      fails.push(`${removed.length} errorEl.remove() in src/main.ts — it deletes #error and with it the bound #error-message/#error-detail, permanently killing every showError call site: ${removed.join(' · ')}`);
+    }
+    if (requered.length) {
+      fails.push(`${requered.length} local re-query of #error in src/main.ts — the module already holds the errorEl binding, and a shadowing local is how the remove() went unnoticed: ${requered.join(' · ')}`);
+    }
+
+    // -- (b) behavioural guard. This half PASSES even with R1-14 present (only
+    // the device-loss timer called remove(), and no device loss is drivable from
+    // this harness: window.__qa and the permission/FSAA stubs are injected by
+    // qa-loop.mjs itself, there is no test seam in src/, and pipeline is a
+    // closure variable inside init() that no global exposes). So (b) proves only
+    // that the fix did not break dismissal or reuse — it is not the pin.
+    // The real showError comes from the Sync dialog: two selected photos with no
+    // edits + one checked module makes runSync hit `if (!refPicked.length)` and
+    // call showError(main.ts:5915). No module checked is a different branch
+    // ("Pick at least one module.", :5871) that never reaches showError.
+    const MSG = 'Nothing to sync -- the source photo has no edits in the selected modules.';
+    const readBanner = async () => JSON.parse(await cdp.evaluate(`JSON.stringify({
+      error: !!document.querySelector('#error'),
+      message: !!document.querySelector('#error-message'),
+      hidden: document.querySelector('#error') ? document.querySelector('#error').hidden : null,
+      text: document.querySelector('#error-message') ? document.querySelector('#error-message').textContent : null,
+    })`));
+    const trigger = async () => {
+      await clickEl(cdp, '#sync-btn');
+      await waitFor(cdp, `document.querySelector('#sync-dialog').open ? true : false`, { timeout: 15000 });
+      // A real click on the checkbox — the first open of an untouched source
+      // pre-ticks nothing (openSyncDialog ticks only the modules it has intent
+      // for), and a remembered dialog re-opens with it already ticked.
+      await cdp.evaluate(`(() => { const cb = document.querySelector('#sync-modules input[value="Tone"]');
+        if (cb && !cb.checked) cb.click(); return !!cb; })()`);
+      const ticked = await cdp.evaluate(`!!document.querySelector('#sync-modules input[value="Tone"]').checked`);
+      if (!ticked) throw new Error('#sync-modules has no enabled "Tone" checkbox — the trigger is unexercised');
+      await clickEl(cdp, '#sync-go');
+      // runSync returns right after showError and the submit handler closes it.
+      await waitFor(cdp, `document.querySelector('#sync-dialog').open === false ? true : false`, { timeout: 30000 });
+    };
+    await resetCatalog([
+      { name: 'EB1.jpg', gen: { bg: '#c0392b', fg: '#2980b9' } },
+      { name: 'EB2.jpg', gen: { bg: '#27ae60', fg: '#8e44ad' } },
+    ]);
+    await gotoModule('library');
+    const ids = JSON.parse(await cdp.evaluate(`JSON.stringify([...document.querySelectorAll('.catalog-cell')].map((c) => c.dataset.fileId))`));
+    if (ids.length < 2) throw new Error(`need two unedited photos in the grid, got ${ids.length}`);
+    await cdp.evaluate(`document.querySelector('.catalog-cell[data-file-id="${ids[0]}"]').dispatchEvent(new MouseEvent('click',{bubbles:true}))`);
+    await sleep(300);
+    await cdp.evaluate(`document.querySelector('.catalog-cell[data-file-id="${ids[1]}"]').dispatchEvent(new MouseEvent('click',{bubbles:true,ctrlKey:true}))`);
+    await sleep(600);
+    const sel = JSON.parse(await cdp.evaluate(`JSON.stringify({
+      n: document.querySelectorAll('.catalog-cell.selected').length,
+      disabled: document.querySelector('#sync-btn').disabled })`));
+    if (sel.n !== 2 || sel.disabled) throw new Error(`two-photo selection not built: ${JSON.stringify(sel)}`);
+
+    // 1. the channel renders a real error.
+    await trigger();
+    const first = await readBanner();
+    if (!first.error || !first.message || first.hidden !== false || first.text !== MSG) {
+      throw new Error(`showError did not render: ${JSON.stringify(first)}, expected #error + #error-message present, hidden=false, text=${JSON.stringify(MSG)}`);
+    }
+    // 2. Escape hides it. Asserting the nodes still EXIST is the point: hidden
+    // and removed both blank the screen, only one of them is fatal.
+    await cdp.evaluate(`window.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true}))`);
+    await sleep(300);
+    const afterEsc = await readBanner();
+    if (afterEsc.hidden !== true) fails.push(`Escape did not hide the banner (hidden=${afterEsc.hidden})`);
+    if (!afterEsc.error || !afterEsc.message) {
+      fails.push(`dismissal DESTROYED the banner instead of hiding it (#error=${afterEsc.error}, #error-message=${afterEsc.message}) — showError can never render again`);
+    }
+    if (afterEsc.text !== '') fails.push(`dismissal left stale text in #error-message: ${JSON.stringify(afterEsc.text)}`);
+    // 3. and the app can still report afterwards — the property R1-14 killed.
+    await trigger();
+    const second = await readBanner();
+    if (second.hidden !== false || second.text !== MSG) {
+      fails.push(`the second showError rendered nothing (hidden=${second.hidden}, text=${JSON.stringify(second.text)}) — the error channel is dead after one dismissal`);
+    }
+    if (fails.length) throw new Error(fails.join('; '));
+    return `src/main.ts: 0 errorEl.remove() + 0 local #error re-query; showError "${MSG.slice(0, 24)}…" rendered (hidden=false), Escape hid it with #error + #error-message both still in the document, second showError rendered again`;
+  });
 }
 
 // ---- main ------------------------------------------------------------------

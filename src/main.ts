@@ -1491,10 +1491,7 @@ async function init(): Promise<void> {
         }
       }
       showError('Recovered from GPU device loss.');
-      setTimeout(() => {
-        const errorEl = document.querySelector('#error');
-        if (errorEl) errorEl.remove();
-      }, 3000);
+      setTimeout(clearError, 3000);
     } catch (err) {
       showError('Failed to recover from GPU device loss. Please reload the page.', String(err));
     }

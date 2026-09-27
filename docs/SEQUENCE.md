@@ -3,8 +3,8 @@
 **ไฟล์นี้คือ state ของ loop** — อ่านมันก่อนทุก tick และอัปเดต `[x]` + บรรทัด "ตำแหน่งปัจจุบัน" ทันทีที่งานหนึ่งขั้นจบ
 เอกสารอ้างอิง: `docs/adr/0001-layered-architecture.md` (Accepted) · `docs/superpowers/plans/2026-09-27-main-ts-hardening-plan.md` (rev.2) · `docs/reviews/2026-09-27-main-ts-review.md` (42 findings)
 
-**ตำแหน่งปัจจุบัน:** X2 (R1-14 error banner) — ยังไม่เริ่ม
-**commit ล่าสุดที่ push แล้ว:** `cd0405d` (X1 = R1-3 XSS · QA 28/28)
+**ตำแหน่งปัจจุบัน:** X3 (R1-18 contactPrev) — ยังไม่เริ่ม
+**commit ล่าสุดที่ push แล้ว:** `87902be` (X1 = R1-3 XSS ปิดที่ `cd0405d` · QA 28/28) — X2 = R1-14 ปิดแล้วต่อจาก commit นี้ (QA 29/29) *· ใส่ hash ของ X2 ตอนเริ่ม tick X3 ตาม convention ข้างล่าง*
 *(convention: อัปเดตสองบรรทัดนี้ตอน**เริ่ม** tick ถัดไป ไม่ใช่ท้าย tick เดียวกัน — commit เขียน hash ของตัวเองไม่ได้)*
 
 ---
@@ -28,7 +28,8 @@
 Class C ทั้งหมด ทำก่อน M-series เพราะไม่มีบ้านเชิงโครงสร้างให้รอ
 
 - [x] **X1 = R1-3** XSS: `main.ts:2885` (`row.innerHTML` ใน `renderSmartCollections` interpolate `smart.name`) + `main.ts:4524` (`infoOverlay.innerHTML = info` interpolate `file.name` + `lastDecoded.make/model`) → `createElement` + `textContent` ตามแบบ `renderCollections` (:2807 ใช้ `name.textContent`) · QA check: `security: untrusted strings render as text, never as HTML` · acceptance: `docs/acceptance/untrusted-strings.feature`
-- [ ] **X2 = R1-14** `main.ts:1495` `errorEl.remove()` → `clearError()` (`hidden = true`) เพราะ `#error-message`/`#error-detail` เป็นลูกของ `#error` และคือ binding ที่ `showError` ทั้ง 51 จุดเขียน
+- [x] **X2 = R1-14** `main.ts:1495` `errorEl.remove()` → `clearError()` (`hidden = true`) เพราะ `#error-message`/`#error-detail` เป็นลูกของ `#error` และคือ binding ที่ `showError` ทั้ง 51 จุดเขียน · QA check: `stability: the error banner survives dismissal and keeps reporting` · acceptance: `docs/acceptance/error-banner.feature`
+      *(หมายเหตุ: ครึ่ง **(a)** ของ QA check นั้นเป็น **static pin ชั่วคราว** — สแกน `src/main.ts` จากดิสก์หา `errorEl.remove()` / `document.querySelector('#error')` เพราะ device-loss จริงไม่สามารถขับเคลื่อนจาก harness ได้ · **U2 ต้องแทนมันด้วย unit test จริง** บน `app/errorBanner.ts` ที่แยกออกมาแล้ว ส่วน (b) เป็นแค่ guard ว่าการ dismissal/ใช้ซ้ำไม่พัง — มันเขียวแม้ตอนมีบั๊ก)*
 - [ ] **X3 = R1-18** `main.ts:5207` `contactPrev` decrement แล้วไม่เรียก `renderContactSheet()` (ดู `contactNext` 3 บรรทัดถัดไปเป็นแบบ)
 
 ## ขั้นที่ 1 — มูลฐาน
