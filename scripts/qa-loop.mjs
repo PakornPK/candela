@@ -205,7 +205,10 @@ async function waitFor(cdp, expr, { timeout = 30000, step = 500 } = {}) {
   throw new Error(`timeout waiting for ${expr.slice(0, 60)} (last: ${JSON.stringify(last)})`);
 }
 
-async function clickEl(cdp, selector) {
+// Shared by clickEl and dragEl: scroll the target into view, open any collapsed
+// <details> ancestor, measure its real centre, and report who owns that point.
+// `what` only colours the error text so each caller keeps its own voice.
+async function targetCentre(cdp, selector, what) {
   const pt = await cdp.evaluate(`(() => {
     const e = document.querySelector(${JSON.stringify(selector)});
     if (!e) return null;
@@ -229,11 +232,116 @@ async function clickEl(cdp, selector) {
   // ASSERT the hit test: dispatching at coordinates an overlay owns is a
   // silent click on the wrong thing — two checks (export cell open, iptc
   // apply) failed mystery deaths this way. Fail loudly at the source.
-  if (!pt.onTarget) throw new Error(`${selector} center is covered by "${pt.hit}" — click would miss`);
+  if (!pt.onTarget) throw new Error(`${selector} center is covered by "${pt.hit}" — ${what} would miss`);
+  return pt;
+}
+
+async function clickEl(cdp, selector) {
+  const pt = await targetCentre(cdp, selector, 'click');
   for (const type of ['mousePressed', 'mouseReleased']) {
     await cdp.send('Input.dispatchMouseEvent', { type, x: pt.x, y: pt.y, button: 'left', clickCount: 1 });
   }
   return pt;
+}
+
+// US-layout `code` + Windows virtual-key code per non-character key. CDP builds
+// the KeyboardEvent from all of {key, code, windowsVirtualKeyCode}, so sending
+// only `key` yields an event with an empty code and keyCode 0 — handlers that
+// switch on e.code (or devtools' own readback) then disagree with a real press.
+const KEY_CODE = {
+  Escape: ['Escape', 27], Enter: ['Enter', 13], Tab: ['Tab', 9],
+  Backspace: ['Backspace', 8], Delete: ['Delete', 46], Insert: ['Insert', 45],
+  Home: ['Home', 36], End: ['End', 35], PageUp: ['PageUp', 33], PageDown: ['PageDown', 34],
+  ArrowLeft: ['ArrowLeft', 37], ArrowUp: ['ArrowUp', 38], ArrowRight: ['ArrowRight', 39], ArrowDown: ['ArrowDown', 40],
+  ' ': ['Space', 32],
+  '-': ['Minus', 189], '=': ['Equal', 187], ';': ['Semicolon', 186], ',': ['Comma', 188],
+  '.': ['Period', 190], '/': ['Slash', 191], '`': ['Backquote', 192],
+  '[': ['BracketLeft', 219], ']': ['BracketRight', 221], '\\': ['Backslash', 220], "'": ['Quote', 222],
+};
+
+function keyDescriptor(key) {
+  const known = KEY_CODE[key];
+  if (known) return { code: known[0], vk: known[1] };
+  if (/^F([1-9]|1[0-2])$/.test(key)) return { code: key, vk: 111 + Number(key.slice(1)) };
+  const upper = key.toUpperCase();
+  if (key.length === 1 && /[A-Z]/.test(upper)) return { code: 'Key' + upper, vk: upper.charCodeAt(0) };
+  if (key.length === 1 && /[0-9]/.test(key)) return { code: 'Digit' + key, vk: key.charCodeAt(0) };
+  return { code: 'Unidentified', vk: 0 };
+}
+
+// A REAL key press. Until A1 every key in this harness was
+// cdp.evaluate(...dispatchEvent(new KeyboardEvent(...))), which the page sees as
+// isTrusted === false — fine for reaching a handler, useless for proving what a
+// keybinding does for a user (and the reason all three shortcut findings,
+// R1-15/R1-16/R1-30, had static analysis as their only witness).
+//
+// Printable characters go down as keyDown WITH `text` — measured in the harness
+// check below: the page receives e.isTrusted === true, e.key === the character,
+// and the character lands in the focused field. Non-printable keys have no text
+// to insert, so they use rawKeyDown (measured clean for ArrowRight: exactly one
+// trusted keydown with e.key="ArrowRight", and the grid's selection advanced).
+//
+// ⚠️ MEASURED HAZARD for U7, which owns the Escape bindings: pressing Escape
+// (windowsVirtualKeyCode/nativeVirtualKeyCode 27, code "Escape") produced a
+// runaway keydown flood here — ~2,000 events within 250ms of ONE press, growing
+// past 88,000, all isTrusted=true with e.key "Escape" then "Unidentified". Both
+// rawKeyDown and keyDown do it, and ArrowRight/ArrowUp with the same shape do
+// not, so it is Escape-specific rather than a parameter-set problem; the cause
+// was not isolated (A1 does not press Escape). Do not drive Escape from a check
+// until that is understood.
+async function pressKey(cdp, key, opts = {}) {
+  const { ctrl = false, meta = false, alt = false, shift = false, text } = opts;
+  const modifiers = (alt ? 1 : 0) | (ctrl ? 2 : 0) | (meta ? 4 : 0) | (shift ? 8 : 0);
+  const { code, vk } = keyDescriptor(key);
+  const base = { key, code, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, modifiers };
+  const printable = key.length === 1;
+  const insert = text ?? key;
+  const unmodified = text ?? (shift ? key.toLowerCase() : key);
+  await cdp.send('Input.dispatchKeyEvent', printable
+    ? { type: 'keyDown', ...base, text: insert, unmodifiedText: unmodified }
+    : { type: 'rawKeyDown', ...base });
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', ...base });
+  return { key, code, vk, modifiers };
+}
+
+// One character at a time through pressKey — deliberately NOT
+// Input.insertText, which drops the whole string into the field as a single
+// blob and produces no keydown per character. The per-character path is the
+// only way to catch a shortcut handler reacting to a keystroke typed INTO a
+// field, which is exactly R1-15: typing "fujifilm" into Search fires the
+// fullscreen toggle on the first 'f'. A blob insert hides that forever.
+async function typeText(cdp, text) {
+  const chars = [...String(text)];
+  for (const ch of chars) await pressKey(cdp, ch, /[A-Z]/.test(ch) ? { shift: true } : {});
+  return { chars: chars.length, text: String(text) };
+}
+
+// A REAL trusted drag: mousePressed -> steps x mouseMoved -> mouseReleased,
+// from the element's hit-tested centre (same discipline as clickEl — a drag
+// that starts on an overlay is a drag on the wrong thing). Before A1 the only
+// mouseMoved in the file was three bare moves inside the info-overlay hover,
+// with no button pressed and no release — so crop/curve/brush/pan had never run
+// as a gesture (the reason R1-12/R1-20/R1-21/R1-34 have no executed witness).
+//
+// `buttons` (not just `button`) is the field that makes e.buttons read 1 in the
+// page: handlers that gate on it — and the panStart-style stuck-drag state of
+// R1-20 — depend on it being right while moving and back to 0 on release.
+async function dragEl(cdp, fromSelector, toX, toY, opts = {}) {
+  const { steps = 8, button = 'left', holdMs = 0 } = opts;
+  const pt = await targetCentre(cdp, fromSelector, 'drag');
+  const buttons = button === 'right' ? 2 : button === 'middle' ? 4 : 1;
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: pt.x, y: pt.y, button, clickCount: 1, buttons });
+  if (holdMs > 0) await sleep(holdMs);
+  for (let i = 1; i <= steps; i++) {
+    await cdp.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x: pt.x + ((toX - pt.x) * i) / steps,
+      y: pt.y + ((toY - pt.y) * i) / steps,
+      button: 'none', buttons,
+    });
+  }
+  await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: toX, y: toY, button, clickCount: 1, buttons: 0 });
+  return { from: { x: pt.x, y: pt.y }, to: { x: toX, y: toY }, steps };
 }
 
 async function printPdf(cdp, { paperWidth = 8.27, paperHeight = 11.69 } = {}) {
@@ -2295,6 +2403,202 @@ async function runChecks(cdp, { fast }) {
     if (over.length) throw new Error(`second Prev moved off sheet 1 (${over.join('; ')}) | expected [${dump(one)}] | observed [${dump(under)}]`);
 
     return `sheets=${sheets} next->${two.label} (${two.ids.length} frames, first num ${two.nums[0]}) frames changed, prev->${back.label} frames+nums restored (first num ${back.nums[0]}, ${back.ids.length} frames), prev-disabled=true, second prev no-op`;
+  });
+
+  // A1: the harness's OWN capability proof — not a feature check, hence group
+  // 'stability'. Its clicks were already trusted, but Input.dispatchKeyEvent
+  // appeared 0 times in this file and mouseMoved only ever fired bare (no
+  // button down, no release), so every key press was an untrusted dispatchEvent
+  // and no drag had ever been driven. That is why the three shortcut findings
+  // (R1-15/R1-16/R1-30) and the four pointer-geometry findings
+  // (R1-12/R1-20/R1-21/R1-34) had static analysis as their only witness.
+  //
+  // Trustedness here is MEASURED, not assumed: the recorder below is installed
+  // from the harness (never from src/ — there is no test seam in src/ and A1
+  // must not add one) as capture-phase listeners on window, and every stage
+  // fails if a single recorded event has isTrusted === false. Without that the
+  // check would only prove "something happened".
+  await check('harness: trusted key, drag and type reach the app as real input', 'stability', async () => {
+    // 600x400 generated JPEGs (1.5:1). Chosen because the loupe box is ~1.6:1
+    // here, so the object-fit:contain letterbox the crop pointer math is
+    // sensitive to stays thin: R1-21 (drawn handle radius uses the WIDTH-only
+    // ratio, the hit test uses min()) is still open, and this check must not
+    // fail for someone else's bug.
+    await resetCatalog([
+      { name: 'TI1.jpg', gen: { bg: '#2e7d32', fg: '#f9a825' } },
+      { name: 'TI2.jpg', gen: { bg: '#37474f', fg: '#ef5350' } },
+    ]);
+    await gotoModule('library');
+    await cdp.evaluate(`(() => {
+      window.__qaTrusted = [];
+      window.__qaTrustedRec = (e) => window.__qaTrusted.push({ type: e.type, isTrusted: e.isTrusted, key: e.key ?? null });
+      for (const t of ['keydown', 'pointerdown', 'pointermove', 'pointerup']) window.addEventListener(t, window.__qaTrustedRec, true);
+      return 'installed';
+    })()`);
+    // Read the recorder, assert nothing in it was untrusted, and drain it so the
+    // next stage counts only its own events (the hit-tested clicks that position
+    // the app are trusted, so they pass through the assertion untouched).
+    const drain = async (what) => {
+      const evs = JSON.parse(await cdp.evaluate('JSON.stringify(window.__qaTrusted || [])'));
+      const bad = evs.filter((e) => e.isTrusted !== true);
+      if (bad.length) throw new Error(`${what}: ${bad.length} UNTRUSTED event(s) recorded (${JSON.stringify(bad.slice(0, 3))}) — the primitive is not driving real input`);
+      await cdp.evaluate('window.__qaTrusted = []');
+      return evs;
+    };
+    const readRating = (fileId) => cdp.evaluate(`new Promise(res => { const q = indexedDB.open('candela-catalog');
+      q.onsuccess = () => { const db = q.result; const g = db.transaction('files','readonly').objectStore('files').get(${fileId});
+        g.onsuccess = () => { db.close(); res(g.result ? (g.result.rating ?? null) : null); }; g.onerror = () => { db.close(); res('ERR'); }; };
+      q.onerror = () => res('ERR-OPEN'); })`);
+    const readCropOp = (fileId) => cdp.evaluate(`new Promise(res => { const q = indexedDB.open('candela-catalog');
+      q.onsuccess = () => { const db = q.result; const g = db.transaction('edits','readonly').objectStore('edits').get(${fileId});
+        g.onsuccess = () => { db.close(); const row = g.result;
+          const ops = (row && row.history && row.history[row.cursor]) || [];
+          const c = ops.find(o => o && o.kind === 'crop');
+          res(c ? { aspect: c.aspect, x: c.x ?? null, y: c.y ?? null, w: c.w ?? null, h: c.h ?? null } : null); };
+        g.onerror = () => { db.close(); res('ERR'); }; };
+      q.onerror = () => res('ERR-OPEN'); })`);
+
+    // -- (a) pressKey: one trusted keydown, and the app actually reacted. Key
+    // '4' = keyToAction's { type:'rate', rating:4 }, the same binding the
+    // "cull: rating survives a reload" check drives with dispatchEvent. Its
+    // observable is the files row, read from IndexedDB like that check does —
+    // non-destructive (a rating is overwritten by the next check's resetCatalog)
+    // and not reachable by any side effect of the click that selected the cell.
+    const cellId = await cdp.evaluate(`document.querySelector('.catalog-cell').dataset.fileId`);
+    if (!cellId) throw new Error('no catalog cell to select — stage (a) is unexercised');
+    await clickEl(cdp, '.catalog-cell');
+    await sleep(400);
+    await pressKey(cdp, '4');
+    await sleep(1200);
+    const rated = await drain('pressKey');
+    const rateDowns = rated.filter((e) => e.type === 'keydown');
+    if (rateDowns.length !== 1) throw new Error(`pressKey('4') recorded ${rateDowns.length} keydown(s), expected exactly 1`);
+    if (rateDowns[0].key !== '4') throw new Error(`pressKey('4') arrived as e.key=${JSON.stringify(rateDowns[0].key)}, expected "4"`);
+    const rating = await readRating(cellId);
+    if (rating !== 4) throw new Error(`trusted keydown '4' reached the page but the app did not rate the photo: files[${cellId}].rating=${JSON.stringify(rating)}, expected 4`);
+
+    // -- (b) typeText: the field receives the string AND every character shows
+    // up as its own keydown (Input.insertText would satisfy the value and hide
+    // all six). "warmth" is picked character by character against the bindings
+    // that fire regardless of focus: EXCLUDED are 'f' and F11 (the document-level
+    // handler at the "---- fullscreen mode ----" block calls requestFullscreen on
+    // a bare 'f' with no editable-target guard — that is R1-15 itself, unfixed
+    // until U7, so an 'f' here would toggle fullscreen mid-type), 'z' and '\\'
+    // (the window handlers that drive zoom and Before/After, also unguarded for
+    // focus), every key keyToAction maps (g/e/s/p/x/u/b, digits 0-9, arrows,
+    // Delete, Ctrl+Z/C/V) — inert while focus is in the input, but bound if the
+    // focus ever slips — and Escape (clears the error banner). The six remaining
+    // letters w/a/r/m/t/h are bound to nothing anywhere in the app.
+    const TYPED = 'warmth';
+    await clickEl(cdp, '#search-input');
+    await sleep(300);
+    await typeText(cdp, TYPED);
+    await sleep(400);
+    const typed = await drain('typeText');
+    const typedDowns = typed.filter((e) => e.type === 'keydown');
+    const gotKeys = typedDowns.map((e) => e.key).join('');
+    const value = await cdp.evaluate(`document.querySelector('#search-input').value`);
+    if (value !== TYPED) throw new Error(`typeText(${JSON.stringify(TYPED)}) left #search-input.value=${JSON.stringify(value)}`);
+    if (gotKeys !== TYPED) throw new Error(`expected ${TYPED.length} trusted keydowns ${JSON.stringify([...TYPED])}, page saw ${JSON.stringify(gotKeys)}`);
+    // CLEANUP: the search term is live filter state — clear it the way the app
+    // does, or the Develop filmstrip in stage (c) opens a filtered grid.
+    await cdp.evaluate(`(() => { const s = document.querySelector('#search-input');
+      s.value = ''; s.dispatchEvent(new Event('input', { bubbles: true })); return 1; })()`);
+    await sleep(400);
+
+    // -- (c) dragEl: a real press/move/release through the crop overlay's
+    // pointer-capture path (cropOverlay.setPointerCapture in the pointerdown
+    // handler), with the app's own commit on release as the observable.
+    //
+    // DELIBERATELY COARSE — DO NOT TIGHTEN HERE. R1-12 (wheel/dblclick/pan feed
+    // box coords to imagePointUnderCursor) and R1-21 (dispScale is width-only,
+    // so the drawn handle radius is wrong for a letterboxed image) are both
+    // still unfixed, so asserting exact crop geometry would fail for someone
+    // else's bug. **U10 must come back and tighten this to exact geometry (the
+    // frame's post-drag rect vs the pointer delta) once the letterbox math is
+    // fixed.** A1 only proves the gesture is drivable and trusted.
+    await gotoModule('develop');
+    await clickEl(cdp, '.filmstrip-cell');
+    await waitFor(cdp, `document.querySelector('#canvas').width > 300 ? true : false`, { timeout: 60000 });
+    await sleep(1500);
+    const fileId = await cdp.evaluate(`document.querySelector('.filmstrip-cell').dataset.fileId`);
+    await clickEl(cdp, '#crop-toggle');
+    await waitFor(cdp, `document.querySelector('#crop-overlay') && !document.querySelector('#crop-overlay').hidden ? true : false`, { timeout: 15000 });
+    await sleep(800);
+    // Inset the frame first: with the default full-image frame,
+    // dragCropRect('move') clamps the centre to itself and nothing changes, so
+    // the drag would have no observable. A 1:1 preset makes the frame 400x400 in
+    // a 600x400 buffer — it can move, and it commits a crop op of its own, which
+    // is why the assertion below compares against the PRE-DRAG values instead of
+    // "a crop op appeared" (that would already be true and prove nothing).
+    // This is setup, not the thing under proof, so an untrusted change event is
+    // fine — the recorder watches key and pointer events only.
+    await cdp.evaluate(`(() => { const s = document.querySelector('#crop-aspect');
+      s.value = '1:1'; s.dispatchEvent(new Event('change', { bubbles: true })); return s.value; })()`);
+    await sleep(1500);
+    const before = await readCropOp(fileId);
+    if (!before || before.aspect !== '1:1') throw new Error(`the 1:1 preset did not land in the edits store: ${JSON.stringify(before)}`);
+    // Measure what the app actually drew, off the overlay's own alpha runs (same
+    // technique as the crop check), and convert buffer -> CSS with the letterbox
+    // math the pointer path uses. Reported in the detail line: the frame, the
+    // grab radius in buffer AND CSS px, the nw handle's CSS centre, and the hit
+    // test at that point.
+    const geo = JSON.parse(await cdp.evaluate(`JSON.stringify((() => {
+      const ov = document.querySelector('#crop-overlay');
+      const rect = document.querySelector('#canvas').getBoundingClientRect();
+      const W = ov.width, H = ov.height;
+      if (!W || !H) return null;
+      const scale = Math.min(rect.width / W, rect.height / H);
+      const offX = (rect.width - W * scale) / 2, offY = (rect.height - H * scale) / 2;
+      const dispScale = rect.width > 0 ? rect.width / W : 1;
+      const hs = Math.max(8, 12 / dispScale);
+      const d = ov.getContext('2d').getImageData(0, 0, W, H).data;
+      const A = (x, y) => (x >= 0 && y >= 0 && x < W && y < H) ? d[((y * W + x) * 4) + 3] : -1;
+      let x0 = -1, x1 = -1, y0 = -1, y1 = -1;
+      for (let x = 0; x < W; x++) if (A(x, Math.round(H / 2)) > 150) { if (x0 < 0) x0 = x; x1 = x; }
+      for (let y = 0; y < H; y++) if (A(Math.round(W / 2), y) > 150) { if (y0 < 0) y0 = y; y1 = y; }
+      const toCss = (bx, by) => ({ x: Math.round(rect.left + offX + bx * scale), y: Math.round(rect.top + offY + by * scale) });
+      const nw = toCss(x0, y0);
+      const probe = document.elementFromPoint(nw.x, nw.y);
+      return { W, H, box: [Math.round(rect.width), Math.round(rect.height)], boxAspect: +(rect.width / rect.height).toFixed(3),
+        imgAspect: +(W / H).toFixed(3), scale: +scale.toFixed(4), dispScale: +dispScale.toFixed(4),
+        frame: [x0, y0, x1 - x0, y1 - y0], hs: +hs.toFixed(2), hsCss: +(hs * scale).toFixed(1), nw,
+        centre: toCss(W / 2, H / 2), hitAtNw: probe ? (probe.id || probe.className || probe.tagName) : null };
+    })())`));
+    if (!geo) throw new Error('crop overlay has no buffer size — the drag target is unexercised');
+    // The drag starts at the overlay's hit-tested centre, which dragEl resolves
+    // exactly like clickEl does — and that point is the frame's INTERIOR, so the
+    // app's pointerdown resolves cropHandleAt -> 'move'. A RESIZE needs a press
+    // within hs of an edge instead. Measured here (reported in the detail line):
+    // the drawn nw corner does hit-test to #crop-overlay at its CSS centre, so
+    // the corner is reachable BY COORDINATES — what stops this check from using
+    // it is dragEl's specified start point (the element centre), not the hit
+    // test. U10/U11 need a point-taking drag variant to pin corner resize.
+    const DRAG_DX = 120;
+    const drag = await dragEl(cdp, '#crop-overlay', geo.centre.x + DRAG_DX, geo.centre.y, { steps: 8 });
+    await sleep(1800);
+    const moved = await drain('dragEl');
+    const kinds = ['pointerdown', 'pointermove', 'pointerup'].map((k) => `${k}=${moved.filter((e) => e.type === k).length}`).join(' ');
+    if (!moved.some((e) => e.type === 'pointerdown')) throw new Error(`dragEl produced no trusted pointerdown (${kinds})`);
+    if (!moved.some((e) => e.type === 'pointermove')) throw new Error(`dragEl produced no trusted pointermove (${kinds})`);
+    if (!moved.some((e) => e.type === 'pointerup')) throw new Error(`dragEl produced no trusted pointerup (${kinds})`);
+    const after = await readCropOp(fileId);
+    const beforeX = before.x ?? 0.5;
+    if (!after || typeof after.x !== 'number' || !(after.x > beforeX)) {
+      throw new Error(`the crop frame did not follow the drag rightwards: before=${JSON.stringify(before)} after=${JSON.stringify(after)} drag=${JSON.stringify(drag)} geo=${JSON.stringify(geo)}`);
+    }
+    // CLEANUP: leave crop mode off (the crop check's comment explains why a
+    // workbench left open starves later checks) and unhook the recorder — its
+    // listeners must not outlive this check.
+    await cdp.evaluate(`(() => { document.querySelector('#crop-toggle')?.click(); return 1; })()`);
+    await waitFor(cdp, `document.querySelector('#crop-overlay')?.hidden !== false ? true : false`, { timeout: 10000 });
+    await cdp.evaluate(`(() => {
+      for (const t of ['keydown', 'pointerdown', 'pointermove', 'pointerup']) window.removeEventListener(t, window.__qaTrustedRec, true);
+      delete window.__qaTrustedRec;
+      delete window.__qaTrusted;
+      return 1;
+    })()`);
+    return `key '4' trusted -> files.rating=4; typed ${JSON.stringify(TYPED)} into #search-input as ${typedDowns.length} trusted keydowns (value=${JSON.stringify(value)}); drag ${drag.from.x},${drag.from.y}->${drag.to.x},${drag.to.y} (${drag.steps} moves, ${kinds}) -> crop x ${beforeX} -> ${after.x.toFixed(4)} (y ${after.y}); geo frame=${JSON.stringify(geo.frame)} box=${JSON.stringify(geo.box)} imgAspect=${geo.imgAspect} boxAspect=${geo.boxAspect} hs=${geo.hs}buffer/${geo.hsCss}css nw=${JSON.stringify(geo.nw)} hit=${geo.hitAtNw}; 0 untrusted events`;
   });
 }
 

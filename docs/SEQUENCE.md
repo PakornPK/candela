@@ -3,8 +3,8 @@
 **ไฟล์นี้คือ state ของ loop** — อ่านมันก่อนทุก tick และอัปเดต `[x]` + บรรทัด "ตำแหน่งปัจจุบัน" ทันทีที่งานหนึ่งขั้นจบ
 เอกสารอ้างอิง: `docs/adr/0001-layered-architecture.md` (Accepted) · `docs/superpowers/plans/2026-09-27-main-ts-hardening-plan.md` (rev.2) · `docs/reviews/2026-09-27-main-ts-review.md` (42 findings)
 
-**ตำแหน่งปัจจุบัน:** A1 (QA trusted input: pressKey/dragEl/typeText) — ยังไม่เริ่ม
-**commit ล่าสุดที่ push แล้ว:** `97ec626` (docs) · `f396568` (X2 = R1-14 error banner · QA 29/29) · `cd0405d` (X1 = R1-3 XSS · QA 28/28) · `87902be`, `9538ef9` (docs) — X3 = R1-18 ปิดแล้วต่อจาก commit นี้ (QA 30/30) *· ใส่ hash ของ X3 ตอนเริ่ม tick A1 ตาม convention ข้างล่าง*
+**ตำแหน่งปัจจุบัน:** A0′ (scaffold domain/adapters + architecture.test.ts) — ยังไม่เริ่ม
+**commit ล่าสุดที่ push แล้ว:** `16e9807` (X3 = R1-18 contact sheet Prev · QA 30/30) · ก่อนหน้า `97ec626`, `f396568` (X2 = R1-14), `cd0405d` (X1 = R1-3), `87902be`, `9538ef9` — **exception trio จบ · findings ปิด 3/42 (Critical 3/20)** · *A1 commit แล้วในเครื่อง (QA 31/31) — hash ของ A1 จดโดย tick ถัดไปตาม convention ข้างล่าง*
 *(convention: อัปเดตสองบรรทัดนี้ตอน**เริ่ม** tick ถัดไป ไม่ใช่ท้าย tick เดียวกัน — commit เขียน hash ของตัวเองไม่ได้)*
 
 ---
@@ -32,6 +32,8 @@
 | X1 (R1-3) | `secondMonitor.ts:88` มี `document.write` (template ไม่มี interpolation จึงไม่อันตรายวันนี้) แต่ static pin ของ X1 ครอบเฉพาะ `src/main.ts` | **M10** | ตอนย้าย `secondMonitor.ts` เข้า `adapters/dom/` ให้ขยาย static pin ครอบทั้ง `src/` ไม่ใช่แค่ entry |
 | X1 (R1-3) | `backup.ts` restore row ตรง ๆ โดยไม่ validate shape ต่อ field (เป็นอีกครึ่งของ R1-3 และโยงกับ R1-27) | **U3 / M5** | ตามแผนเดิม |
 | X2 (R1-14) | static pin (a) ของ QA check เป็นของชั่วคราว — มันสแกนข้อความในไฟล์ ไม่ใช่พฤติกรรม | **U2** | ต้องแทนด้วย unit test จริงบน `app/errorBanner.ts` ที่ extract แล้ว |
+| A1 (QA trusted input) | check `harness: trusted key, drag and type reach the app as real input` **ไม่ assert crop geometry ตรง ๆ** — assert แค่ "มี trusted `pointerdown` + `pointermove` ≥1 + `pointerup`" กับ "crop op ใน `edits` เปลี่ยนตามทิศที่ลาก" (x 0.5 → 0.6071) และลากจาก**จุดกึ่งกลาง** `#crop-overlay` (mode `move`) ไม่ใช่ handle มุม เพราะ `dragEl` ตามสเปกให้ start point = center ของ element เท่านั้น (วัดแล้ว: nw handle อยู่ CSS (397,57), hit-test = `crop-overlay` → มุม**ลากได้**ถ้า drag รับพิกัด) | **U10** (geometry) · **U11** (corner/edge resize) | R1-12 + R1-21 ยังไม่แก้ — assert เลขเป๊ะจะแดงด้วยบั๊กของคนอื่น · U10 ปิด letterbox math แล้วกลับมา tightening เป็น "frame หลังลาก == pointer delta จริง" และเพิ่ม variant ของ `dragEl` ที่รับพิกัด เพื่อเป็น witness ของ resize จริง |
+| A1 (QA trusted input) | `Input.dispatchKeyEvent` ที่กด **Escape** ทิ้ง keydown flood ไว้ในเพจ: ~2,000 events ภายใน 250ms จากการกดครั้งเดียว โตเกิน 88,000, ทุกตัว `isTrusted=true`, `e.key` เป็น `"Escape"` แล้วตามด้วย `"Unidentified"` จำนวนมาก · เกิดทั้งแบบ `rawKeyDown` และ `keyDown` بينما ArrowRight/ArrowUp รูปแบบเดียวกันสะอาด (1 event) →เป็นเรื่องเฉพาะ Escape ยังไม่ได้หาสาเหตุ | **U7** | U7 เป็นเจ้าของ shortcut ซึ่งต้องมี Escape (R1-16/R1-30) — ต้องเข้าใจ flood นี้ก่อน drive Escape จาก check ไม่งั้นการนับ event ในเทสต์เชื่อถือไม่ได้ · check ของ A1 ไม่กด Escape จึงไม่โดน |
 
 ---
 
@@ -47,7 +49,8 @@ Class C ทั้งหมด ทำก่อน M-series เพราะไม�
 
 ## ขั้นที่ 1 — มูลฐาน
 
-- [ ] **A1** QA trusted input ใน `scripts/qa-loop.mjs`: `pressKey` (`Input.dispatchKeyEvent` rawKeyDown/char/keyUp), `dragEl` (`mousePressed` → N×`mouseMoved` → `mouseReleased`, hit-test ก่อนกดแบบ `clickEl`), `typeText` + check พิสูจน์ 1 ตัวที่ลาก crop overlay จริง · zero dependency ใหม่ · **ไม่แตะ `src/`**
+- [x] **A1** QA trusted input ใน `scripts/qa-loop.mjs`: `pressKey` (`Input.dispatchKeyEvent` rawKeyDown/char/keyUp), `dragEl` (`mousePressed` → N×`mouseMoved` → `mouseReleased`, hit-test ก่อนกดแบบ `clickEl`), `typeText` + check พิสูจน์ 1 ตัวที่ลาก crop overlay จริง · zero dependency ใหม่ · **ไม่แตะ `src/`**
+      *(helpers ทั้งสามอยู่ถัดจาก `clickEl`: `pressKey(cdp, key, {ctrl,meta,alt,shift,text})` · `typeText(cdp, text)` ทีละตัวอักษร (จงใจไม่ใช้ `Input.insertText`) · `dragEl(cdp, fromSelector, toX, toY, {steps=8,button='left',holdMs=0})` — `clickEl` ถูก extract ใช้ helper รวม `targetCentre()` (พฤติกรรม/ข้อความ error เดิมทุกตัวอักษร, check เดิมผ่านครบ 30/30) · check: `harness: trusted key, drag and type reach the app as real input` (group `stability`, วางต่อจาก check ของ X3) ลาก `#crop-overlay` ผ่าน pointer-capture จริง และวัด `isTrusted` ด้วย capture-phase listener ที่ติดตั้งจาก harness · QA 31/31 · unit 790 เท่าเดิม · ไม่มี "แดงก่อน" เพราะ A1 เป็น capability proof ไม่ใช่ bug fix — ใช้ **negative control** แทน: สลับ `pressKey` กลับไป `dispatchEvent` → check แดงที่ `pressKey: 1 UNTRUSTED event(s) recorded` · check ยัง **coarse โดยเจตนา** ดูบันทึกค้าง-row ของ A1 ด้านล่าง)*
 - [ ] **A0′** สร้าง `src/domain/`, `src/domain/ports/`, `src/adapters/` + `src/architecture.test.ts` (fitness function 5 ข้อตาม ADR §5) — เขียนให้**แดง**ก่อน แล้วค่อยเขียวเมื่อชั้นแรกย้ายเข้า
       *(หมายเหตุ: A0 เดิมในแผน rev.2 บอกให้เขียน ADR + ทำ U1 เป็น reference — ADR เขียนเสร็จแล้ว และ Option A เลื่อน U1 ไปหลัง M-series จึงเหลือแค่ scaffold + fitness test)*
 
