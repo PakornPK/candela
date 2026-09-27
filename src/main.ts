@@ -2882,13 +2882,23 @@ async function init(): Promise<void> {
       const matchingFiles = querySmartCollection(allFiles, smart.criteria);
       const row = document.createElement('div');
       row.className = 'collection-row' + (activeSmartCollectionId === smart.id ? ' active' : '');
-      row.innerHTML = `
-
-        <span class="collection-name">${smart.name}</span>
-        <span class="collection-count">${matchingFiles.length}</span>
-        <button class="collection-edit" title="Edit criteria">&#9998;</button>
-        <button class="collection-delete" title="Delete smart collection">×</button>
-      `;
+      // DOM-built, never innerHTML: a smart name is user data, and this row is
+      // repainted at boot from whatever the catalog (or a restored backup) holds.
+      const name = document.createElement('span');
+      name.className = 'collection-name';
+      name.textContent = smart.name;
+      const count = document.createElement('span');
+      count.className = 'collection-count';
+      count.textContent = String(matchingFiles.length);
+      const editBtn = document.createElement('button');
+      editBtn.className = 'collection-edit';
+      editBtn.textContent = '✎';
+      editBtn.title = 'Edit criteria';
+      const delBtn = document.createElement('button');
+      delBtn.className = 'collection-delete';
+      delBtn.textContent = '×';
+      delBtn.title = 'Delete smart collection';
+      row.append(name, count, editBtn, delBtn);
       // The rule itself, so a row is readable without opening the dialog.
       row.title = `Matches ${describeCriteria(smart.criteria)}`;
       row.addEventListener('click', (e) => {
@@ -4501,9 +4511,14 @@ async function init(): Promise<void> {
       const file = allFiles.find(f => f.id === currentFileId);
       if (file) {
         const meta = lastDecoded.cameraMeta;
-        let info = `<strong>${file.name}</strong><br>`;
+        // DOM-built, never innerHTML: the filename and the EXIF make/model come
+        // from whatever file is open, so neither may be parsed as markup.
+        infoOverlay.textContent = '';
+        const nameEl = document.createElement('strong');
+        nameEl.textContent = file.name;
+        infoOverlay.append(nameEl, document.createElement('br'));
         if (lastDecoded.make || lastDecoded.model) {
-          info += `${lastDecoded.make} ${lastDecoded.model}<br>`;
+          infoOverlay.append(`${lastDecoded.make} ${lastDecoded.model}`, document.createElement('br'));
         }
         const exifParts = [];
         if (meta?.iso) exifParts.push(`ISO ${meta.iso}`);
@@ -4518,10 +4533,9 @@ async function init(): Promise<void> {
         if (meta?.aperture) exifParts.push(`f/${meta.aperture}`);
         if (meta?.focal) exifParts.push(`${meta.focal}mm`);
         if (exifParts.length > 0) {
-          info += exifParts.join(' · ');
+          infoOverlay.append(exifParts.join(' · '));
         }
 
-        infoOverlay.innerHTML = info;
         infoOverlay.style.opacity = '1';
         
         if (infoOverlayTimeout) {

@@ -16,7 +16,7 @@
 // starts `npm run dev` itself when nothing is listening (killing it on exit).
 
 import { spawn } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import zlib from 'node:zlib';
@@ -1985,6 +1985,120 @@ async function runChecks(cdp, { fast }) {
     const scoped = await cdp.evaluate('document.querySelectorAll(".catalog-cell").length');
     if (scoped !== 3) throw new Error(`smart-from-selection scoped to ${scoped} cells, expected exactly 3 (rule must stay bounded to its fileIds)`);
     return `dialog scope='${pre.scope}' label="${pre.scopeLabel.trim()}" preview="${pre.preview.slice(0,40)}" saved row="${row.slice(0,40)}" grid scoped 20->${scoped}`;
+  });
+
+  // C25 (R1-3): strings the user did not type into this session's DOM must reach
+  // the page as TEXT. Both innerHTML assignment sites in src/main.ts interpolated
+  // attacker-influenced data: renderSmartCollections took smart.name (free text
+  // from #smart-name, stored verbatim and restored verbatim from a catalog
+  // backup), and the loupe info overlay took file.name plus the EXIF make/model.
+  // Script running in this origin reaches the IndexedDB catalog and the
+  // FileSystemFileHandles holding mode:'readwrite' directory grants, so "no
+  // exception thrown" is not the assertion -- these read the executed global.
+  // Every sub-assertion is collected rather than thrown eagerly so one red run
+  // names every open hole, not just the first.
+  await check('security: untrusted strings render as text, never as HTML', 'security', async () => {
+    const PAYLOAD = '<img src=x onerror="window.__pwned=1">';
+    // The importer keeps only names ending in a raw/image extension
+    // (catalog/import.ts:isSupportedFile), so the payload has to wear a .jpg.
+    const HOSTILE_FILE = '<img src=x onerror="window.__pwned=2">.jpg';
+    const fails = [];
+    const readSmartRow = async () => JSON.parse(await cdp.evaluate(`(() => {
+      const cell = document.querySelector('#smart-collection-list .collection-name');
+      return JSON.stringify({
+        pwned: window.__pwned === undefined ? null : String(window.__pwned),
+        text: cell ? cell.textContent : null,
+        imgs: document.querySelectorAll('.collection-name img').length,
+      });
+    })()`));
+    // The row lives in #smart-collection-list because the Quick Collection tray
+    // puts its own .collection-name in the sibling list at boot.
+    const expectSmartRow = (where, r) => {
+      if (r.pwned !== null) fails.push(`${where}: the name executed as script (window.__pwned=${r.pwned})`);
+      if (r.text !== PAYLOAD) fails.push(`${where}: .collection-name textContent=${JSON.stringify(r.text)}, expected the payload verbatim as text (0 chars rendered would fail too)`);
+      if (r.imgs !== 0) fails.push(`${where}: ${r.imgs} <img> built inside .collection-name from the name string`);
+    };
+    await resetCatalog([
+      { name: HOSTILE_FILE, gen: { bg: '#c0392b', fg: '#2980b9' } },
+      { name: 'SEC2.jpg', gen: { bg: '#27ae60', fg: '#8e44ad' } },
+    ]);
+    await gotoModule('library');
+
+    // -- vector 1: a smart-collection name, typed through the real dialog.
+    // A rule with no conditions is refused on save (main.ts:6219), so select one
+    // photo first -- the same route C24 uses.
+    await cdp.evaluate(`(() => { const c = document.querySelector('.catalog-cell');
+      c.dispatchEvent(new MouseEvent('click', { bubbles: true })); return 1; })()`);
+    await sleep(400);
+    await clickEl(cdp, '#add-smart-collection');
+    await waitFor(cdp, `document.querySelector('#smart-dialog').open ? true : false`, { timeout: 8000 });
+    await cdp.evaluate(`(() => { const n = document.querySelector('#smart-name');
+      n.value = ${JSON.stringify(PAYLOAD)};
+      n.dispatchEvent(new Event('input', { bubbles: true })); return 1; })()`);
+    await cdp.evaluate('window.__pwned = undefined');
+    await cdp.evaluate(`document.querySelector('#smart-save').click()`);
+    await waitFor(cdp, `document.querySelector('#smart-dialog').open === false ? true : false`, { timeout: 10000 });
+    await sleep(700);
+    expectSmartRow('smart name (live render)', await readSmartRow());
+
+    // -- vector 2: the loupe info overlay. Open the hostile-named photo in
+    // Develop, then hover inside the top-left 150x150px the handler watches
+    // (main.ts:4495). The overlay is #info-overlay (main.ts:4474 sets that id on
+    // the div appended to canvas.parentElement); opacity '1' is the proof that
+    // this run really painted it, so a selector that found some other node, or a
+    // hover that landed outside the hot zone, fails loudly instead of passing.
+    const hostile = await cdp.evaluate(`(() => { const c = [...document.querySelectorAll('.catalog-cell')]
+      .find(x => (x.title || '').includes('onerror'));
+      return c ? c.dataset.fileId : null; })()`);
+    if (!hostile) throw new Error('no catalog cell carries the hostile filename — vector 2 is unexercised');
+    await cdp.evaluate(`document.querySelector('.catalog-cell[data-file-id="${hostile}"]').dispatchEvent(new MouseEvent('click', { bubbles: true }))`);
+    await sleep(400);
+    await cdp.evaluate(`document.querySelector('.catalog-cell[data-file-id="${hostile}"]').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))`);
+    await waitFor(cdp, `document.querySelector('#canvas').width > 300 ? true : false`, { timeout: 60000 });
+    const hot = JSON.parse(await cdp.evaluate(`(() => { const r = document.querySelector('#canvas').getBoundingClientRect();
+      return JSON.stringify({ x: Math.round(r.left + 10), y: Math.round(r.top + 10) }); })()`));
+    await cdp.evaluate('window.__pwned = undefined');
+    // The handler arms a 3s fade-out, so read back right after the moves.
+    for (const dy of [0, 3, 6]) {
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: hot.x, y: hot.y + dy });
+      await sleep(120);
+    }
+    const ov = JSON.parse(await cdp.evaluate(`(() => { const o = document.querySelector('#info-overlay');
+      return JSON.stringify({
+        present: !!o, opacity: o ? o.style.opacity : null,
+        pwned: window.__pwned === undefined ? null : String(window.__pwned),
+        text: o ? o.textContent : null,
+      });
+    })()`));
+    if (!ov.present || ov.opacity !== '1') {
+      throw new Error(`info overlay did not paint on hover (present=${ov.present} opacity=${ov.opacity}) — vector 2 is unexercised`);
+    }
+    if (ov.pwned !== null) fails.push(`info overlay: the filename executed as script (window.__pwned=${ov.pwned})`);
+    if (!String(ov.text).includes(HOSTILE_FILE)) {
+      fails.push(`info overlay: textContent=${JSON.stringify(ov.text)}, expected the filename verbatim as text`);
+    }
+
+    // -- vector 1 again after a reload: renderSmartCollections() runs at boot
+    // (main.ts:6598) over the restored row, which is what makes a hostile catalog
+    // backup re-execute on every load. This is the one that matters most.
+    await cdp.send('Page.reload', { ignoreCache: false });
+    await sleep(3000);
+    await waitFor(cdp, `document.querySelector('#smart-collection-list .collection-name') ? true : false`, { timeout: 20000 });
+    await sleep(500);
+    expectSmartRow('smart name (after reload, from the restored row)', await readSmartRow());
+
+    // -- static pin: the overlay needs a decoded photo plus a hover, so the
+    // sweep that no HTML sink assignment survives at all is what keeps vector 2
+    // from regressing quietly if the hover ever stops being drivable.
+    const mainPath = join(process.cwd(), 'src', 'main.ts');
+    const mainSrc = readFileSync(mainPath, 'utf8');
+    const sinks = [...mainSrc.matchAll(/\.innerHTML\s*=|\.outerHTML\s*=|insertAdjacentHTML\(|document\.write\(/g)]
+      .map((m) => ({ line: mainSrc.slice(0, m.index).split('\n').length, text: mainSrc.split('\n')[mainSrc.slice(0, m.index).split('\n').length - 1].trim() }));
+    if (sinks.length) {
+      fails.push(`${sinks.length} HTML-sink assignment(s) remain in src/main.ts: ` + sinks.map((s) => `:${s.line} ${s.text}`).join(' · '));
+    }
+    if (fails.length) throw new Error(fails.join('; '));
+    return `smart name "${PAYLOAD.slice(0, 24)}…" rendered as text both live and after reload (imgs=0, __pwned undefined); overlay "${String(ov.text).slice(0, 28)}…" painted on hover (opacity=${ov.opacity}, __pwned undefined); 0 HTML-sink assignments in src/main.ts`;
   });
 }
 
