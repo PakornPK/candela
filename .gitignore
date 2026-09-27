@@ -11,6 +11,7 @@ light_frames/
 .hermes/
 .agents/
 .vscode/
+.qwen/
 
 dogfood-output/
 qa-report.json
